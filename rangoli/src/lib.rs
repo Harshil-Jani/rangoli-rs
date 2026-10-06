@@ -204,7 +204,11 @@ impl App {
     /// Starts with the built-in user and session models (users appear in the admin).
     pub fn new() -> Self {
         use orm::Model;
-        App { models: vec![auth::User::meta(), auth::Session::meta()], admin: vec![auth::User::meta()], routes: Router::new() }
+        App {
+            models: vec![auth::User::meta(), auth::Session::meta(), admin::LogEntry::meta()],
+            admin: vec![auth::User::meta()],
+            routes: Router::new(),
+        }
     }
 
     /// Track a model in migrations.

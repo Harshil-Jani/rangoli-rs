@@ -1,9 +1,40 @@
 {% extends "base.html" %}
+{% block bodyclass %}dashboard{% endblock %}
+{% block breadcrumbs %}{% endblock %}
+{% block shifted %}{% endblock %}
+{% block sidebar %}{% endblock %}
+{% block coltype %}colMS{% endblock %}
 {% block content %}
-<h1>Site administration</h1>
-<ul class="cards">
-  {% for m in models %}
-  <li class="card"><a class="card-title" href="/admin/{{ m.table }}/">{{ m.plural }}</a><a class="btn small ghost" href="/admin/{{ m.table }}/add">Add</a></li>
+<div id="content-main">
+  {% for a in apps %}
+  <div class="module">
+    <table>
+      <caption><span class="section">{{ a.name }}</span></caption>
+      <thead class="visually-hidden"><tr><th scope="col">Model name</th><th scope="col">Add link</th><th scope="col">Change or view list link</th></tr></thead>
+      {% for m in a.models %}
+      <tr>
+        <th scope="row"><a href="/admin/{{ m.table }}/">{{ m.plural }}</a></th>
+        <td><a href="/admin/{{ m.table }}/add" class="addlink">Add</a></td>
+        <td><a href="/admin/{{ m.table }}/" class="changelink">Change</a></td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
   {% endfor %}
-</ul>
+</div>
+<div id="content-related">
+  <div class="module" id="recent-actions-module">
+    <h2>Recent actions</h2>
+    <h3>My actions</h3>
+    {% if recent %}
+    <ul class="actionlist">
+      {% for r in recent %}
+      <li class="{{ r.class }}">{% if r.url %}<a href="{{ r.url }}">{{ r.repr }}</a>{% else %}{{ r.repr }}{% endif %}<br><span class="mini quiet">{{ r.model }}</span></li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p>None available</p>
+    {% endif %}
+  </div>
+</div>
 {% endblock %}

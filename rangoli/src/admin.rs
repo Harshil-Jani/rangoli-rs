@@ -1,12 +1,13 @@
-//! The admin: generated from model metadata, server-rendered, HTMX-enhanced.
-//! Works without JavaScript; with it, `hx-boost` turns navigation into
-//! partial swaps and search filters live.
+//! The admin, modeled on Django's: generated from model metadata, server-rendered,
+//! HTMX-enhanced. Works without JavaScript; with it, `hx-boost` turns navigation
+//! into partial swaps and search filters live.
 
 // Handlers short-circuit with ready-made responses; boxing them buys nothing here.
 #![allow(clippy::result_large_err)]
 
-use crate::auth::{self, CurrentUser};
-use crate::orm::{self, by_id, like_escape, FieldMeta, FieldType, ModelMeta, Node, Query, Value};
+use crate::auth::{self, CurrentUser, User};
+use crate::migrate::utc_human;
+use crate::orm::{self, by_id, like_escape, FieldMeta, FieldType, Model, ModelMeta, Node, Query, Value};
 use crate::Error;
 use axum::extract::{Form, Path, Query as UrlQuery, State};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
@@ -14,11 +15,33 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use minijinja::{context, Environment};
-use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-const PAGE_SIZE: u64 = 50;
+const PAGE_SIZE: u64 = 100;
+
+/// One admin action, like Django's `LogEntry`. Powers "Recent actions" and History.
+#[derive(rangoli_macros::Model, Clone, Debug)]
+#[model(table = "rangoli_admin_log")]
+pub struct LogEntry {
+    pub id: Option<i64>,
+    /// Plain id, not a foreign key: history outlives deleted users.
+    pub user_id: i64,
+    #[field(max_length = 100)]
+    pub table_name: String,
+    pub object_id: i64,
+    #[field(max_length = 200)]
+    pub object_repr: String,
+    /// 1 added, 2 changed, 3 deleted.
+    pub action: i64,
+    #[field(text)]
+    pub message: String,
+    pub at: i64,
+}
+
+const ADDITION: i64 = 1;
+const CHANGE: i64 = 2;
+const DELETION: i64 = 3;
 
 struct Site {
     admin: Vec<&'static ModelMeta>,
@@ -28,16 +51,20 @@ struct Site {
 
 type S = State<Arc<Site>>;
 type Pairs = Vec<(String, String)>;
+type Page = Result<Response, Response>;
 
 pub fn router(admin: Vec<&'static ModelMeta>, models: Vec<&'static ModelMeta>) -> Router {
     let mut env = Environment::new();
     for (name, src) in [
         ("base.html", include_str!("admin/templates/base.html")),
         ("login.html", include_str!("admin/templates/login.html")),
+        ("logged_out.html", include_str!("admin/templates/logged_out.html")),
         ("index.html", include_str!("admin/templates/index.html")),
         ("list.html", include_str!("admin/templates/list.html")),
         ("form.html", include_str!("admin/templates/form.html")),
         ("delete.html", include_str!("admin/templates/delete.html")),
+        ("history.html", include_str!("admin/templates/history.html")),
+        ("password_change.html", include_str!("admin/templates/password_change.html")),
     ] {
         env.add_template(name, src).expect("admin template");
     }
@@ -46,18 +73,17 @@ pub fn router(admin: Vec<&'static ModelMeta>, models: Vec<&'static ModelMeta>) -
         .route("/admin/", get(index))
         .route("/admin/login", get(login_page).post(login_submit))
         .route("/admin/logout", post(logout))
+        .route("/admin/password_change/", get(password_page).post(password_submit))
         .route("/admin/static/{file}", get(static_file))
         .route("/admin/{table}/", get(list).post(bulk))
         .route("/admin/{table}/add", get(add_page).post(add_submit))
         .route("/admin/{table}/{id}/", get(change_page).post(change_submit))
         .route("/admin/{table}/{id}/delete", get(delete_page).post(delete_submit))
+        .route("/admin/{table}/{id}/history", get(history))
         .with_state(Arc::new(Site { admin, models, env }))
 }
 
 // ---------------------------------------------------------------- helpers
-
-/// Early-return a ready response from a handler.
-type Page = Result<Response, Response>;
 
 fn fail(e: Error) -> Response {
     e.into_response()
@@ -71,7 +97,7 @@ fn render(site: &Site, name: &str, ctx: minijinja::Value) -> Page {
     Ok(Html(html).into_response())
 }
 
-fn staff<'a>(user: &'a CurrentUser, uri: &Uri) -> Result<&'a auth::User, Response> {
+fn staff<'a>(user: &'a CurrentUser, uri: &Uri) -> Result<&'a User, Response> {
     match &user.0 {
         Some(u) if u.is_staff => Ok(u),
         _ => {
@@ -93,16 +119,53 @@ fn plural(name: &str) -> String {
     }
 }
 
-fn label(field: &str) -> String {
-    let s = field.strip_suffix("_id").unwrap_or(field).replace('_', " ");
+fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
+fn label(field: &str) -> String {
+    capitalize(&field.strip_suffix("_id").unwrap_or(field).replace('_', " "))
+}
+
+/// Django groups models by app; here the app is the table prefix (`blog_post` is in `Blog`).
+fn app_of(table: &str) -> String {
+    if table.starts_with("rangoli_") {
+        return "Authentication and Authorization".into();
+    }
+    capitalize(table.split_once('_').map_or(table, |(app, _)| app))
+}
+
+/// Apps and their models, in registration order, for the index and the sidebar.
+fn apps(site: &Site, current: Option<&str>) -> Vec<minijinja::Value> {
+    let mut groups: Vec<(String, Vec<minijinja::Value>)> = vec![];
+    for m in &site.admin {
+        let app = app_of(m.table);
+        let entry = context! { table => m.table, plural => plural(m.name), current => current == Some(m.table) };
+        match groups.iter_mut().find(|(a, _)| *a == app) {
+            Some((_, models)) => models.push(entry),
+            None => groups.push((app, vec![entry])),
+        }
+    }
+    groups.into_iter().map(|(name, models)| context! { name, models }).collect()
+}
+
+/// Context every logged-in page shares: header, sidebar, current model.
+fn chrome(site: &Site, u: &User, current: Option<&'static ModelMeta>) -> minijinja::Value {
+    context! {
+        username => u.username,
+        apps => apps(site, current.map(|m| m.table)),
+        app => current.map(|m| app_of(m.table)),
+        table => current.map(|m| m.table),
+        name => current.map(|m| m.name.to_lowercase()),
+        plural => current.map(|m| plural(m.name)),
+    }
 }
 
 fn display(v: &Value, f: &FieldMeta) -> String {
     match v {
         Value::Null => "-".into(),
-        Value::Bool(b) => (if *b { "Yes" } else { "No" }).into(),
+        Value::Bool(b) => (if *b { "True" } else { "False" }).into(),
         Value::Int(i) => i.to_string(),
         Value::Float(x) => x.to_string(),
         Value::Text(s) if f.ty == FieldType::Text && s.chars().count() > 80 => s.chars().take(80).chain("…".chars()).collect(),
@@ -114,40 +177,66 @@ fn param<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
     pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
 
-/// Label for one row: its `display` field, else `Name #id`.
-async fn object_label(meta: &'static ModelMeta, id: i64) -> Result<String, Response> {
-    let mut q = Query::new(meta);
-    q.filter.push(by_id(id));
-    let (_, vals) = q.rows().await.map_err(fail)?.pop().ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
-    Ok(meta
-        .display
+/// Row label from already-fetched values: the `display` field, else `Name object (id)` like Django.
+fn repr(meta: &ModelMeta, id: i64, vals: &[Value]) -> String {
+    meta.display
         .and_then(|d| meta.fields.iter().position(|f| f.name == d))
         .map(|i| display(&vals[i], &meta.fields[i]))
-        .unwrap_or_else(|| format!("{} #{id}", meta.name)))
+        .unwrap_or_else(|| format!("{} object ({id})", meta.name))
 }
 
-#[derive(Serialize)]
-struct Crumb {
-    label: String,
-    url: Option<String>,
+async fn fetch_row(meta: &'static ModelMeta, id: i64) -> Result<Vec<Value>, Response> {
+    let mut q = Query::new(meta);
+    q.filter.push(by_id(id));
+    Ok(q.rows().await.map_err(fail)?.pop().ok_or_else(|| StatusCode::NOT_FOUND.into_response())?.1)
 }
 
-fn crumbs(meta: &ModelMeta, last: Option<&str>) -> Vec<Crumb> {
-    let mut v = vec![Crumb { label: plural(meta.name), url: last.map(|_| format!("/admin/{}/", meta.table)) }];
-    if let Some(l) = last {
-        v.push(Crumb { label: l.into(), url: None });
-    }
-    v
-}
-
-fn flash(code: Option<&str>) -> Option<minijinja::Value> {
-    let (kind, text) = match code? {
-        "saved" => ("ok", "Saved."),
-        "deleted" => ("ok", "Deleted."),
-        "protected" => ("error", "Some rows were not deleted because other records still reference them."),
-        _ => return None,
+async fn log(u: &User, meta: &ModelMeta, object_id: i64, object_repr: &str, action: i64, message: String) -> Result<i64, Response> {
+    let mut e = LogEntry {
+        id: None,
+        user_id: u.id.unwrap_or_default(),
+        table_name: meta.table.into(),
+        object_id,
+        object_repr: object_repr.chars().take(200).collect(),
+        action,
+        message,
+        at: auth::now(),
     };
-    Some(context! { kind, text })
+    e.save().await.map_err(fail)?;
+    Ok(e.id.unwrap())
+}
+
+/// The success message for `?log=<id>`, worded for the page it lands on.
+async fn message(p: &[(String, String)], u: &User, landing: &str) -> Option<minijinja::Value> {
+    if let Some(n) = param(p, "deleted").and_then(|n| n.parse::<u64>().ok()) {
+        let what = param(p, "what").unwrap_or("items");
+        return Some(context! { level => "success", text => format!("Successfully deleted {n} {what}.") });
+    }
+    match param(p, "warn") {
+        Some("noitems") => {
+            return Some(
+                context! { level => "warning", text => "Items must be selected in order to perform actions on them. No items have been changed." },
+            )
+        }
+        Some("noaction") => return Some(context! { level => "warning", text => "No action selected." }),
+        _ => {}
+    }
+    let e = LogEntry::get(param(p, "log")?.parse().ok()?).await.ok().filter(|e| Some(e.user_id) == u.id)?;
+    let name = e.table_name.split_once('_').map_or(e.table_name.as_str(), |(_, m)| m).replace('_', " ");
+    let (verb, url) = match e.action {
+        ADDITION => ("added", Some(format!("/admin/{}/{}/", e.table_name, e.object_id))),
+        CHANGE => ("changed", Some(format!("/admin/{}/{}/", e.table_name, e.object_id))),
+        _ => ("deleted", None),
+    };
+    let tail = match landing {
+        "change" => " You may edit it again below.".to_string(),
+        "add" => format!(" You may add another {name} below."),
+        _ => String::new(),
+    };
+    Some(context! {
+        level => "success", prefix => format!("The {name} “"), repr => e.object_repr, url,
+        suffix => format!("” was {verb} successfully.{tail}"),
+    })
 }
 
 // ---------------------------------------------------------------- auth pages
@@ -173,7 +262,9 @@ async fn login_submit(State(site): S, Form(f): Form<Pairs>) -> Response {
             Ok(cookie) => return ([(header::SET_COOKIE, cookie)], Redirect::to(next)).into_response(),
             Err(e) => return fail(e),
         },
-        Ok(_) => "Please enter the correct username and password for a staff account. Both fields may be case-sensitive.".to_string(),
+        Ok(_) => {
+            "Please enter the correct username and password for a staff account. Note that both fields may be case-sensitive.".to_string()
+        }
         Err(Error::Locked) => Error::Locked.to_string(),
         Err(e) => return fail(e),
     };
@@ -181,30 +272,89 @@ async fn login_submit(State(site): S, Form(f): Form<Pairs>) -> Response {
     (StatusCode::UNAUTHORIZED, page.unwrap_or_else(|e| e)).into_response()
 }
 
-async fn logout(headers: HeaderMap) -> Response {
+async fn logout(State(site): S, headers: HeaderMap) -> Response {
     let cookie = headers.get(header::COOKIE).and_then(|v| v.to_str().ok());
     match auth::logout(cookie).await {
-        Ok(clear) => ([(header::SET_COOKIE, clear)], Redirect::to("/admin/login")).into_response(),
+        Ok(clear) => {
+            ([(header::SET_COOKIE, clear)], render(&site, "logged_out.html", context! { title => "Logged out" }).unwrap_or_else(|e| e))
+                .into_response()
+        }
         Err(e) => fail(e),
     }
+}
+
+async fn password_page(State(site): S, user: CurrentUser, uri: Uri) -> Page {
+    let u = staff(&user, &uri)?;
+    render(&site, "password_change.html", context! { title => "Password change", ..chrome(&site, u, None) })
+}
+
+async fn password_submit(State(site): S, user: CurrentUser, uri: Uri, Form(f): Form<Pairs>) -> Page {
+    let u = staff(&user, &uri)?;
+    let (old, new1, new2) =
+        (param(&f, "old_password").unwrap_or(""), param(&f, "new_password1").unwrap_or(""), param(&f, "new_password2").unwrap_or(""));
+    let mut errors: HashMap<&str, &str> = HashMap::new();
+    if !auth::verify_password(old, &u.password).await {
+        errors.insert("old_password", "Your old password was entered incorrectly. Please enter it again.");
+    }
+    if new1.chars().count() < 8 {
+        errors.insert("new_password1", "This password is too short. It must contain at least 8 characters.");
+    } else if new1 != new2 {
+        errors.insert("new_password2", "The two password fields didn’t match.");
+    }
+    if !errors.is_empty() {
+        let page = render(&site, "password_change.html", context! { title => "Password change", errors, ..chrome(&site, u, None) })?;
+        return Ok((StatusCode::UNPROCESSABLE_ENTITY, page).into_response());
+    }
+    let mut changed = u.clone();
+    changed.password = auth::hash_password(new1).await;
+    changed.save().await.map_err(fail)?;
+    render(&site, "password_change.html", context! { title => "Password change successful", done => true, ..chrome(&site, u, None) })
 }
 
 async fn static_file(Path(file): Path<String>) -> Response {
     let (body, ty): (&'static [u8], &str) = match file.as_str() {
         "admin.css" => (include_bytes!("admin/static/admin.css"), "text/css; charset=utf-8"),
+        "admin.js" => (include_bytes!("admin/static/admin.js"), "text/javascript; charset=utf-8"),
         "htmx.min.js" => (include_bytes!("admin/static/htmx.min.js"), "text/javascript; charset=utf-8"),
+        "icon-yes.svg" => (include_bytes!("admin/static/icon-yes.svg"), "image/svg+xml"),
+        "icon-no.svg" => (include_bytes!("admin/static/icon-no.svg"), "image/svg+xml"),
+        "icon-addlink.svg" => (include_bytes!("admin/static/icon-addlink.svg"), "image/svg+xml"),
+        "icon-changelink.svg" => (include_bytes!("admin/static/icon-changelink.svg"), "image/svg+xml"),
+        "icon-deletelink.svg" => (include_bytes!("admin/static/icon-deletelink.svg"), "image/svg+xml"),
+        "search.svg" => (include_bytes!("admin/static/search.svg"), "image/svg+xml"),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     ([(header::CONTENT_TYPE, ty), (header::CACHE_CONTROL, "public, max-age=3600")], body).into_response()
 }
 
-// ---------------------------------------------------------------- index & list
+// ---------------------------------------------------------------- index
 
 async fn index(State(site): S, user: CurrentUser, uri: Uri) -> Page {
     let u = staff(&user, &uri)?;
-    let models: Vec<_> = site.admin.iter().map(|m| context! { table => m.table, plural => plural(m.name) }).collect();
-    render(&site, "index.html", context! { title => "Site administration", username => u.username, models })
+    let entries = LogEntry::objects()
+        .filter(LogEntry::USER_ID.eq(u.id.unwrap_or_default()))
+        .order_by(LogEntry::ID.desc())
+        .limit(10)
+        .all()
+        .await
+        .map_err(fail)?;
+    let recent: Vec<_> = entries
+        .iter()
+        .map(|e| {
+            let meta = site.models.iter().find(|m| m.table == e.table_name);
+            let linkable = e.action != DELETION && site.admin.iter().any(|m| m.table == e.table_name);
+            context! {
+                class => match e.action { ADDITION => "addlink", CHANGE => "changelink", _ => "deletelink" },
+                repr => e.object_repr,
+                url => linkable.then(|| format!("/admin/{}/{}/", e.table_name, e.object_id)),
+                model => meta.map_or(e.table_name.clone(), |m| m.name.to_string()),
+            }
+        })
+        .collect();
+    render(&site, "index.html", context! { title => "Site administration", recent, ..chrome(&site, u, None) })
 }
+
+// ---------------------------------------------------------------- changelist
 
 async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>, UrlQuery(p): UrlQuery<Pairs>) -> Page {
     let u = staff(&user, &uri)?;
@@ -220,8 +370,14 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
     // Only real, visible columns can be sorted on: the name comes from metadata, never from the URL.
     let order_field: &'static str = meta.field(oname).filter(|f| !f.password).map_or("id", |f| f.name);
 
-    let shown: Vec<(usize, &FieldMeta)> =
-        meta.fields.iter().enumerate().filter(|(_, f)| !f.password && f.ty != FieldType::Text).take(6).collect();
+    // Columns: the display field first (Django's `__str__` column), then the rest.
+    let mut shown: Vec<(usize, &FieldMeta)> =
+        meta.fields.iter().enumerate().filter(|(_, f)| !f.password && f.ty != FieldType::Text).collect();
+    if let Some(pos) = meta.display.and_then(|d| shown.iter().position(|(_, f)| f.name == d)) {
+        let first = shown.remove(pos);
+        shown.insert(0, first);
+    }
+    shown.truncate(6);
     let searchable: Vec<&'static str> =
         meta.fields.iter().filter(|f| !f.password && matches!(f.ty, FieldType::Varchar(_) | FieldType::Text)).map(|f| f.name).collect();
     let bools: Vec<&'static FieldMeta> = meta.fields.iter().filter(|f| f.ty == FieldType::Bool).collect();
@@ -236,12 +392,16 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
             query.filter.push(Node::Cmp(f.name, "=", Value::Bool(v == "1"), FieldType::Bool));
         }
     }
-    let total = query.count().await.map_err(fail)?;
-    let pages = (total as u64).div_ceil(PAGE_SIZE).max(1);
+    let filtered = !query.filter.is_empty();
+    let count = query.count().await.map_err(fail)?;
+    let full_count = if filtered { Query::new(meta).count().await.map_err(fail)? } else { count };
+    let pages = (count as u64).div_ceil(PAGE_SIZE).max(1);
+    let page = page.min(pages);
     query.order = vec![(order_field, desc)];
     query.limit = Some(PAGE_SIZE);
-    query.offset = Some((page.min(pages) - 1) * PAGE_SIZE);
+    query.offset = Some((page - 1) * PAGE_SIZE);
     let raw_rows = query.rows().await.map_err(fail)?;
+
     // Foreign keys show their target's label: one IN query per FK column, not one per row.
     let mut fk_labels: HashMap<usize, HashMap<i64, String>> = HashMap::new();
     for (i, f) in shown.iter().filter(|(_, f)| f.fk.is_some()) {
@@ -252,34 +412,48 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
         fk_labels.insert(*i, labels(&site, f.fk.unwrap(), ids.collect()).await?);
     }
     let rows: Vec<_> = raw_rows
-        .into_iter()
+        .iter()
         .map(|(id, vals)| {
-            let cells: Vec<String> = shown
+            let mut cells: Vec<minijinja::Value> = shown
                 .iter()
                 .map(|(i, f)| match (&vals[*i], fk_labels.get(i)) {
-                    (Value::Int(fid), Some(names)) => names.get(fid).cloned().unwrap_or_else(|| fid.to_string()),
-                    (v, _) => display(v, f),
+                    (Value::Bool(b), _) => context! { bool => b },
+                    (Value::Int(fid), Some(names)) => context! { text => names.get(fid).cloned().unwrap_or_else(|| fid.to_string()) },
+                    (v, _) => context! { text => display(v, f) },
                 })
                 .collect();
-            context! { id, cells }
+            if cells.is_empty() {
+                cells.push(context! { text => repr(meta, *id, vals) });
+            }
+            context! { id, url => format!("{base}{id}/"), repr => repr(meta, *id, vals), cells }
         })
         .collect();
 
     // Links keep every current parameter except the ones they change.
     let link = |set: &[(&str, &str)]| {
-        let mut pairs: Vec<(String, String)> = p.iter().filter(|(k, _)| k != "p" && !set.iter().any(|(s, _)| s == k)).cloned().collect();
+        let mut pairs: Vec<(String, String)> = p
+            .iter()
+            .filter(|(k, _)| !matches!(k.as_str(), "p" | "log" | "deleted" | "what" | "warn") && !set.iter().any(|(s, _)| s == k))
+            .cloned()
+            .collect();
         pairs.extend(set.iter().filter(|(_, v)| !v.is_empty()).map(|(k, v)| (k.to_string(), v.to_string())));
         match serde_urlencoded::to_string(&pairs).unwrap() {
             qs if qs.is_empty() => base.clone(),
             qs => format!("{base}?{qs}"),
         }
     };
-    let sort = |name: &str| {
-        let active = order_field == name;
-        let next = if active && !desc { format!("-{name}") } else { name.to_string() };
-        context! { url => link(&[("o", &next)]), arrow => if !active { "" } else if desc { " ▼" } else { " ▲" } }
+    let columns: Vec<_> = if shown.is_empty() {
+        vec![context! { label => meta.name.to_uppercase(), url => None::<String>, sorted => None::<&str> }]
+    } else {
+        shown
+            .iter()
+            .map(|(_, f)| {
+                let active = order_field == f.name;
+                let next = if active && !desc { format!("-{}", f.name) } else { f.name.to_string() };
+                context! { label => label(f.name), url => link(&[("o", &next)]), sorted => active.then_some(if desc { "descending" } else { "ascending" }) }
+            })
+            .collect()
     };
-    let columns: Vec<_> = shown.iter().map(|(_, f)| context! { label => label(f.name), ..sort(f.name) }).collect();
     let filters: Vec<_> = bools
         .iter()
         .map(|f| {
@@ -289,39 +463,101 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
                 .iter()
                 .map(|(l, v)| context! { label => l, url => link(&[(&key, v)]), active => current == *v })
                 .collect();
-            context! { label => label(f.name), options => opts }
+            context! { label => label(f.name).to_lowercase(), options => opts }
         })
         .collect();
-    let keep: Vec<(String, String)> = p.iter().filter(|(k, _)| k != "q" && k != "p").cloned().collect();
-    let (prev_url, next_url) =
-        ((page > 1).then(|| link(&[("p", &(page - 1).to_string())])), (page < pages).then(|| link(&[("p", &(page + 1).to_string())])));
+    let keep: Vec<(String, String)> = p.iter().filter(|(k, _)| k.starts_with("f.") || k == "o").cloned().collect();
+    let page_links: Vec<_> = (1..=pages)
+        .filter(|n| *n == 1 || *n == pages || n.abs_diff(page) <= 3)
+        .map(|n| context! { n, url => link(&[("p", &n.to_string())]), current => n == page })
+        .collect();
+    let what = if count == 1 { meta.name.to_lowercase() } else { plural(meta.name).to_lowercase() };
     render(
         &site,
         "list.html",
         context! {
-            title => plural(meta.name), username => u.username, crumbs => crumbs(meta, None), msg => flash(param(&p, "msg")),
-            table, name => meta.name, plural => plural(meta.name), q, keep, total, page => page.min(pages), pages,
-            prev_url, next_url, columns, id_sort => sort("id"), rows, filters, searchable => !searchable.is_empty(),
+            title => format!("Select {} to change", meta.name.to_lowercase()),
+            messages => message(&p, u, "list").await, q, keep, count, full_count, filtered, what, page_links,
+            columns, rows, filters, searchable => !searchable.is_empty(), clear_url => base.clone(),
+            ..chrome(&site, u, Some(meta))
         },
     )
 }
 
-/// Bulk action from the list's checkboxes. Django's "delete selected".
+/// Actions from the changelist. Like Django, deleting asks for confirmation on its own page first.
 async fn bulk(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>, Form(f): Form<Pairs>) -> Page {
-    staff(&user, &uri)?;
+    let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
-    let ids: Vec<Value> = f.iter().filter(|(k, _)| k == "ids").filter_map(|(_, v)| v.parse().ok().map(Value::Int)).collect();
-    let mut msg = "deleted";
-    if param(&f, "action") == Some("delete") && !ids.is_empty() {
-        let mut q = Query::new(meta);
-        q.filter.push(Node::In("id", ids, FieldType::Int));
-        match q.delete().await {
-            Ok(_) => {}
-            Err(e) if e.is_foreign_key_violation() => msg = "protected",
-            Err(e) => return Err(fail(e)),
+    let ids: Vec<i64> = f.iter().filter(|(k, _)| k == "_selected_action").filter_map(|(_, v)| v.parse().ok()).collect();
+    if param(&f, "action").unwrap_or("").is_empty() {
+        return Ok(Redirect::to(&format!("/admin/{table}/?warn=noaction")).into_response());
+    }
+    if ids.is_empty() {
+        return Ok(Redirect::to(&format!("/admin/{table}/?warn=noitems")).into_response());
+    }
+    let mut q = Query::new(meta);
+    q.filter.push(Node::In("id", ids.iter().map(|i| Value::Int(*i)).collect(), FieldType::Int));
+    let rows = q.rows().await.map_err(fail)?;
+    if param(&f, "post") != Some("yes") {
+        let related = related(&site, meta, &ids).await?;
+        let objects: Vec<_> = rows
+            .iter()
+            .map(|(id, v)| context! { model => meta.name, repr => repr(meta, *id, v), url => format!("/admin/{table}/{id}/") })
+            .collect();
+        return render(
+            &site,
+            "delete.html",
+            context! {
+                title => "Are you sure?", bulk => true, objects, protected => related.protected, cascaded => related.cascaded,
+                summary => summary(meta, rows.len(), &related), ids => ids, ..chrome(&site, u, Some(meta))
+            },
+        );
+    }
+    q.delete().await.map_err(fail)?;
+    for (id, vals) in &rows {
+        log(u, meta, *id, &repr(meta, *id, vals), DELETION, String::new()).await?;
+    }
+    let what = if rows.len() == 1 { meta.name.to_lowercase() } else { plural(meta.name).to_lowercase() };
+    let qs = serde_urlencoded::to_string([("deleted", rows.len().to_string()), ("what", what)]).unwrap();
+    Ok(Redirect::to(&format!("/admin/{table}/?{qs}")).into_response())
+}
+
+// ---------------------------------------------------------------- related objects
+
+struct Related {
+    protected: Vec<String>,
+    /// (model name, plural, labels) for rows deleted along with the target.
+    cascaded: Vec<minijinja::Value>,
+    counts: Vec<(String, usize)>,
+}
+
+/// What deleting `ids` of `meta` touches: rows that block it, and rows that cascade with it.
+async fn related(site: &Site, meta: &ModelMeta, ids: &[i64]) -> Result<Related, Response> {
+    let mut out = Related { protected: vec![], cascaded: vec![], counts: vec![] };
+    for m in &site.models {
+        for f in m.fields.iter().filter(|f| f.fk == Some(meta.table)) {
+            let mut q = Query::new(m);
+            q.filter.push(Node::In(f.name, ids.iter().map(|i| Value::Int(*i)).collect(), FieldType::Int));
+            q.limit = Some(50);
+            let rows = q.rows().await.map_err(fail)?;
+            if rows.is_empty() {
+                continue;
+            }
+            let labels: Vec<String> = rows.iter().map(|(id, v)| format!("{}: {}", m.name, repr(m, *id, v))).collect();
+            if !f.cascade {
+                out.protected.extend(labels);
+            } else if site.admin.iter().any(|a| a.table == m.table) {
+                // Framework bookkeeping (sessions) cascades silently, as Django's would.
+                out.counts.push((plural(m.name), rows.len()));
+                out.cascaded.extend(labels.into_iter().map(|l| context! { label => l }));
+            }
         }
     }
-    Ok(Redirect::to(&format!("/admin/{table}/?msg={msg}")).into_response())
+    Ok(out)
+}
+
+fn summary(meta: &ModelMeta, n: usize, r: &Related) -> Vec<String> {
+    std::iter::once(format!("{}: {n}", plural(meta.name))).chain(r.counts.iter().map(|(p, c)| format!("{p}: {c}"))).collect()
 }
 
 // ---------------------------------------------------------------- forms
@@ -367,15 +603,11 @@ async fn label_rows(site: &Site, table: &str, ids: Option<Vec<i64>>) -> Result<V
                 id,
                 match (disp, vals.first()) {
                     (Some(f), Some(v)) => display(v, f),
-                    _ => format!("{} #{id}", target.name),
+                    _ => format!("{} object ({id})", target.name),
                 },
             )
         })
         .collect())
-}
-
-async fn fk_options(site: &Site, table: &str) -> Result<Vec<(String, String)>, Response> {
-    Ok(label_rows(site, table, None).await?.into_iter().map(|(id, l)| (id.to_string(), l)).collect())
 }
 
 async fn labels(site: &Site, table: &str, mut ids: Vec<i64>) -> Result<HashMap<i64, String>, Response> {
@@ -393,8 +625,8 @@ async fn form_fields(
 ) -> Result<Vec<minijinja::Value>, Response> {
     let mut out = vec![];
     for f in meta.fields {
-        let options = match f.fk {
-            Some(t) => fk_options(site, t).await?,
+        let options: Vec<(String, String)> = match f.fk {
+            Some(t) => label_rows(site, t, None).await?.into_iter().map(|(id, l)| (id.to_string(), l)).collect(),
             None => vec![],
         };
         let kind = match (f.fk.is_some(), f.password, f.ty) {
@@ -444,7 +676,9 @@ async fn validate(
                 FieldType::Float => {
                     raw.parse::<f64>().ok().filter(|x| x.is_finite()).map(Value::Float).ok_or("Enter a number.".to_string())
                 }
-                FieldType::Varchar(n) if raw.chars().count() > n as usize => Err(format!("Ensure this value has at most {n} characters.")),
+                FieldType::Varchar(n) if raw.chars().count() > n as usize => {
+                    Err(format!("Ensure this value has at most {n} characters (it has {}).", raw.chars().count()))
+                }
                 FieldType::Text | FieldType::Varchar(_) if f.password => Ok(Value::Text(auth::hash_password(raw).await)),
                 _ => Ok(Value::Text(raw.to_string())),
             }
@@ -467,54 +701,70 @@ fn db_error_message(e: &Error) -> Option<&'static str> {
     if e.is_unique_violation() {
         Some("A record with one of these unique values already exists.")
     } else if e.is_foreign_key_violation() {
-        Some("A selected related record does not exist.")
+        Some("Select a valid choice. That choice is not one of the available choices.")
     } else {
         None
+    }
+}
+
+/// Django's change message: "Changed title and body."
+fn change_message(meta: &ModelMeta, old: &[Value], cols: &[(&'static str, Value, FieldType)]) -> String {
+    let changed: Vec<String> = cols
+        .iter()
+        .filter(|(name, v, _)| meta.fields.iter().position(|f| f.name == *name).is_some_and(|i| meta.fields[i].password || &old[i] != v))
+        .map(|(name, ..)| label(name).to_lowercase())
+        .collect();
+    match changed.as_slice() {
+        [] => "No fields changed.".into(),
+        [one] => format!("Changed {one}."),
+        [init @ .., last] => format!("Changed {} and {last}.", init.join(", ")),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn form_page(
     site: &Site,
-    username: &str,
+    u: &User,
     meta: &'static ModelMeta,
     id: Option<i64>,
     raw: &HashMap<String, String>,
     errors: HashMap<String, String>,
     status: StatusCode,
+    messages: Option<minijinja::Value>,
 ) -> Page {
     let is_add = id.is_none();
     let fields = form_fields(site, meta, raw, &errors, is_add).await?;
     let obj = match id {
-        Some(id) => object_label(meta, id).await?,
-        None => format!("Add {}", meta.name.to_lowercase()),
+        Some(id) => Some(repr(meta, id, &fetch_row(meta, id).await?)),
+        None => None,
     };
-    let heading = if is_add { obj.clone() } else { format!("Change {}", meta.name.to_lowercase()) };
+    let title = if is_add { format!("Add {}", meta.name.to_lowercase()) } else { format!("Change {}", meta.name.to_lowercase()) };
     let page = render(
         site,
         "form.html",
         context! {
-            title => heading.clone(), heading, username, crumbs => crumbs(meta, Some(&obj)), table => meta.table,
-            id, is_add, fields, form_error => errors.get("__all__"),
+            title, obj, id, is_add, fields, messages, form_error => errors.get("__all__"),
+            error_count => errors.len(), ..chrome(site, u, Some(meta))
         },
     )?;
     Ok((status, page).into_response())
 }
 
-fn after_save(table: &str, id: i64, form: &HashMap<String, String>) -> Response {
+fn after_save(table: &str, id: i64, log_id: i64, form: &HashMap<String, String>) -> Response {
     let to = if form.contains_key("_continue") {
-        format!("/admin/{table}/{id}/")
+        format!("/admin/{table}/{id}/?log={log_id}")
     } else if form.contains_key("_addanother") {
-        format!("/admin/{table}/add")
+        format!("/admin/{table}/add?log={log_id}")
     } else {
-        format!("/admin/{table}/?msg=saved")
+        format!("/admin/{table}/?log={log_id}")
     };
     Redirect::to(&to).into_response()
 }
 
-async fn add_page(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>) -> Page {
+async fn add_page(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>, UrlQuery(p): UrlQuery<Pairs>) -> Page {
     let u = staff(&user, &uri)?;
-    form_page(&site, &u.username, model(&site, &table)?, None, &HashMap::new(), HashMap::new(), StatusCode::OK).await
+    let messages = message(&p, u, "add").await;
+    form_page(&site, u, model(&site, &table)?, None, &HashMap::new(), HashMap::new(), StatusCode::OK, messages).await
 }
 
 async fn add_submit(
@@ -528,21 +778,30 @@ async fn add_submit(
     let meta = model(&site, &table)?;
     let errors = match validate(meta, &form, true).await {
         Ok(cols) => match orm::insert_row(meta.table, &cols).await {
-            Ok(id) => return Ok(after_save(&table, id, &form)),
+            Ok(id) => {
+                let vals = fetch_row(meta, id).await?;
+                let log_id = log(u, meta, id, &repr(meta, id, &vals), ADDITION, "Added.".into()).await?;
+                return Ok(after_save(&table, id, log_id, &form));
+            }
             Err(e) => [("__all__".to_string(), db_error_message(&e).ok_or_else(|| fail(e))?.to_string())].into(),
         },
         Err(errors) => errors,
     };
-    form_page(&site, &u.username, meta, None, &form, errors, StatusCode::UNPROCESSABLE_ENTITY).await
+    form_page(&site, u, meta, None, &form, errors, StatusCode::UNPROCESSABLE_ENTITY, None).await
 }
 
-async fn change_page(State(site): S, user: CurrentUser, uri: Uri, Path((table, id)): Path<(String, i64)>) -> Page {
+async fn change_page(
+    State(site): S,
+    user: CurrentUser,
+    uri: Uri,
+    Path((table, id)): Path<(String, i64)>,
+    UrlQuery(p): UrlQuery<Pairs>,
+) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
-    let mut q = Query::new(meta);
-    q.filter.push(by_id(id));
-    let (_, vals) = q.rows().await.map_err(fail)?.pop().ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
-    form_page(&site, &u.username, meta, Some(id), &raw_values(meta, &vals), HashMap::new(), StatusCode::OK).await
+    let vals = fetch_row(meta, id).await?;
+    let messages = message(&p, u, "change").await;
+    form_page(&site, u, meta, Some(id), &raw_values(meta, &vals), HashMap::new(), StatusCode::OK, messages).await
 }
 
 async fn change_submit(
@@ -554,56 +813,85 @@ async fn change_submit(
 ) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
+    let old = fetch_row(meta, id).await?;
     let errors = match validate(meta, &form, false).await {
         Ok(cols) => {
             let mut q = Query::new(meta);
             q.filter.push(by_id(id));
             match q.update(&cols).await {
-                Ok(_) => return Ok(after_save(&table, id, &form)),
+                Ok(_) => {
+                    let msg = change_message(meta, &old, &cols);
+                    let vals = fetch_row(meta, id).await?;
+                    let log_id = log(u, meta, id, &repr(meta, id, &vals), CHANGE, msg).await?;
+                    return Ok(after_save(&table, id, log_id, &form));
+                }
                 Err(e) => [("__all__".to_string(), db_error_message(&e).ok_or_else(|| fail(e))?.to_string())].into(),
             }
         }
         Err(errors) => errors,
     };
-    form_page(&site, &u.username, meta, Some(id), &form, errors, StatusCode::UNPROCESSABLE_ENTITY).await
+    form_page(&site, u, meta, Some(id), &form, errors, StatusCode::UNPROCESSABLE_ENTITY, None).await
 }
+
+// ---------------------------------------------------------------- delete & history
 
 async fn delete_page(State(site): S, user: CurrentUser, uri: Uri, Path((table, id)): Path<(String, i64)>) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
-    let obj = object_label(meta, id).await?;
-    render(
+    let obj = repr(meta, id, &fetch_row(meta, id).await?);
+    let related = related(&site, meta, &[id]).await?;
+    let status = if related.protected.is_empty() { StatusCode::OK } else { StatusCode::CONFLICT };
+    let page = render(
         &site,
         "delete.html",
         context! {
-            title => format!("Delete {obj}"), username => u.username, crumbs => crumbs(meta, Some(&obj)),
-            table, id, obj, name => meta.name.to_lowercase(),
+            title => "Are you sure?", obj, id, objects => vec![context! { model => meta.name, repr => obj.clone(), url => format!("/admin/{table}/{id}/") }],
+            protected => related.protected, cascaded => related.cascaded, summary => summary(meta, 1, &related),
+            ..chrome(&site, u, Some(meta))
         },
-    )
+    )?;
+    Ok((status, page).into_response())
 }
 
 async fn delete_submit(State(site): S, user: CurrentUser, uri: Uri, Path((table, id)): Path<(String, i64)>) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
+    let obj = repr(meta, id, &fetch_row(meta, id).await?);
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
     match q.delete().await {
-        Ok(_) => Ok(Redirect::to(&format!("/admin/{table}/?msg=deleted")).into_response()),
-        Err(e) if e.is_foreign_key_violation() => {
-            let obj = object_label(meta, id).await?;
-            let page = render(
-                &site,
-                "delete.html",
-                context! {
-                    title => format!("Delete {obj}"), username => u.username, crumbs => crumbs(meta, Some(&obj)),
-                    table, id, obj, name => meta.name.to_lowercase(),
-                    error => "This record can't be deleted because other records still reference it.",
-                },
-            )?;
-            Ok((StatusCode::CONFLICT, page).into_response())
+        Ok(_) => {
+            let log_id = log(u, meta, id, &obj, DELETION, String::new()).await?;
+            Ok(Redirect::to(&format!("/admin/{table}/?log={log_id}")).into_response())
         }
+        // The confirmation page already lists what blocks this; show it again.
+        Err(e) if e.is_foreign_key_violation() => delete_page(State(site), user, uri, Path((table, id))).await,
         Err(e) => Err(fail(e)),
     }
+}
+
+async fn history(State(site): S, user: CurrentUser, uri: Uri, Path((table, id)): Path<(String, i64)>) -> Page {
+    let u = staff(&user, &uri)?;
+    let meta = model(&site, &table)?;
+    let obj = repr(meta, id, &fetch_row(meta, id).await?);
+    let entries = LogEntry::objects()
+        .filter(LogEntry::TABLE_NAME.eq(table.as_str()) & LogEntry::OBJECT_ID.eq(id))
+        .order_by(LogEntry::ID.asc())
+        .all()
+        .await
+        .map_err(fail)?;
+    let users = User::in_bulk(entries.iter().map(|e| e.user_id)).await.map_err(fail)?;
+    let rows: Vec<_> = entries
+        .iter()
+        .map(|e| {
+            context! {
+                at => utc_human(e.at as u64),
+                user => users.get(&e.user_id).map_or("(deleted user)".to_string(), |u| u.username.clone()),
+                message => e.message,
+            }
+        })
+        .collect();
+    render(&site, "history.html", context! { title => format!("Change history: {obj}"), obj, id, rows, ..chrome(&site, u, Some(meta)) })
 }
 
 #[cfg(test)]
@@ -618,6 +906,9 @@ mod tests {
         assert_eq!(plural("Post"), "Posts");
         assert_eq!(label("author_id"), "Author");
         assert_eq!(label("is_staff"), "Is staff");
+        assert_eq!(app_of("blog_post"), "Blog");
+        assert_eq!(app_of("rangoli_user"), "Authentication and Authorization");
+        assert_eq!(app_of("things"), "Things");
     }
 
     #[test]
@@ -626,5 +917,26 @@ mod tests {
         assert_eq!(safe_next(Some("https://evil.example")), "/admin/");
         assert_eq!(safe_next(Some("//evil.example/admin/")), "/admin/");
         assert_eq!(safe_next(None), "/admin/");
+    }
+
+    #[test]
+    fn change_messages_read_like_django() {
+        static FIELDS: [FieldMeta; 3] = [
+            FieldMeta { name: "title", ty: FieldType::Text, null: false, unique: false, password: false, fk: None, cascade: false },
+            FieldMeta { name: "body", ty: FieldType::Text, null: false, unique: false, password: false, fk: None, cascade: false },
+            FieldMeta { name: "author_id", ty: FieldType::Int, null: false, unique: false, password: false, fk: None, cascade: false },
+        ];
+        let meta = ModelMeta { name: "Post", table: "blog_post", display: None, fields: &FIELDS };
+        let old = [Value::Text("a".into()), Value::Text("b".into()), Value::Int(1)];
+        let cols = |t: &str, b: &str, a: i64| {
+            vec![
+                ("title", Value::Text(t.into()), FieldType::Text),
+                ("body", Value::Text(b.into()), FieldType::Text),
+                ("author_id", Value::Int(a), FieldType::Int),
+            ]
+        };
+        assert_eq!(change_message(&meta, &old, &cols("a", "b", 1)), "No fields changed.");
+        assert_eq!(change_message(&meta, &old, &cols("x", "b", 1)), "Changed title.");
+        assert_eq!(change_message(&meta, &old, &cols("x", "y", 2)), "Changed title, body and author.");
     }
 }

@@ -36,6 +36,8 @@ pub struct FieldMeta {
     pub password: bool,
     /// Table this column references (always its `id`).
     pub fk: Option<&'static str>,
+    /// `ON DELETE CASCADE` instead of the default, which protects referenced rows.
+    pub cascade: bool,
 }
 
 #[derive(Debug)]

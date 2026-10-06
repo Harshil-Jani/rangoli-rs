@@ -4,25 +4,56 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="htmx-config" content='{"includeIndicatorStyles": false}'>
-<title>{{ title }} · Rangoli admin</title>
+<title>{{ title }} | Rangoli site admin</title>
 <link rel="stylesheet" href="/admin/static/admin.css">
 <script src="/admin/static/htmx.min.js" defer></script>
+<script src="/admin/static/admin.js" defer></script>
 </head>
-<body hx-boost="true">
-<header class="bar">
-  <a class="brand" href="/admin/"><span class="mark" aria-hidden="true"></span>Rangoli <small>admin</small></a>
-  {% if username %}
-  <form method="post" action="/admin/logout" class="who">
-    <span>{{ username }}</span><button class="link">Log out</button>
-  </form>
-  {% endif %}
-</header>
-<main class="wrap">
-  {% if crumbs %}
-  <nav class="crumbs" aria-label="Breadcrumb"><a href="/admin/">Home</a>{% for c in crumbs %} <span aria-hidden="true">/</span> {% if c.url %}<a href="{{ c.url }}">{{ c.label }}</a>{% else %}<span aria-current="page">{{ c.label }}</span>{% endif %}{% endfor %}</nav>
-  {% endif %}
-  {% if msg %}<p class="flash {{ msg.kind }}" role="status">{{ msg.text }}</p>{% endif %}
-  {% block content %}{% endblock %}
-</main>
+<body class="{% block bodyclass %}{% endblock %}" hx-boost="true">
+<a href="#content-start" class="skip-to-content">Skip to main content</a>
+<div id="container">
+  <header id="header">
+    <div id="branding"><div id="site-name"><a href="/admin/">Rangoli administration</a></div></div>
+    {% if username %}
+    <div id="user-tools">
+      Welcome, <strong>{{ username }}</strong>.
+      <a href="/" hx-boost="false">View site</a> /
+      <a href="/admin/password_change/">Change password</a> /
+      <form id="logout-form" method="post" action="/admin/logout"><button type="submit">Log out</button></form>
+    </div>
+    {% endif %}
+  </header>
+  {% block breadcrumbs %}
+  <nav aria-label="Breadcrumbs"><div class="breadcrumbs"><a href="/admin/">Home</a>{% if app %} › {{ app }} › <a href="/admin/{{ table }}/">{{ plural }}</a>{% endif %}{% block crumbs %}{% endblock %}</div></nav>
+  {% endblock %}
+  <div class="main{% block shifted %}{% if username %} shifted{% endif %}{% endblock %}" id="main">
+    {% block sidebar %}{% if username %}
+    <nav id="nav-sidebar" aria-label="Sidebar">
+      {% for a in apps %}
+      <div class="module{% if a.name == app %} current-app{% endif %}">
+        <table>
+          <caption><span class="section">{{ a.name }}</span></caption>
+          {% for m in a.models %}
+          <tr{% if m.current %} class="current-model"{% endif %}>
+            <th scope="row"><a href="/admin/{{ m.table }}/"{% if m.current %} aria-current="page"{% endif %}>{{ m.plural }}</a></th>
+            <td><a href="/admin/{{ m.table }}/add" class="addlink">Add</a></td>
+          </tr>
+          {% endfor %}
+        </table>
+      </div>
+      {% endfor %}
+    </nav>
+    {% endif %}{% endblock %}
+    <main id="content-start" class="content" tabindex="-1">
+      {% if messages %}
+      <ul class="messagelist"><li class="{{ messages.level }}">{% if messages.repr %}{{ messages.prefix }}{% if messages.url %}<a href="{{ messages.url }}">{{ messages.repr }}</a>{% else %}{{ messages.repr }}{% endif %}{{ messages.suffix }}{% else %}{{ messages.text }}{% endif %}</li></ul>
+      {% endif %}
+      <div id="content" class="{% block coltype %}colM{% endblock %}">
+        {% block content_title %}<h1>{{ title }}</h1>{% endblock %}
+        {% block content %}{% endblock %}
+      </div>
+    </main>
+  </div>
+</div>
 </body>
 </html>

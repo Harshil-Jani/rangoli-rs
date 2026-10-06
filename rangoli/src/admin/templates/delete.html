@@ -1,10 +1,26 @@
 {% extends "base.html" %}
+{% block bodyclass %}delete-confirmation{% endblock %}
+{% block crumbs %} › {% if bulk %}Delete multiple objects{% else %}<a href="/admin/{{ table }}/{{ id }}/">{{ obj }}</a> › Delete{% endif %}{% endblock %}
 {% block content %}
-<h1>Delete {{ obj }}?</h1>
-{% if error %}<p class="flash error" role="alert">{{ error }}</p>{% endif %}
-<p>This permanently removes the {{ name }} “{{ obj }}”. This can't be undone.</p>
-<form method="post" class="submit">
-  <button class="btn danger">Yes, delete</button>
-  <a class="btn ghost" href="/admin/{{ table }}/{{ id }}/">Cancel</a>
+{% if protected %}
+<p>Deleting the {% if bulk %}selected {{ plural|lower }}{% else %}{{ name }} “{{ obj }}”{% endif %} would require deleting the following protected related objects:</p>
+<ul>{% for p in protected %}<li>{{ p }}</li>{% endfor %}</ul>
+{% else %}
+<p>{% if bulk %}Are you sure you want to delete the selected {{ plural|lower }}? All of the following objects and their related items will be deleted:{% else %}Are you sure you want to delete the {{ name }} “{{ obj }}”? All of the following related items will be deleted:{% endif %}</p>
+<h2>Summary</h2>
+<ul>{% for s in summary %}<li>{{ s }}</li>{% endfor %}</ul>
+<h2>Objects</h2>
+<ul>
+  {% for o in objects %}<li>{{ o.model }}: <a href="{{ o.url }}">{{ o.repr }}</a></li>{% endfor %}
+  {% if cascaded %}<li>Related<ul>{% for c in cascaded %}<li>{{ c.label }}</li>{% endfor %}</ul></li>{% endif %}
+</ul>
+<form method="post"{% if bulk %} action="/admin/{{ table }}/"{% endif %}>
+  <div>
+    <input type="hidden" name="post" value="yes">
+    {% if bulk %}<input type="hidden" name="action" value="delete_selected">{% for i in ids %}<input type="hidden" name="_selected_action" value="{{ i }}">{% endfor %}{% endif %}
+    <input type="submit" value="Yes, I’m sure">
+    <a href="{% if bulk %}/admin/{{ table }}/{% else %}/admin/{{ table }}/{{ id }}/{% endif %}" class="button cancel-link">No, take me back</a>
+  </div>
 </form>
+{% endif %}
 {% endblock %}

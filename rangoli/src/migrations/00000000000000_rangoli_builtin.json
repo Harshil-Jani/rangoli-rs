@@ -1,0 +1,24 @@
+{
+  "operations": [
+    {
+      "op": "create_table",
+      "table": "rangoli_user",
+      "columns": [
+        { "name": "username", "type": { "varchar": 150 }, "unique": true },
+        { "name": "password", "type": { "varchar": 255 } },
+        { "name": "is_active", "type": "bool" },
+        { "name": "is_staff", "type": "bool" },
+        { "name": "is_superuser", "type": "bool" }
+      ]
+    },
+    {
+      "op": "create_table",
+      "table": "rangoli_session",
+      "columns": [
+        { "name": "key", "type": { "varchar": 64 }, "unique": true },
+        { "name": "user_id", "type": "int", "null": true, "fk": "rangoli_user", "cascade": true },
+        { "name": "expires_at", "type": "int" }
+      ]
+    }
+  ]
+}

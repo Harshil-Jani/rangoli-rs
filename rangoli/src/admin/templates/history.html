@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block crumbs %} › <a href="/admin/{{ table }}/{{ id }}/">{{ obj }}</a> › History{% endblock %}
+{% block content %}
+<div id="content-main">
+  <div class="module">
+    {% if rows %}
+    <table id="change-history">
+      <thead><tr><th scope="col">Date/time</th><th scope="col">User</th><th scope="col">Action</th></tr></thead>
+      <tbody>{% for r in rows %}<tr><th scope="row">{{ r.at }}</th><td>{{ r.user }}</td><td>{{ r.message }}</td></tr>{% endfor %}</tbody>
+    </table>
+    {% else %}
+    <p>This object doesn’t have a change history. It probably wasn’t added via this admin site.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

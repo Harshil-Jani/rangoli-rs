@@ -103,20 +103,21 @@ let authors = Author::in_bulk(posts.iter().map(|p| p.author_id)).await?; // one 
 
 ## The admin
 
-Registering a model with `.admin::<M>()` gives you:
+Modeled on Django's admin, page for page: the blue header, breadcrumbs, the app-grouped index with Recent actions, the nav sidebar, and the same wording. Registering a model with `.admin::<M>()` gives you:
 
-- a list view with sortable columns, live search over text fields, Yes/No filters for booleans, pagination, and bulk delete
-- add and change forms with validation (required, max length, numbers), foreign keys shown as selects, and unique or foreign-key violations reported on the form
-- delete confirmation, with protection when other rows still reference the object
-- user management. Password fields are never displayed; leave one blank to keep the current password
-- login and logout for staff only, with safe `next` redirects
-- light and dark themes, and a mobile layout
+- **Changelist**: "Select post to change", sortable columns, search with result counts (live as you type), boolean filters, pagination, an **Action** menu with "0 of N selected", and Django's confirmation page before a bulk delete
+- **Change form**: labels on the left, `Please correct the error below.`, foreign keys as selects, unique and foreign-key violations reported on the form, and the Save / Save and add another / Save and continue editing / Delete row
+- **Delete confirmation** that lists the protected related objects blocking the delete, or the related rows that cascade with it
+- **History** for every object and **Recent actions** on the index, recorded in an admin log (Django's `LogEntry`), with change messages like "Changed title and body."
+- Success messages like 'The post "X" was added successfully.'
+- user management (password hashes are never shown; leave the field blank to keep the current password), **change password**, login and logout for staff only
+- square edges throughout, light and dark themes, and a mobile layout
 
 ## Databases
 
 Postgres, MySQL and SQLite share one code path through sqlx's `Any` driver. Only the SQL spelling differs per dialect. CI runs the same end-to-end test on all three.
 
-Field types for now: `i64`, `f64`, `bool`, `String` (`VARCHAR`, or `TEXT` with `#[field(text)]`), each optionally wrapped in `Option` for a nullable column. Field attributes: `max_length`, `text`, `unique`, `password`, `fk = Model`.
+Field types for now: `i64`, `f64`, `bool`, `String` (`VARCHAR`, or `TEXT` with `#[field(text)]`), each optionally wrapped in `Option` for a nullable column. Field attributes: `max_length`, `text`, `unique`, `password`, `fk = Model`, and `cascade` (`ON DELETE CASCADE`; foreign keys protect referenced rows by default).
 
 ## Migrations
 
@@ -137,7 +138,7 @@ This is the roadmap, in rough order. Nothing here is implemented yet:
 1. **Transactions** (`atomic`) for user code
 2. **More field types**: datetime, date, decimal, uuid, json; defaults, indexes, choices
 3. **Relations**: many-to-many, reverse accessors, `select_related`-style joins
-4. **Admin customization**: `list_display`, `search_fields`, read-only fields, inlines, custom actions, per-model permissions, history log
+4. **Admin customization**: `list_display`, `search_fields`, read-only fields, inlines, custom actions, per-model permissions, groups
 5. **Forms and templates for your own views** (typed forms, minijinja integration, Django 6.0-style template partials)
 6. **REST API layer** (what DRF does)
 7. **Background tasks with a real worker** (Django 6.0 ships the task interface but no worker)

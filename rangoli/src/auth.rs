@@ -34,7 +34,7 @@ pub struct Session {
     pub id: Option<i64>,
     #[field(max_length = 64, unique)]
     pub key: String,
-    #[field(fk = User)]
+    #[field(fk = User, cascade)]
     pub user_id: Option<i64>,
     pub expires_at: i64,
 }

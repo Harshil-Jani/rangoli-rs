@@ -26,6 +26,8 @@ pub struct Column {
     pub unique: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fk: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cascade: bool,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -74,7 +76,10 @@ pub struct Migration {
 pub type State = BTreeMap<String, Vec<Column>>;
 
 pub fn columns_of(meta: &ModelMeta) -> Vec<Column> {
-    meta.fields.iter().map(|f| Column { name: f.name.into(), ty: f.ty, null: f.null, unique: f.unique, fk: f.fk.map(Into::into) }).collect()
+    meta.fields
+        .iter()
+        .map(|f| Column { name: f.name.into(), ty: f.ty, null: f.null, unique: f.unique, fk: f.fk.map(Into::into), cascade: f.cascade })
+        .collect()
 }
 
 pub fn model_state(models: &[&'static ModelMeta]) -> State {
@@ -157,14 +162,16 @@ fn zero(ty: FieldType) -> Value {
 
 // ---------------------------------------------------------------- files
 
-/// Framework tables (users, sessions) ship as a built-in migration that sorts first.
+/// Framework tables ship as built-in migrations that sort first. They are frozen
+/// JSON, like any shipped migration: change the schema with a new file, never an edit.
 pub fn builtin() -> Vec<Migration> {
-    use crate::orm::Model;
-    let operations = [crate::auth::User::meta(), crate::auth::Session::meta()]
-        .iter()
-        .map(|m| Op::CreateTable { table: m.table.into(), columns: columns_of(m) })
-        .collect();
-    vec![Migration { name: "00000000000000_rangoli_builtin".into(), operations }]
+    [
+        ("00000000000000_rangoli_builtin", include_str!("migrations/00000000000000_rangoli_builtin.json")),
+        ("00000000000001_rangoli_admin_log", include_str!("migrations/00000000000001_rangoli_admin_log.json")),
+    ]
+    .into_iter()
+    .map(|(name, json)| Migration { name: name.into(), ..serde_json::from_str(json).expect("built-in migration") })
+    .collect()
 }
 
 /// Built-in migrations followed by `dir/*.json` in name order.
@@ -237,8 +244,20 @@ pub fn make(dir: &Path, models: &[&'static ModelMeta], name: Option<&str>) -> Re
     Ok(Some(path))
 }
 
-/// `YYYYMMDDHHMMSS` in UTC (Howard Hinnant's civil-from-days).
+/// `YYYYMMDDHHMMSS` in UTC.
 pub fn utc_stamp(secs: u64) -> String {
+    let (y, m, d, h, mi, s) = civil(secs);
+    format!("{y:04}{m:02}{d:02}{h:02}{mi:02}{s:02}")
+}
+
+/// `YYYY-MM-DD HH:MM UTC`, for people.
+pub fn utc_human(secs: u64) -> String {
+    let (y, m, d, h, mi, _) = civil(secs);
+    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02} UTC")
+}
+
+/// UTC calendar fields (Howard Hinnant's civil-from-days).
+fn civil(secs: u64) -> (i64, i64, i64, u64, u64, u64) {
     let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
     let z = days + 719_468;
     let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
@@ -248,7 +267,7 @@ pub fn utc_stamp(secs: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}{m:02}{d:02}{:02}{:02}{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
+    (y, m, d, rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
 // ---------------------------------------------------------------- SQL
@@ -298,8 +317,16 @@ fn col_def(d: Dialect, c: &Column, default: Option<&Value>) -> String {
     s
 }
 
+fn on_delete(c: &Column) -> &'static str {
+    if c.cascade {
+        " ON DELETE CASCADE"
+    } else {
+        ""
+    }
+}
+
 fn fk_clause(d: Dialect, c: &Column) -> Option<String> {
-    c.fk.as_ref().map(|t| format!("FOREIGN KEY ({}) REFERENCES {} ({})", d.quote(&c.name), d.quote(t), d.quote("id")))
+    c.fk.as_ref().map(|t| format!("FOREIGN KEY ({}) REFERENCES {} ({}){}", d.quote(&c.name), d.quote(t), d.quote("id"), on_delete(c)))
 }
 
 fn create_table(d: Dialect, table: &str, cols: &[Column], defaults: &BTreeMap<&str, &Value>) -> String {
@@ -350,7 +377,7 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
                 _ => {
                     let mut sql = format!("ALTER TABLE {} ADD COLUMN {}", q(table), col_def(d, column, default.as_ref()));
                     match (d, &column.fk) {
-                        (Dialect::Sqlite, Some(t)) => sql.push_str(&format!(" REFERENCES {} ({})", q(t), q("id"))),
+                        (Dialect::Sqlite, Some(t)) => sql.push_str(&format!(" REFERENCES {} ({}){}", q(t), q("id"), on_delete(column))),
                         (_, Some(_)) => sql.push_str(&format!(", ADD {}", fk_clause(d, column).unwrap())),
                         _ => {}
                     }
@@ -373,7 +400,7 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
         },
         Op::AlterColumn { table, column } => {
             let old = state[table].iter().find(|c| c.name == column.name).unwrap();
-            if d != Dialect::Sqlite && (old.unique != column.unique || old.fk != column.fk) {
+            if d != Dialect::Sqlite && (old.unique != column.unique || old.fk != column.fk || old.cascade != column.cascade) {
                 return Err(Error::Migration(format!(
                     "changing unique/foreign key on `{table}.{}` is not automated yet; add an `sql` operation",
                     column.name
@@ -475,7 +502,14 @@ mod tests {
     use super::*;
 
     fn col(name: &str, ty: FieldType) -> Column {
-        Column { name: name.into(), ty, null: false, unique: false, fk: None }
+        Column { name: name.into(), ty, null: false, unique: false, fk: None, cascade: false }
+    }
+
+    #[test]
+    fn builtin_migrations_match_framework_models() {
+        use crate::orm::Model;
+        let models = [crate::auth::User::meta(), crate::auth::Session::meta(), crate::admin::LogEntry::meta()];
+        assert_eq!(replay(&builtin()).unwrap(), model_state(&models), "add a new built-in migration file for this change");
     }
 
     #[test]
@@ -483,6 +517,7 @@ mod tests {
         assert_eq!(utc_stamp(0), "19700101000000");
         assert_eq!(utc_stamp(1_700_000_000), "20231114221320");
         assert_eq!(utc_stamp(951_782_400), "20000229000000"); // leap day
+        assert_eq!(utc_human(1_700_000_000), "2023-11-14 22:13 UTC");
     }
 
     #[test]

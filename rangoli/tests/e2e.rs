@@ -52,7 +52,7 @@ fn post(title: &str, author: &Author, published: bool, rating: Option<f64>) -> P
 }
 
 async fn reset(db: &orm::Db) {
-    for t in ["blog_post", "rangoli_session", "blog_author", "rangoli_user", "rangoli_migrations"] {
+    for t in ["blog_post", "rangoli_session", "rangoli_admin_log", "blog_author", "rangoli_user", "rangoli_migrations"] {
         let sql = format!("DROP TABLE IF EXISTS {}", db.dialect.quote(t));
         sqlx::query(&sql).execute(&db.pool).await.unwrap();
     }
@@ -78,7 +78,7 @@ async fn full_stack() {
     let db = orm::connect(&url).await.unwrap();
     reset(db).await;
     let applied = migrate::run(&migrations).await.unwrap();
-    assert_eq!(applied.len(), 2, "builtin + app: {applied:?}");
+    assert_eq!(applied.len(), 3, "two built-in + app: {applied:?}");
     assert!(migrate::run(&migrations).await.unwrap().is_empty());
 
     // ---- ORM
@@ -188,49 +188,98 @@ async fn full_stack() {
 
     let (status, _, body) = send(get("/admin/", &cookie)).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("Authors") && body.contains("PostV2s") && body.contains("Users"));
+    assert!(body.contains("Rangoli administration") && body.contains("Welcome, <strong>root</strong>"));
+    assert!(body.contains(">Blog</span>") && body.contains(">Authentication and Authorization</span>"), "models grouped by app");
+    assert!(body.contains("Recent actions") && body.contains("None available"));
 
     let (_, _, body) = send(get("/admin/blog_post/?q=machinery", &cookie)).await;
-    assert!(body.contains("Computing Machinery") && !body.contains("Rust 50%"), "search filters rows");
-    assert!(body.contains("<td>Alan</td>"), "foreign keys show their label in the list");
+    assert!(
+        body.contains("Select postv2 to change") && body.contains("Computing Machinery") && !body.contains("Rust 50%"),
+        "search filters rows"
+    );
+    assert!(body.contains("1 result (<a href=") && body.contains(">4 total</a>)"), "search shows result counts");
+    assert!(body.contains("<td>\n                Alan") || body.contains(">Alan<"), "foreign keys show their label in the list");
     let (_, _, body) = send(get("/admin/blog_post/?o=title&f.published=1", &cookie)).await;
-    assert!(body.contains("Title ▲") && !body.contains("xxxxxxxxxx"), "sort + boolean filter");
+    assert!(body.contains("sorted ascending") && !body.contains("xxxxxxxxxx"), "sort + boolean filter");
+    assert!(body.contains("icon-yes.svg"), "booleans render as icons");
     let (_, _, body) = send(get("/admin/rangoli_user/", &cookie)).await;
     assert!(body.contains("root") && !body.contains("$argon2"), "password hashes never render");
 
     let (status, _, body) = send(form("/admin/blog_author/add", &cookie, "name=&email=x%40example.com")).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(body.contains("This field is required."));
+    assert!(body.contains("Please correct the error below.") && body.contains("This field is required."));
     let (status, _, body) = send(form("/admin/blog_author/add", &cookie, "name=Grace&email=ada%40example.com")).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body.contains("already exists"));
     let (status, headers, _) = send(form("/admin/blog_author/add", &cookie, "name=Grace&email=grace%40example.com&_continue=1")).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
-    let grace_url = headers[header::LOCATION].to_str().unwrap().to_string();
+    let landing = headers[header::LOCATION].to_str().unwrap().to_string();
+    let grace_url = landing.split('?').next().unwrap().to_string();
 
-    let (_, _, body) = send(get(&grace_url, &cookie)).await;
+    let (_, _, body) = send(get(&landing, &cookie)).await;
     assert!(body.contains("value=\"Grace\""));
-    let (status, _, _) = send(form(&grace_url, &cookie, "name=Grace+Hopper&email=grace%40example.com")).await;
+    assert!(body.contains("was added successfully. You may edit it again below."), "Django-style success message");
+    let (status, headers, _) = send(form(&grace_url, &cookie, "name=Grace+Hopper&email=grace%40example.com")).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
+    let (_, _, body) = send(get(headers[header::LOCATION].to_str().unwrap(), &cookie)).await;
+    assert!(body.contains("The author “<a href=") && body.contains("Grace Hopper</a>” was changed successfully."));
     assert_eq!(Author::objects().filter(Author::NAME.eq("Grace Hopper")).count().await.unwrap(), 1);
+
+    let (_, _, body) = send(get(&format!("{grace_url}history"), &cookie)).await;
+    assert!(body.contains("Added.") && body.contains("Changed name."), "history records each change: {body}");
+    let (_, _, body) = send(get("/admin/", &cookie)).await;
+    assert!(body.contains("class=\"changelink\"><a href=") && body.contains("Grace Hopper</a>"), "recent actions");
 
     let (_, _, body) = send(get(&format!("/admin/blog_post/{}/", long.id.unwrap()), &cookie)).await;
     assert!(body.contains(">Grace Hopper</option>") && body.contains(">Alan</option>"), "foreign keys render as a select");
 
+    let (status, _, body) = send(get(&format!("/admin/blog_author/{}/delete", ada.id.unwrap()), &cookie)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body.contains("would require deleting the following protected related objects") && body.contains("PostV2: Rust 50% off_sale"));
     let (status, _, _) = send(form(&format!("/admin/blog_author/{}/delete", ada.id.unwrap()), &cookie, "")).await;
     assert_eq!(status, StatusCode::CONFLICT, "protected by foreign key");
-    let (status, _, _) = send(form(&format!("{grace_url}delete"), &cookie, "")).await;
+    let (status, _, body) = send(get(&format!("{grace_url}delete"), &cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Are you sure you want to delete the author “Grace Hopper”?"));
+    let (status, _, _) = send(form(&format!("{grace_url}delete"), &cookie, "post=yes")).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert_eq!(Author::objects().count().await.unwrap(), 2);
+
+    // Bulk delete: Django's confirmation step, then the deletion.
+    let pick = format!("action=delete_selected&_selected_action={}", long.id.unwrap());
+    let (status, _, body) = send(form("/admin/blog_post/", &cookie, &pick)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Are you sure you want to delete the selected postv2s?") && body.contains("Summary"));
+    assert_eq!(PostV2::objects().count().await.unwrap(), 4, "nothing deleted before confirming");
+    let (status, headers, _) = send(form("/admin/blog_post/", &cookie, &format!("{pick}&post=yes"))).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (_, _, body) = send(get(headers[header::LOCATION].to_str().unwrap(), &cookie)).await;
+    assert!(body.contains("Successfully deleted 1 postv2."));
+    assert_eq!(PostV2::objects().count().await.unwrap(), 3);
+    let (_, headers, _) = send(form("/admin/blog_post/", &cookie, "action=delete_selected")).await;
+    assert!(headers[header::LOCATION].to_str().unwrap().ends_with("warn=noitems"));
+
+    // Password change, then log in with the new password.
+    let (status, _, body) =
+        send(form("/admin/password_change/", &cookie, "old_password=wrong&new_password1=n3w-pass-123&new_password2=n3w-pass-123")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body.contains("Your old password was entered incorrectly."));
+    let (_, _, body) =
+        send(form("/admin/password_change/", &cookie, "old_password=correct+horse&new_password1=n3w-pass-123&new_password2=n3w-pass-123"))
+            .await;
+    assert!(body.contains("Your password was changed."));
 
     let mut evil = form("/admin/blog_author/add", &cookie, "name=Mallory&email=m%40evil.example");
     evil.headers_mut().insert("sec-fetch-site", "cross-site".parse().unwrap());
     assert_eq!(send(evil).await.0, StatusCode::FORBIDDEN, "cross-site POSTs are rejected");
 
-    let (status, headers, _) = send(form("/admin/logout", &cookie, "")).await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (status, headers, body) = send(form("/admin/logout", &cookie, "")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Thanks for spending some quality time"));
     assert!(headers[header::SET_COOKIE].to_str().unwrap().contains("Max-Age=0"));
     assert_eq!(send(get("/admin/", &cookie)).await.0, StatusCode::SEE_OTHER, "session is gone after logout");
+    let (status, _, _) = send(form("/admin/login", "", "username=root&password=n3w-pass-123")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "new password works");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -48,7 +48,8 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
         let (inner, null) = unwrap_option(&f.ty);
         let base = base_type(inner)?;
 
-        let (mut max_length, mut text, mut unique, mut password, mut fk) = (None::<u32>, false, false, false, None::<syn::Path>);
+        let (mut max_length, mut text, mut unique, mut password, mut cascade, mut fk) =
+            (None::<u32>, false, false, false, false, None::<syn::Path>);
         for attr in f.attrs.iter().filter(|a| a.path().is_ident("field")) {
             attr.parse_nested_meta(|m| {
                 if m.path.is_ident("max_length") {
@@ -59,10 +60,12 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     unique = true;
                 } else if m.path.is_ident("password") {
                     password = true;
+                } else if m.path.is_ident("cascade") {
+                    cascade = true;
                 } else if m.path.is_ident("fk") {
                     fk = Some(m.value()?.parse()?);
                 } else {
-                    return Err(m.error("expected `max_length`, `text`, `unique`, `password` or `fk`"));
+                    return Err(m.error("expected `max_length`, `text`, `unique`, `password`, `fk` or `cascade`"));
                 }
                 Ok(())
             })?;
@@ -77,6 +80,9 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
         }
         if fk.is_some() && base != "i64" {
             return Err(syn::Error::new_spanned(&f.ty, "a `fk` field must be `i64` or `Option<i64>`"));
+        }
+        if cascade && fk.is_none() {
+            return Err(syn::Error::new_spanned(name, "`cascade` needs `fk = Model`"));
         }
         if (text || max_length.is_some() || password) && base != "String" {
             return Err(syn::Error::new_spanned(&f.ty, "`text`, `max_length` and `password` only apply to String fields"));
@@ -99,7 +105,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
         metas.push(quote! {
             ::rangoli::orm::FieldMeta {
                 name: #name_s, ty: ::rangoli::orm::FieldType::#ty, null: #null,
-                unique: #unique, password: #password, fk: #fk_tokens,
+                unique: #unique, password: #password, fk: #fk_tokens, cascade: #cascade,
             }
         });
         reads.push(quote! {

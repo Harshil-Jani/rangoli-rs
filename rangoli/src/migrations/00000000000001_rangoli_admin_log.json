@@ -1,0 +1,17 @@
+{
+  "operations": [
+    {
+      "op": "create_table",
+      "table": "rangoli_admin_log",
+      "columns": [
+        { "name": "user_id", "type": "int" },
+        { "name": "table_name", "type": { "varchar": 100 } },
+        { "name": "object_id", "type": "int" },
+        { "name": "object_repr", "type": { "varchar": 200 } },
+        { "name": "action", "type": "int" },
+        { "name": "message", "type": "text" },
+        { "name": "at", "type": "int" }
+      ]
+    }
+  ]
+}

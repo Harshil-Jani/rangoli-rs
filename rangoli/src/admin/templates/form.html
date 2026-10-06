@@ -1,37 +1,59 @@
 {% extends "base.html" %}
+{% block bodyclass %}change-form{% endblock %}
+{% block crumbs %} › {% if is_add %}Add {{ name }}{% else %}{{ obj }}{% endif %}{% endblock %}
+{% block content_title %}<h1>{{ title }}</h1>{% if obj %}<h2>{{ obj }}</h2>{% endif %}{% endblock %}
 {% block content %}
-<h1>{{ heading }}</h1>
-{% if form_error %}<p class="flash error" role="alert">{{ form_error }}</p>{% endif %}
-<form method="post" class="edit">
-  {% for f in fields %}
-  <div class="row{% if f.error %} has-error{% endif %}">
-    {% if f.kind == "checkbox" %}
-      <label class="check"><input type="checkbox" name="{{ f.name }}"{% if f.checked %} checked{% endif %}> {{ f.label }}</label>
-    {% else %}
-      <label for="f-{{ f.name }}">{{ f.label }}{% if f.required %} <span class="req" aria-hidden="true">*</span>{% endif %}</label>
-      {% if f.kind == "textarea" %}
-        <textarea id="f-{{ f.name }}" name="{{ f.name }}" rows="8"{% if f.required %} required{% endif %}>{{ f.value }}</textarea>
-      {% elif f.kind == "select" %}
-        <select id="f-{{ f.name }}" name="{{ f.name }}"{% if f.required %} required{% endif %}>
-          <option value="">---------</option>
-          {% for o in f.options %}<option value="{{ o[0] }}"{% if o[0] == f.value %} selected{% endif %}>{{ o[1] }}</option>{% endfor %}
-        </select>
-      {% else %}
-        <input id="f-{{ f.name }}" name="{{ f.name }}"
-          type="{% if f.kind == "float" %}number{% else %}{{ f.kind }}{% endif %}"
-          {% if f.kind == "float" %}step="any" {% endif %}{% if f.kind != "password" %}value="{{ f.value }}" {% else %}autocomplete="new-password" {% endif %}
-          {% if f.maxlength %}maxlength="{{ f.maxlength }}" {% endif %}{% if f.required %}required{% endif %}>
+<div id="content-main">
+  {% if not is_add %}<ul class="object-tools"><li><a href="/admin/{{ table }}/{{ id }}/history" class="historylink">History</a></li></ul>{% endif %}
+  <form method="post" id="{{ table }}_form" novalidate>
+    <div>
+      {% if error_count %}
+      <p class="errornote">Please correct the error{% if error_count > 1 %}s{% endif %} below.</p>
+      {% if form_error %}<ul class="errorlist nonfield"><li>{{ form_error }}</li></ul>{% endif %}
       {% endif %}
-    {% endif %}
-    {% if f.help %}<p class="help">{{ f.help }}</p>{% endif %}
-    {% if f.error %}<p class="err">{{ f.error }}</p>{% endif %}
-  </div>
-  {% endfor %}
-  <div class="submit">
-    <button class="btn" name="_save" value="1">Save</button>
-    <button class="btn ghost" name="_continue" value="1">Save and continue editing</button>
-    {% if is_add %}<button class="btn ghost" name="_addanother" value="1">Save and add another</button>{% endif %}
-    {% if not is_add %}<a class="btn danger-ghost" href="/admin/{{ table }}/{{ id }}/delete">Delete</a>{% endif %}
-  </div>
-</form>
+      <fieldset class="module aligned">
+        {% for f in fields %}
+        <div class="form-row field-{{ f.name }}{% if f.error %} errors{% endif %}">
+          {% if f.error %}<ul class="errorlist" id="id_{{ f.name }}_error"><li>{{ f.error }}</li></ul>{% endif %}
+          <div>
+            {% if f.kind == "checkbox" %}
+            <div class="flex-container checkbox-row">
+              <input type="checkbox" name="{{ f.name }}" id="id_{{ f.name }}"{% if f.checked %} checked{% endif %}>
+              <label class="vCheckboxLabel" for="id_{{ f.name }}">{{ f.label }}</label>
+            </div>
+            {% else %}
+            <div class="flex-container">
+              <label{% if f.required %} class="required"{% endif %} for="id_{{ f.name }}">{{ f.label }}:</label>
+              {% if f.kind == "textarea" %}
+              <textarea name="{{ f.name }}" id="id_{{ f.name }}" cols="40" rows="10" class="vLargeTextField"{% if f.required %} required{% endif %}>{{ f.value }}</textarea>
+              {% elif f.kind == "select" %}
+              <select name="{{ f.name }}" id="id_{{ f.name }}"{% if f.required %} required{% endif %}>
+                <option value="">---------</option>
+                {% for o in f.options %}<option value="{{ o[0] }}"{% if o[0] == f.value %} selected{% endif %}>{{ o[1] }}</option>{% endfor %}
+              </select>
+              {% elif f.kind == "password" %}
+              <input type="password" name="{{ f.name }}" id="id_{{ f.name }}" class="vTextField" autocomplete="new-password"{% if f.required %} required{% endif %}>
+              {% elif f.kind == "number" %}
+              <input type="number" name="{{ f.name }}" id="id_{{ f.name }}" value="{{ f.value }}" class="vIntegerField"{% if f.required %} required{% endif %}>
+              {% elif f.kind == "float" %}
+              <input type="number" step="any" name="{{ f.name }}" id="id_{{ f.name }}" value="{{ f.value }}"{% if f.required %} required{% endif %}>
+              {% else %}
+              <input type="text" name="{{ f.name }}" id="id_{{ f.name }}" value="{{ f.value }}" class="vTextField"{% if f.maxlength %} maxlength="{{ f.maxlength }}"{% endif %}{% if f.required %} required{% endif %}>
+              {% endif %}
+            </div>
+            {% endif %}
+            {% if f.help %}<div class="help"><div>{{ f.help }}</div></div>{% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      </fieldset>
+      <div class="submit-row">
+        <input type="submit" value="Save" class="default" name="_save">
+        <input type="submit" value="Save and add another" name="_addanother">
+        <input type="submit" value="Save and continue editing" name="_continue">
+        {% if not is_add %}<a href="/admin/{{ table }}/{{ id }}/delete" class="deletelink">Delete</a>{% endif %}
+      </div>
+    </div>
+  </form>
+</div>
 {% endblock %}
