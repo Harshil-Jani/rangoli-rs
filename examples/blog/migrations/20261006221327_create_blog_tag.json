@@ -1,0 +1,57 @@
+{
+  "operations": [
+    {
+      "op": "create_table",
+      "table": "blog_tag",
+      "columns": [
+        {
+          "name": "name",
+          "type": {
+            "varchar": 50
+          },
+          "unique": true
+        }
+      ]
+    },
+    {
+      "op": "create_table",
+      "table": "blog_post_tags",
+      "columns": [
+        {
+          "name": "source_id",
+          "type": "int",
+          "fk": "blog_post",
+          "cascade": true
+        },
+        {
+          "name": "target_id",
+          "type": "int",
+          "fk": "blog_tag",
+          "cascade": true
+        }
+      ]
+    },
+    {
+      "op": "add_index",
+      "table": "blog_post_tags",
+      "index": {
+        "name": "blog_post_tags_source_id_target_id_uniq",
+        "columns": [
+          "source_id",
+          "target_id"
+        ],
+        "unique": true
+      }
+    },
+    {
+      "op": "add_index",
+      "table": "blog_post",
+      "index": {
+        "name": "blog_post_published_idx",
+        "columns": [
+          "published"
+        ]
+      }
+    }
+  ]
+}

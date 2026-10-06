@@ -191,6 +191,67 @@ fn from_json(f: &FieldMeta, j: &JsonValue) -> Result<Value, String> {
     }
 }
 
+/// Add each many-to-many relation as an array of ids, one query per relation for all rows.
+async fn attach_links(meta: &'static ModelMeta, objs: &mut [JsonValue]) -> Result<(), Response> {
+    if meta.m2m.is_empty() || objs.is_empty() {
+        return Ok(());
+    }
+    static PAIR: [FieldMeta; 2] = [link_field("source_id"), link_field("target_id")];
+    let ids: Vec<Value> = objs.iter().filter_map(|o| o["id"].as_i64()).map(Value::Int).collect();
+    for rel in meta.m2m {
+        let mut q =
+            Query { table: rel.through, fields: &PAIR, filter: vec![], order: vec![("target_id", false)], limit: None, offset: None };
+        q.filter.push(Node::In("source_id", ids.clone(), FieldType::Int));
+        let mut by_source: HashMap<i64, Vec<i64>> = HashMap::new();
+        for (_, v) in q.rows().await.map_err(fail)? {
+            if let (Value::Int(src), Value::Int(dst)) = (&v[0], &v[1]) {
+                by_source.entry(*src).or_default().push(*dst);
+            }
+        }
+        for o in objs.iter_mut() {
+            let id = o["id"].as_i64().unwrap_or_default();
+            o[rel.name] = json!(by_source.remove(&id).unwrap_or_default());
+        }
+    }
+    Ok(())
+}
+
+const fn link_field(name: &'static str) -> FieldMeta {
+    FieldMeta {
+        name,
+        ty: FieldType::Int,
+        null: false,
+        unique: false,
+        password: false,
+        fk: None,
+        cascade: false,
+        auto_now: false,
+        auto_now_add: false,
+        index: false,
+    }
+}
+
+/// Many-to-many ids from a request body; `None` for relations the body leaves out.
+fn body_links(meta: &ModelMeta, body: &JsonValue) -> Result<Vec<(&'static str, Option<Vec<i64>>)>, Response> {
+    let mut errors = Map::new();
+    let out = meta
+        .m2m
+        .iter()
+        .map(|rel| {
+            let ids = body.get(rel.name).map(|j| j.as_array().and_then(|a| a.iter().map(JsonValue::as_i64).collect::<Option<Vec<i64>>>()));
+            if let Some(None) = ids {
+                errors.insert(rel.name.into(), json!(["Expected a list of ids."]));
+            }
+            (rel.through, ids.flatten())
+        })
+        .collect();
+    if errors.is_empty() {
+        Ok(out)
+    } else {
+        Err((StatusCode::BAD_REQUEST, Json(JsonValue::Object(errors))).into_response())
+    }
+}
+
 /// Validate a request body. `partial` (PATCH) skips missing fields.
 async fn columns(
     meta: &'static ModelMeta,
@@ -224,7 +285,7 @@ async fn columns(
             }
         }
     }
-    if let Some(unknown) = obj.keys().find(|k| *k != "id" && meta.field(k).is_none()) {
+    if let Some(unknown) = obj.keys().find(|k| *k != "id" && meta.field(k).is_none() && !meta.m2m.iter().any(|r| r.name == *k)) {
         errors.insert(unknown.clone(), json!(["Unknown field."]));
     }
     if errors.is_empty() {
@@ -238,7 +299,10 @@ async fn fetch(meta: &'static ModelMeta, id: i64) -> Result<JsonValue, Response>
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
     let (id, vals) = q.rows().await.map_err(fail)?.pop().ok_or_else(|| fail(Error::NotFound))?;
-    Ok(to_json(meta, id, &vals))
+    let mut obj = [to_json(meta, id, &vals)];
+    attach_links(meta, &mut obj).await?;
+    let [obj] = obj;
+    Ok(obj)
 }
 
 fn param<'a>(p: &'a HashMap<String, String>, k: &str) -> Option<&'a str> {
@@ -293,7 +357,8 @@ async fn list(State(site): S, user: CurrentUser, Path(table): Path<String>, UrlQ
     let count = q.count().await.map_err(fail)? as u64;
     q.limit = Some(limit);
     q.offset = Some(offset);
-    let results: Vec<JsonValue> = q.rows().await.map_err(fail)?.iter().map(|(id, v)| to_json(meta, *id, v)).collect();
+    let mut results: Vec<JsonValue> = q.rows().await.map_err(fail)?.iter().map(|(id, v)| to_json(meta, *id, v)).collect();
+    attach_links(meta, &mut results).await?;
     // Like DRF's LimitOffsetPagination; links are relative so they work behind any host or proxy.
     let page = |off: u64| {
         let mut pairs: Vec<(String, String)> =
@@ -316,7 +381,16 @@ async fn detail(State(site): S, user: CurrentUser, Path((table, id)): Path<(Stri
 async fn create(State(site): S, user: CurrentUser, Path(table): Path<String>, Json(body): Json<JsonValue>) -> Reply {
     let meta = endpoint(&site, &table, &user, true)?;
     let cols = columns(meta, &body, true, false).await?;
-    let id = orm::insert_row(meta.table, &cols).await.map_err(fail)?;
+    let links = body_links(meta, &body)?;
+    let id = crate::atomic(async {
+        let id = orm::insert_row(meta.table, &cols).await?;
+        for (through, ids) in &links {
+            orm::set_links(through, id, ids.as_deref().unwrap_or_default()).await?;
+        }
+        Ok(id)
+    })
+    .await
+    .map_err(fail)?;
     Ok((StatusCode::CREATED, Json(fetch(meta, id).await?)).into_response())
 }
 
@@ -324,9 +398,22 @@ async fn update(site: &Site, user: &CurrentUser, table: &str, id: i64, body: &Js
     let meta = endpoint(site, table, user, true)?;
     fetch(meta, id).await?; // 404 before validation, like DRF
     let cols = columns(meta, body, false, partial).await?;
+    let links = body_links(meta, body)?;
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
-    q.update(&cols).await.map_err(fail)?;
+    crate::atomic(async {
+        q.update(&cols).await?;
+        for (through, ids) in &links {
+            match ids {
+                Some(ids) => orm::set_links(through, id, ids).await?,
+                None if !partial => orm::set_links(through, id, &[]).await?,
+                None => {}
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(fail)?;
     Ok(Json(fetch(meta, id).await?).into_response())
 }
 
@@ -384,6 +471,12 @@ async fn schema(State(site): S) -> Json<JsonValue> {
         props.insert("id".into(), json!({ "type": "integer", "format": "int64", "readOnly": true }));
         for f in meta.fields {
             props.insert(f.name.into(), field_schema(f));
+        }
+        for rel in meta.m2m {
+            props.insert(
+                rel.name.into(),
+                json!({ "type": "array", "items": { "type": "integer" }, "description": format!("ids of related {} rows", rel.target) }),
+            );
         }
         let required: Vec<&str> =
             meta.fields.iter().filter(|f| !f.null && !f.is_auto() && f.ty != FieldType::Bool).map(|f| f.name).collect();

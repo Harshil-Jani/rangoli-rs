@@ -169,6 +169,8 @@ input[type=text], input[type=search], input[type=password], input[type=number], 
   font: inherit;
   font-size: var(--fs-md);
 }
+select[multiple] { padding: var(--s1); }
+select[multiple] option { padding: var(--s1) var(--s2); }
 textarea { max-width: 640px; padding: var(--s2); line-height: 1.5; resize: vertical; }
 input.narrow { max-width: 160px; }
 input[type=datetime-local].narrow { max-width: 220px; }

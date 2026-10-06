@@ -35,6 +35,32 @@ fn is_false(b: &bool) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Index {
+    pub name: String,
+    pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unique: bool,
+}
+
+/// A table's schema: its columns (without the implicit `id`) and indexes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Table {
+    pub columns: Vec<Column>,
+    pub indexes: Vec<Index>,
+}
+
+/// Index names must be stable forever (they live in migration files) and fit
+/// every database's identifier limit (63 on Postgres), so long ones end in an FNV-1a hash.
+pub fn index_name(table: &str, columns: &[&str], unique: bool) -> String {
+    let full = format!("{table}_{}_{}", columns.join("_"), if unique { "uniq" } else { "idx" });
+    if full.len() <= 60 {
+        return full;
+    }
+    let hash = full.bytes().fold(0x811c9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x01000193));
+    format!("{}_{hash:08x}", &full[..51])
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     CreateTable {
@@ -59,6 +85,14 @@ pub enum Op {
         table: String,
         column: Column,
     },
+    AddIndex {
+        table: String,
+        index: Index,
+    },
+    DropIndex {
+        table: String,
+        name: String,
+    },
     /// Escape hatch (Django's RunSQL). Not reflected in model state.
     Sql {
         sql: String,
@@ -72,8 +106,8 @@ pub struct Migration {
     pub operations: Vec<Op>,
 }
 
-/// Table name -> columns (excluding the implicit `id`).
-pub type State = BTreeMap<String, Vec<Column>>;
+/// Table name -> schema.
+pub type State = BTreeMap<String, Table>;
 
 pub fn columns_of(meta: &ModelMeta) -> Vec<Column> {
     meta.fields
@@ -82,57 +116,117 @@ pub fn columns_of(meta: &ModelMeta) -> Vec<Column> {
         .collect()
 }
 
+fn indexes_of(meta: &ModelMeta) -> Vec<Index> {
+    meta.fields
+        .iter()
+        .filter(|f| f.index)
+        .map(|f| Index { name: index_name(meta.table, &[f.name], false), columns: vec![f.name.into()], unique: false })
+        .collect()
+}
+
+/// The join table behind a many-to-many relation: one row per pair, each pair once.
+pub fn through_table(source: &str, target: &str) -> Table {
+    let side = |name: &str, table: &str| Column {
+        name: name.into(),
+        ty: FieldType::Int,
+        null: false,
+        unique: false,
+        fk: Some(table.into()),
+        cascade: true,
+    };
+    Table {
+        columns: vec![side("source_id", source), side("target_id", target)],
+        indexes: vec![Index { name: String::new(), columns: vec!["source_id".into(), "target_id".into()], unique: true }],
+    }
+}
+
 pub fn model_state(models: &[&'static ModelMeta]) -> State {
-    models.iter().map(|m| (m.table.to_string(), columns_of(m))).collect()
+    let mut state = State::new();
+    for m in models {
+        state.insert(m.table.to_string(), Table { columns: columns_of(m), indexes: indexes_of(m) });
+        for rel in m.m2m {
+            let mut t = through_table(m.table, rel.target);
+            t.indexes[0].name = index_name(rel.through, &["source_id", "target_id"], true);
+            state.insert(rel.through.to_string(), t);
+        }
+    }
+    state
 }
 
 /// Apply `op` to `state`, rejecting operations that contradict it.
 fn apply(state: &mut State, op: &Op) -> std::result::Result<(), String> {
+    let missing = |t: &str| format!("table `{t}` does not exist");
     match op {
         Op::CreateTable { table, columns } => {
-            if state.insert(table.clone(), columns.clone()).is_some() {
+            if state.insert(table.clone(), Table { columns: columns.clone(), indexes: vec![] }).is_some() {
                 return Err(format!("table `{table}` already exists"));
             }
         }
         Op::DropTable { table } => {
-            state.remove(table).ok_or(format!("table `{table}` does not exist"))?;
+            state.remove(table).ok_or(missing(table))?;
         }
         Op::AddColumn { table, column, .. } => {
-            let cols = state.get_mut(table).ok_or(format!("table `{table}` does not exist"))?;
-            if cols.iter().any(|c| c.name == column.name) {
+            let t = state.get_mut(table).ok_or(missing(table))?;
+            if t.columns.iter().any(|c| c.name == column.name) {
                 return Err(format!("column `{table}.{}` already exists", column.name));
             }
-            cols.push(column.clone());
+            t.columns.push(column.clone());
         }
         Op::DropColumn { table, column } => {
-            let cols = state.get_mut(table).ok_or(format!("table `{table}` does not exist"))?;
-            let i = cols.iter().position(|c| &c.name == column).ok_or(format!("column `{table}.{column}` does not exist"))?;
-            cols.remove(i);
+            let t = state.get_mut(table).ok_or(missing(table))?;
+            let i = t.columns.iter().position(|c| &c.name == column).ok_or(format!("column `{table}.{column}` does not exist"))?;
+            if let Some(ix) = t.indexes.iter().find(|ix| ix.columns.contains(column)) {
+                return Err(format!("column `{table}.{column}` is still used by index `{}`", ix.name));
+            }
+            t.columns.remove(i);
         }
         Op::AlterColumn { table, column } => {
-            let cols = state.get_mut(table).ok_or(format!("table `{table}` does not exist"))?;
-            let c = cols.iter_mut().find(|c| c.name == column.name).ok_or(format!("column `{table}.{}` does not exist", column.name))?;
+            let t = state.get_mut(table).ok_or(missing(table))?;
+            let c =
+                t.columns.iter_mut().find(|c| c.name == column.name).ok_or(format!("column `{table}.{}` does not exist", column.name))?;
             *c = column.clone();
+        }
+        Op::AddIndex { table, index } => {
+            let t = state.get_mut(table).ok_or(missing(table))?;
+            if t.indexes.iter().any(|ix| ix.name == index.name) {
+                return Err(format!("index `{}` already exists", index.name));
+            }
+            if let Some(c) = index.columns.iter().find(|c| !t.columns.iter().any(|col| &col.name == *c)) {
+                return Err(format!("index `{}` uses unknown column `{table}.{c}`", index.name));
+            }
+            t.indexes.push(index.clone());
+        }
+        Op::DropIndex { table, name } => {
+            let t = state.get_mut(table).ok_or(missing(table))?;
+            let i = t.indexes.iter().position(|ix| &ix.name == name).ok_or(format!("index `{name}` does not exist"))?;
+            t.indexes.remove(i);
         }
         Op::Sql { .. } => {}
     }
     Ok(())
 }
 
-/// Operations that turn `from` into `to`, with new tables ordered so foreign key targets come first.
+/// Operations that turn `from` into `to`: index drops first, then tables (foreign key
+/// targets before the tables that reference them) and columns, then new indexes.
 pub fn diff(from: &State, to: &State) -> Vec<Op> {
-    let mut ops = vec![];
+    let (mut drops, mut ops, mut adds) = (vec![], vec![], vec![]);
     let mut pending: Vec<&String> = to.keys().filter(|t| !from.contains_key(*t)).collect();
     while !pending.is_empty() {
-        let ready =
-            pending.iter().position(|t| to[*t].iter().all(|c| c.fk.as_ref().is_none_or(|f| f == *t || !pending.contains(&f)))).unwrap_or(0); // a foreign key cycle: emit anyway, the database will report it
+        let ready = pending
+            .iter()
+            .position(|t| to[*t].columns.iter().all(|c| c.fk.as_ref().is_none_or(|f| f == *t || !pending.contains(&f))))
+            .unwrap_or(0); // a foreign key cycle: emit anyway, the database will report it
         let t = pending.remove(ready);
-        ops.push(Op::CreateTable { table: t.clone(), columns: to[t].clone() });
+        ops.push(Op::CreateTable { table: t.clone(), columns: to[t].columns.clone() });
+        adds.extend(to[t].indexes.iter().map(|ix| Op::AddIndex { table: t.clone(), index: ix.clone() }));
     }
     for (t, new) in to.iter().filter(|(t, _)| from.contains_key(*t)) {
         let old = &from[t];
-        for c in new {
-            match old.iter().find(|o| o.name == c.name) {
+        for ix in old.indexes.iter().filter(|ix| !new.indexes.contains(ix)) {
+            drops.push(Op::DropIndex { table: t.clone(), name: ix.name.clone() });
+        }
+        for c in &new.columns {
+            match old.columns.iter().find(|o| o.name == c.name) {
                 None => {
                     // Existing rows need a value. For a datetime the epoch would read as bad data,
                     // so use the moment the migration was made (Django's usual `timezone.now`).
@@ -146,14 +240,18 @@ pub fn diff(from: &State, to: &State) -> Vec<Op> {
                 Some(_) => {}
             }
         }
-        for o in old.iter().filter(|o| !new.iter().any(|c| c.name == o.name)) {
+        for o in old.columns.iter().filter(|o| !new.columns.iter().any(|c| c.name == o.name)) {
             ops.push(Op::DropColumn { table: t.clone(), column: o.name.clone() });
         }
+        for ix in new.indexes.iter().filter(|ix| !old.indexes.contains(ix)) {
+            adds.push(Op::AddIndex { table: t.clone(), index: ix.clone() });
+        }
     }
-    for t in from.keys().filter(|t| !to.contains_key(*t)) {
-        ops.push(Op::DropTable { table: t.clone() });
-    }
-    ops
+    // Drop referencing tables (join tables) before the tables they point to.
+    let mut gone: Vec<&String> = from.keys().filter(|t| !to.contains_key(*t)).collect();
+    gone.sort_by_key(|t| std::cmp::Reverse(from[*t].columns.iter().filter(|c| c.fk.is_some()).count()));
+    ops.extend(gone.into_iter().map(|t| Op::DropTable { table: t.clone() }));
+    drops.into_iter().chain(ops).chain(adds).collect()
 }
 
 pub(crate) fn zero(ty: FieldType) -> Value {
@@ -223,6 +321,8 @@ fn target(op: &Op) -> Option<String> {
         Op::CreateTable { table, .. } | Op::DropTable { table } => Some(table.clone()),
         Op::AddColumn { table, column, .. } | Op::AlterColumn { table, column } => Some(format!("{table}.{}", column.name)),
         Op::DropColumn { table, column } => Some(format!("{table}.{column}")),
+        Op::AddIndex { table, index } => Some(format!("{table}#{}", index.name)),
+        Op::DropIndex { table, name } => Some(format!("{table}#{name}")),
         Op::Sql { .. } => None,
     }
 }
@@ -239,6 +339,8 @@ pub fn make(dir: &Path, models: &[&'static ModelMeta], name: Option<&str>) -> Re
         Op::AddColumn { table, column, .. } => format!("add_{table}_{}", column.name),
         Op::DropColumn { table, column } => format!("drop_{table}_{column}"),
         Op::AlterColumn { table, column } => format!("alter_{table}_{}", column.name),
+        Op::AddIndex { index, .. } => format!("add_{}", index.name),
+        Op::DropIndex { name, .. } => format!("drop_{name}"),
         Op::Sql { .. } => "sql".into(),
     });
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
@@ -327,7 +429,7 @@ fn create_table(d: Dialect, table: &str, cols: &[Column], defaults: &BTreeMap<&s
 }
 
 /// SQLite can't alter columns in place: build the new table, copy rows, swap.
-fn sqlite_rebuild(table: &str, old: &[Column], new: &[Column], defaults: &BTreeMap<&str, &Value>) -> Vec<String> {
+fn sqlite_rebuild(table: &str, old: &[Column], new: &[Column], indexes: &[Index], defaults: &BTreeMap<&str, &Value>) -> Vec<String> {
     let d = Dialect::Sqlite;
     let tmp = format!("_rangoli_new_{table}");
     let keep: Vec<String> = std::iter::once("id".to_string())
@@ -340,6 +442,15 @@ fn sqlite_rebuild(table: &str, old: &[Column], new: &[Column], defaults: &BTreeM
         format!("DROP TABLE {}", d.quote(table)),
         format!("ALTER TABLE {} RENAME TO {}", d.quote(&tmp), d.quote(table)),
     ]
+    .into_iter()
+    // Dropping the old table dropped its indexes too.
+    .chain(indexes.iter().map(|ix| create_index(d, table, ix)))
+    .collect()
+}
+
+fn create_index(d: Dialect, table: &str, ix: &Index) -> String {
+    let cols: Vec<String> = ix.columns.iter().map(|c| d.quote(c)).collect();
+    format!("CREATE {}INDEX {} ON {} ({})", if ix.unique { "UNIQUE " } else { "" }, d.quote(&ix.name), d.quote(table), cols.join(", "))
 }
 
 /// SQL for one operation, given the schema state *before* it.
@@ -350,14 +461,25 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
         Op::CreateTable { table, columns } => vec![create_table(d, table, columns, &none)],
         Op::DropTable { table } => vec![format!("DROP TABLE {}", q(table))],
         Op::Sql { sql } => vec![sql.clone()],
+        Op::AddIndex { table, index } => {
+            let cols = &state[table].columns;
+            if d == Dialect::Mysql && index.columns.iter().any(|c| cols.iter().any(|col| &col.name == c && col.ty == FieldType::Text)) {
+                return Err(Error::Migration(format!("MySQL can't index TEXT column(s) of `{}`; use a max_length field", index.name)));
+            }
+            vec![create_index(d, table, index)]
+        }
+        Op::DropIndex { table, name } => match d {
+            Dialect::Mysql => vec![format!("DROP INDEX {} ON {}", q(name), q(table))],
+            _ => vec![format!("DROP INDEX {}", q(name))],
+        },
         Op::AddColumn { table, column, default } => {
             let defaults: BTreeMap<&str, &Value> = default.iter().map(|v| (column.name.as_str(), v)).collect();
             match d {
                 Dialect::Sqlite if column.unique => {
                     let old = &state[table];
-                    let mut new = old.clone();
+                    let mut new = old.columns.clone();
                     new.push(column.clone());
-                    sqlite_rebuild(table, old, &new, &defaults)
+                    sqlite_rebuild(table, &old.columns, &new, &old.indexes, &defaults)
                 }
                 _ => {
                     let mut sql = format!("ALTER TABLE {} ADD COLUMN {}", q(table), col_def(d, column, default.as_ref()));
@@ -373,10 +495,10 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
         Op::DropColumn { table, column } => match d {
             Dialect::Sqlite => {
                 let old = &state[table];
-                let new: Vec<Column> = old.iter().filter(|c| &c.name != column).cloned().collect();
-                sqlite_rebuild(table, old, &new, &none)
+                let new: Vec<Column> = old.columns.iter().filter(|c| &c.name != column).cloned().collect();
+                sqlite_rebuild(table, &old.columns, &new, &old.indexes, &none)
             }
-            Dialect::Mysql if state[table].iter().any(|c| &c.name == column && c.fk.is_some()) => {
+            Dialect::Mysql if state[table].columns.iter().any(|c| &c.name == column && c.fk.is_some()) => {
                 return Err(Error::Migration(format!(
                     "dropping foreign key column `{table}.{column}` on MySQL needs the constraint dropped first; add an `sql` operation"
                 )))
@@ -384,7 +506,7 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
             _ => vec![format!("ALTER TABLE {} DROP COLUMN {}", q(table), q(column))],
         },
         Op::AlterColumn { table, column } => {
-            let old = state[table].iter().find(|c| c.name == column.name).unwrap();
+            let old = state[table].columns.iter().find(|c| c.name == column.name).unwrap();
             if d != Dialect::Sqlite && (old.unique != column.unique || old.fk != column.fk || old.cascade != column.cascade) {
                 return Err(Error::Migration(format!(
                     "changing unique/foreign key on `{table}.{}` is not automated yet; add an `sql` operation",
@@ -393,10 +515,10 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
             }
             match d {
                 Dialect::Sqlite => {
-                    let old_cols = &state[table];
+                    let old = &state[table];
                     let new: Vec<Column> =
-                        old_cols.iter().map(|c| if c.name == column.name { column.clone() } else { c.clone() }).collect();
-                    sqlite_rebuild(table, old_cols, &new, &none)
+                        old.columns.iter().map(|c| if c.name == column.name { column.clone() } else { c.clone() }).collect();
+                    sqlite_rebuild(table, &old.columns, &new, &old.indexes, &none)
                 }
                 Dialect::Postgres => {
                     let ty = col_type(d, column.ty);
@@ -508,17 +630,45 @@ mod tests {
     fn diff_orders_fk_targets_first_and_adds_defaults() {
         let mut post = col("author_id", FieldType::Int);
         post.fk = Some("author".into());
-        let to: State = [("post".to_string(), vec![post]), ("author".to_string(), vec![col("name", FieldType::Text)])].into();
+        let table = |columns: Vec<Column>| Table { columns, indexes: vec![] };
+        let to: State = [("post".to_string(), table(vec![post])), ("author".to_string(), table(vec![col("name", FieldType::Text)]))].into();
         let ops = diff(&State::new(), &to);
         assert!(matches!(&ops[0], Op::CreateTable { table, .. } if table == "author"));
         assert!(matches!(&ops[1], Op::CreateTable { table, .. } if table == "post"));
 
         let mut grown = to.clone();
-        grown.get_mut("author").unwrap().push(col("active", FieldType::Bool));
+        grown.get_mut("author").unwrap().columns.push(col("active", FieldType::Bool));
         assert_eq!(
             diff(&to, &grown),
             vec![Op::AddColumn { table: "author".into(), column: col("active", FieldType::Bool), default: Some(Value::Bool(false)) }]
         );
+    }
+
+    #[test]
+    fn indexes_diff_in_safe_order() {
+        let ix = Index { name: index_name("t", &["a"], false), columns: vec!["a".into()], unique: false };
+        let with = |cols: Vec<Column>, ixs: Vec<Index>| -> State { [("t".to_string(), Table { columns: cols, indexes: ixs })].into() };
+        let before = with(vec![col("a", FieldType::Int)], vec![ix.clone()]);
+        let after = with(vec![], vec![]);
+        let ops = diff(&before, &after);
+        assert!(matches!(&ops[0], Op::DropIndex { .. }) && matches!(&ops[1], Op::DropColumn { .. }), "{ops:?}");
+        let mut state = before.clone();
+        ops.iter().for_each(|op| apply(&mut state, op).unwrap());
+        assert_eq!(state, after);
+        assert!(apply(&mut before.clone(), &Op::DropColumn { table: "t".into(), column: "a".into() }).unwrap_err().contains("still used"));
+        let ops = diff(&after, &before);
+        assert!(matches!(&ops[..], [Op::AddColumn { .. }, Op::AddIndex { .. }]), "{ops:?}");
+    }
+
+    #[test]
+    fn index_names_are_stable_and_short() {
+        assert_eq!(index_name("blog_post", &["title"], false), "blog_post_title_idx");
+        let long = index_name("blog_post_with_a_really_long_relation_name_tags", &["source_id", "target_id"], true);
+        assert_eq!(
+            long, "blog_post_with_a_really_long_relation_name_tags_sou_16c3e9cd",
+            "FNV-1a must never change: these names are in migration files"
+        );
+        assert!(long.len() <= 60);
     }
 
     #[test]

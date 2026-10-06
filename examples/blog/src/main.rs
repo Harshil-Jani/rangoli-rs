@@ -13,13 +13,22 @@ pub struct Author {
 }
 
 #[derive(Model, Serialize, Clone, Debug)]
-#[model(table = "blog_post", display = "title")]
+#[model(table = "blog_tag", display = "name")]
+pub struct Tag {
+    pub id: Option<i64>,
+    #[field(max_length = 50, unique)]
+    pub name: String,
+}
+
+#[derive(Model, Serialize, Clone, Debug)]
+#[model(table = "blog_post", display = "title", m2m(tags = Tag))]
 pub struct Post {
     pub id: Option<i64>,
     #[field(max_length = 200)]
     pub title: String,
     #[field(text)]
     pub body: String,
+    #[field(index)]
     pub published: bool,
     #[field(fk = Author)]
     pub author_id: i64,
@@ -53,6 +62,7 @@ async fn post(Path(id): Path<i64>) -> rangoli::Result<Json<Post>> {
 async fn main() -> rangoli::Result<()> {
     App::new()
         .admin::<Author>()
+        .admin::<Tag>()
         .admin_with::<Post>(
             ModelAdmin::new()
                 .list_display([&Post::TITLE, &Post::AUTHOR_ID, &Post::PUBLISHED, &Post::RATING, &Post::CREATED_AT])

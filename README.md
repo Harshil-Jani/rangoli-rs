@@ -89,6 +89,22 @@ rangoli::atomic(async {
 .await?;
 ```
 
+### Many-to-many
+
+```rust
+#[derive(Model)]
+#[model(table = "blog_post", m2m(tags = Tag))]
+pub struct Post { /* ... */ }
+
+post.tags().add(&[&rust, &web]).await?;               // link (already-linked ones are skipped)
+post.tags().set_ids([web_id]).await?;                 // make it exactly these, in one transaction
+let tags = post.tags().all().await?;                  // or .query() to filter further
+Post::objects().filter(Post::TAGS.has(rust_id));      // posts with a tag
+Post::TAGS.reverse(&rust);                            // the other direction
+```
+
+The join table (`blog_post_tags`, one row per pair, a unique index so each pair appears once) is created by `makemigrations`, its rows go away with either side, the admin shows the relation as a multi-select, and the API reads and writes it as a list of ids.
+
 `Post::TITLE` is a `Col<Post, String>`. A typo, a string compared to an integer column, or a column from another model in the filter **does not compile**. In Django, `filter(titel__icontains=...)` only fails at runtime.
 
 ## Django gaps this closes
@@ -162,7 +178,7 @@ Validation uses the same rules as the admin and answers like DRF: `400 {"title":
 
 Postgres, MySQL and SQLite share one code path through sqlx's `Any` driver. Only the SQL spelling differs per dialect. CI runs the same end-to-end test on all three.
 
-Field types for now: `i64`, `f64`, `bool`, `String` (`VARCHAR`, or `TEXT` with `#[field(text)]`) and `DateTime`, each optionally wrapped in `Option` for a nullable column. `DateTime` is UTC, stored as Unix seconds so it behaves identically on every database, and serializes as ISO 8601. `#[field(auto_now_add)]` and `#[field(auto_now)]` fill `created_at`/`updated_at` style fields on save, and the admin keeps them read-only. Field attributes: `max_length`, `text`, `unique`, `password`, `fk = Model`, `auto_now`, `auto_now_add`, and `cascade` (`ON DELETE CASCADE`; foreign keys protect referenced rows by default).
+Field types for now: `i64`, `f64`, `bool`, `String` (`VARCHAR`, or `TEXT` with `#[field(text)]`) and `DateTime`, each optionally wrapped in `Option` for a nullable column. `DateTime` is UTC, stored as Unix seconds so it behaves identically on every database, and serializes as ISO 8601. `#[field(auto_now_add)]` and `#[field(auto_now)]` fill `created_at`/`updated_at` style fields on save, and the admin keeps them read-only. Field attributes: `max_length`, `text`, `unique`, `index`, `password`, `fk = Model`, `auto_now`, `auto_now_add`, and `cascade` (`ON DELETE CASCADE`; foreign keys protect referenced rows by default).
 
 ## Migrations
 
@@ -174,7 +190,7 @@ Field types for now: `i64`, `f64`, `bool`, `String` (`VARCHAR`, or `TEXT` with `
 }
 ```
 
-Operations: `create_table`, `drop_table`, `add_column`, `drop_column`, `alter_column`, and `sql` (the equivalent of Django's RunSQL). Each migration runs in its own transaction. MySQL commits DDL automatically, just as it does under Django. `makemigrations --check` and `migrate --check` exit non-zero, for CI.
+Operations: `create_table`, `drop_table`, `add_column`, `drop_column`, `alter_column`, `add_index`, `drop_index`, and `sql` (the equivalent of Django's RunSQL). Each migration runs in its own transaction. MySQL commits DDL automatically, just as it does under Django. `makemigrations --check` and `migrate --check` exit non-zero, for CI.
 
 ## What's not done yet
 
@@ -182,7 +198,7 @@ This is the roadmap, in rough order. Nothing here is implemented yet:
 
 1. **More field types**: date, decimal, uuid, json; defaults, indexes, choices
 2. Savepoints for nested `atomic` blocks (today a nested block joins the outer one)
-3. **Relations**: many-to-many, reverse accessors, `select_related`-style joins
+3. **Relations**: `select_related`-style joins, reverse foreign key accessors, composite indexes from models
 4. **More admin customization**: inlines, custom actions, fieldsets, per-model permissions, groups
 5. **Forms and templates for your own views** (typed forms, minijinja integration, Django 6.0-style template partials)
 6. **API tokens** for non-browser API clients, and per-object API permissions

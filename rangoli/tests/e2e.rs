@@ -34,12 +34,21 @@ struct Post {
     rating: Option<f64>,
 }
 
-/// The same table after a schema change: `rating` dropped, `views` added, `title` widened.
+#[derive(Model, Clone, Debug, PartialEq)]
+#[model(table = "blog_tag", display = "name")]
+struct Tag {
+    id: Option<i64>,
+    #[field(max_length = 50, unique)]
+    name: String,
+}
+
+/// The same table after a schema change: `rating` dropped, `views` added, `title` widened and
+/// indexed, timestamps added, and a many-to-many relation to tags.
 #[derive(Model, Clone, Debug)]
-#[model(table = "blog_post", display = "title")]
+#[model(table = "blog_post", display = "title", m2m(tags = Tag))]
 struct PostV2 {
     id: Option<i64>,
-    #[field(max_length = 300)]
+    #[field(max_length = 300, index)]
     title: String,
     #[field(text)]
     body: String,
@@ -59,7 +68,16 @@ fn post(title: &str, author: &Author, published: bool, rating: Option<f64>) -> P
 }
 
 async fn reset(db: &orm::Db) {
-    for t in ["blog_post", "rangoli_session", "rangoli_admin_log", "blog_author", "rangoli_user", "rangoli_migrations"] {
+    for t in [
+        "blog_post_tags",
+        "blog_tag",
+        "blog_post",
+        "rangoli_session",
+        "rangoli_admin_log",
+        "blog_author",
+        "rangoli_user",
+        "rangoli_migrations",
+    ] {
         let sql = format!("DROP TABLE IF EXISTS {}", db.dialect.quote(t));
         sqlx::query(&sql).execute(&db.pool).await.unwrap();
     }
@@ -159,6 +177,7 @@ async fn full_stack() {
     // ---- schema evolution: drop a column, add a NOT NULL one, widen another
     let v2 = App::new()
         .admin::<Author>()
+        .admin::<Tag>()
         .admin_with::<PostV2>(
             ModelAdmin::new()
                 .list_display([&PostV2::TITLE, &PostV2::AUTHOR_ID, &PostV2::PUBLISHED, &PostV2::VIEWS, &PostV2::CREATED_AT])
@@ -172,7 +191,7 @@ async fn full_stack() {
         .api::<Author>(Api::new().read(Access::Authenticated).write(Access::Nobody));
     let file = migrate::make(&migrations, v2.models(), Some("post_views")).unwrap().unwrap();
     let text = std::fs::read_to_string(&file).unwrap();
-    for op in ["\"alter_column\"", "\"add_column\"", "\"drop_column\""] {
+    for op in ["\"alter_column\"", "\"add_column\"", "\"drop_column\"", "\"add_index\"", "\"blog_post_tags\"", "\"blog_post_title_idx\""] {
         assert!(text.contains(op), "{op} missing from {text}");
     }
     assert_eq!(migrate::pending(&migrations).await.unwrap().len(), 1);
@@ -211,6 +230,31 @@ async fn full_stack() {
     assert_eq!(PostV2::objects().filter(PostV2::PUBLISH_AT.gte(jan1)).count().await.unwrap(), 1, "datetimes compare in SQL");
     assert_eq!(PostV2::objects().filter(PostV2::PUBLISH_AT.lt(jan1)).count().await.unwrap(), 0);
     assert_eq!(PostV2::objects().filter(PostV2::PUBLISH_AT.is_null()).count().await.unwrap(), 3);
+    assert!(migrate::make(&migrations, v2.models(), None).unwrap().is_none(), "indexes and join tables round-trip");
+
+    // ---- many-to-many
+    let (mut rust, mut web) = (Tag { id: None, name: "rust".into() }, Tag { id: None, name: "web".into() });
+    rust.save().await.unwrap();
+    web.save().await.unwrap();
+    let first = PostV2::objects().order_by(PostV2::ID.asc()).first().await.unwrap().unwrap();
+    first.tags().add(&[&rust, &web]).await.unwrap();
+    first.tags().add_ids([rust.id.unwrap()]).await.unwrap(); // already linked: skipped
+    assert_eq!(first.tags().count().await.unwrap(), 2);
+    assert_eq!(first.tags().all().await.unwrap(), vec![rust.clone(), web.clone()]);
+    assert_eq!(first.tags().query().filter(Tag::NAME.eq("web")).count().await.unwrap(), 1, "related rows are a queryset");
+    assert_eq!(PostV2::objects().filter(PostV2::TAGS.has(rust.id.unwrap())).count().await.unwrap(), 1, "filter across the relation");
+    assert_eq!(PostV2::TAGS.reverse(&web).count().await.unwrap(), 1, "reverse direction");
+    first.tags().set_ids([web.id.unwrap()]).await.unwrap();
+    assert_eq!(first.tags().ids().await.unwrap(), vec![web.id.unwrap()]);
+    first.tags().remove_ids([web.id.unwrap()]).await.unwrap();
+    assert_eq!(first.tags().count().await.unwrap(), 0);
+    let unsaved = PostV2 { id: None, ..first.clone() };
+    assert!(unsaved.tags().ids().await.is_err(), "unsaved objects have no relations yet");
+    let mut doomed = Tag { id: None, name: "doomed".into() };
+    doomed.save().await.unwrap();
+    first.tags().add(&[&doomed]).await.unwrap();
+    doomed.delete().await.unwrap();
+    assert_eq!(first.tags().count().await.unwrap(), 0, "deleting a tag removes its links");
 
     // ---- admin over HTTP
     let app = v2.router();
@@ -299,6 +343,7 @@ async fn full_stack() {
     let (_, _, body) = send(get(&format!("/admin/blog_post/{}/", long.id.unwrap()), &cookie)).await;
     assert!(body.contains(">Grace Hopper</option>") && body.contains(">Alan</option>"), "foreign keys render as a select");
     assert!(body.contains("type=\"datetime-local\"") && body.contains("value=\"2026-01-02T03:04\""), "datetime input");
+    assert!(body.contains("name=\"tags\" id=\"id_tags\" multiple") && body.contains(">rust</option>"), "many-to-many multi-select");
     assert!(!body.contains("name=\"created_at\"") && !body.contains("name=\"updated_at\""), "auto fields are not editable");
     // ModelAdmin settings
     let (_, _, body) = send(get("/admin/blog_post/", &cookie)).await;
@@ -312,9 +357,18 @@ async fn full_stack() {
     let post_url = format!("/admin/blog_post/{}/", long.id.unwrap());
     let (_, _, body) = send(get(&post_url, &cookie)).await;
     assert!(body.contains("<div class=\"readonly\">7</div>") && !body.contains("name=\"views\""), "read-only field");
-    let edit = format!("title=Long&body=b&published=on&author_id={}&views=999", alan.id.unwrap());
+    let edit = format!(
+        "title=Long&body=b&published=on&author_id={}&views=999&tags={}&tags={}",
+        alan.id.unwrap(),
+        rust.id.unwrap(),
+        web.id.unwrap()
+    );
     assert_eq!(send(form(&post_url, &cookie, &edit)).await.0, StatusCode::SEE_OTHER);
-    assert_eq!(PostV2::get(long.id.unwrap()).await.unwrap().views, 7, "posted values for read-only fields are ignored");
+    let long_now = PostV2::get(long.id.unwrap()).await.unwrap();
+    assert_eq!(long_now.views, 7, "posted values for read-only fields are ignored");
+    assert_eq!(long_now.tags().ids().await.unwrap(), vec![rust.id.unwrap(), web.id.unwrap()], "admin saves the relation");
+    let (_, _, body) = send(get(&format!("{post_url}history"), &cookie)).await;
+    assert!(body.contains("Changed title, body, published, publish at and tags."), "relation changes are logged");
 
     let (_, _, body) = send(get("/admin/blog_post/?f.created_at=today", &cookie)).await;
     assert!(body.contains("By created at") && body.contains("Past 7 days") && body.contains("4 results of"), "date filter");
@@ -394,9 +448,19 @@ async fn full_stack() {
     let created = json(&body);
     let new_id = created["id"].as_i64().unwrap();
     assert_eq!(created["publish_at"], "2026-05-01T10:00:00Z");
+    assert_eq!(created["tags"], serde_json::json!([]));
     assert!(created["created_at"].as_str().is_some(), "auto_now_add is filled in");
     let (status, _, body) = send(api("PATCH", &format!("/api/blog_post/{new_id}"), &cookie, r#"{"views": 42}"#)).await;
     assert_eq!((status, json(&body)["views"].as_i64(), json(&body)["title"].as_str()), (StatusCode::OK, Some(42), Some("From the API")));
+    let tag_body = format!(r#"{{"tags": [{}, {}]}}"#, web.id.unwrap(), rust.id.unwrap());
+    let (_, _, body) = send(api("PATCH", &format!("/api/blog_post/{new_id}"), &cookie, &tag_body)).await;
+    assert_eq!(json(&body)["tags"], serde_json::json!([rust.id.unwrap(), web.id.unwrap()]), "relations are writable");
+    let (_, _, body) = send(api("PATCH", &format!("/api/blog_post/{new_id}"), &cookie, r#"{"views": 43}"#)).await;
+    assert_eq!(json(&body)["tags"].as_array().unwrap().len(), 2, "PATCH leaves relations it doesn't mention");
+    let (_, _, body) = send(get("/api/blog_post/?search=From+the+API", "")).await;
+    assert_eq!(json(&body)["results"][0]["tags"].as_array().unwrap().len(), 2, "lists include relations");
+    let (status, _, body) = send(api("PATCH", &format!("/api/blog_post/{new_id}"), &cookie, r#"{"tags": "rust"}"#)).await;
+    assert_eq!((status, json(&body)["tags"][0].as_str()), (StatusCode::BAD_REQUEST, Some("Expected a list of ids.")));
     assert_eq!(
         send(api("PUT", &format!("/api/blog_post/{new_id}"), &cookie, r#"{"views": 1}"#)).await.0,
         StatusCode::BAD_REQUEST,
@@ -421,6 +485,7 @@ async fn full_stack() {
     assert!(schema["paths"]["/api/blog_post/{id}"]["patch"].is_object());
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["publish_at"]["format"], "date-time");
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["created_at"]["readOnly"], true);
+    assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["tags"]["type"], "array");
 
     // Password change, then log in with the new password.
     let (status, _, body) =

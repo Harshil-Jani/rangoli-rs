@@ -44,6 +44,8 @@ pub struct FieldMeta {
     pub auto_now_add: bool,
     /// Set to now on every save (`updated_at`).
     pub auto_now: bool,
+    /// Has a database index (`#[field(index)]`).
+    pub index: bool,
 }
 
 impl FieldMeta {
@@ -61,6 +63,18 @@ pub struct ModelMeta {
     pub display: Option<&'static str>,
     /// Every column except `id`, which every model has.
     pub fields: &'static [FieldMeta],
+    /// Many-to-many relations declared with `#[model(m2m(name = Target))]`.
+    pub m2m: &'static [M2mMeta],
+}
+
+#[derive(Debug)]
+pub struct M2mMeta {
+    /// Accessor name, e.g. `tags`.
+    pub name: &'static str,
+    /// Join table: `<table>_<name>`, columns `source_id` and `target_id`.
+    pub through: &'static str,
+    /// Table of the related model.
+    pub target: &'static str,
 }
 
 impl ModelMeta {
@@ -385,6 +399,13 @@ pub(crate) enum Node {
     And(Vec<Node>),
     Or(Vec<Node>),
     Not(Box<Node>),
+    /// `col IN (SELECT select FROM from WHERE cond)`, for many-to-many lookups.
+    InSub {
+        col: &'static str,
+        select: &'static str,
+        from: &'static str,
+        cond: Box<Node>,
+    },
 }
 
 impl Node {
@@ -430,6 +451,11 @@ impl Node {
             Node::Not(n) => {
                 sql.push_str("NOT (");
                 n.render(d, sql, p);
+                sql.push(')');
+            }
+            Node::InSub { col, select, from, cond } => {
+                sql.push_str(&format!("{} IN (SELECT {} FROM {} WHERE ", d.quote(col), d.quote(select), d.quote(from)));
+                cond.render(d, sql, p);
                 sql.push(')');
             }
         }
@@ -800,6 +826,159 @@ impl<M: Model> QuerySet<M> {
         let sets: Vec<_> = sets.into_iter().map(|a| (a.0, a.1, a.2)).collect();
         self.q.update(&sets).await
     }
+}
+
+// ---------------------------------------------------------------- many-to-many
+
+/// A many-to-many relation from `S` to `T`, generated as `Post::TAGS`.
+pub struct M2m<S, T> {
+    through: &'static str,
+    _p: PhantomData<fn() -> (S, T)>,
+}
+
+impl<S, T> Clone for M2m<S, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<S, T> Copy for M2m<S, T> {}
+
+impl<S: Model, T: Model> M2m<S, T> {
+    pub const fn new(through: &'static str) -> Self {
+        M2m { through, _p: PhantomData }
+    }
+
+    /// The related `T`s of one `S`: `Post::TAGS.of(&post)`, or simply `post.tags()`.
+    pub fn of(self, source: &S) -> Related<S, T> {
+        Related { through: self.through, source: source.pk(), _p: PhantomData }
+    }
+
+    /// Filter `S` rows related to `target_id`: `Post::objects().filter(Post::TAGS.has(rust))`.
+    pub fn has(self, target_id: i64) -> Expr<S> {
+        self.has_any([target_id])
+    }
+
+    /// Filter `S` rows related to any of `target_ids`.
+    pub fn has_any(self, target_ids: impl IntoIterator<Item = i64>) -> Expr<S> {
+        let ids = target_ids.into_iter().map(Value::Int).collect();
+        Expr::new(Node::InSub {
+            col: "id",
+            select: "source_id",
+            from: self.through,
+            cond: Box::new(Node::In("target_id", ids, FieldType::Int)),
+        })
+    }
+
+    /// The `S` rows related to one `T`: the reverse direction.
+    pub fn reverse(self, target: &T) -> QuerySet<S> {
+        S::objects().filter(self.has(target.pk().unwrap_or(-1)))
+    }
+}
+
+/// The related rows of one saved object.
+pub struct Related<S, T> {
+    through: &'static str,
+    source: Option<i64>,
+    _p: PhantomData<fn() -> (S, T)>,
+}
+
+impl<S, T> Related<S, T> {
+    fn source(&self) -> Result<i64> {
+        self.source.ok_or_else(|| Error::Decode("save the object before using its many-to-many relations".into()))
+    }
+
+    fn links(&self, source: i64) -> Query {
+        static LINK: [FieldMeta; 1] = [FieldMeta {
+            name: "target_id",
+            ty: FieldType::Int,
+            null: false,
+            unique: false,
+            password: false,
+            fk: None,
+            cascade: false,
+            auto_now: false,
+            auto_now_add: false,
+            index: false,
+        }];
+        let mut q =
+            Query { table: self.through, fields: &LINK, filter: vec![], order: vec![("target_id", false)], limit: None, offset: None };
+        q.filter.push(Node::Cmp("source_id", "=", Value::Int(source), FieldType::Int));
+        q
+    }
+
+    /// Ids of the related rows.
+    pub async fn ids(&self) -> Result<Vec<i64>> {
+        self.links(self.source()?).rows().await?.into_iter().map(|(_, v)| i64::from_value(v[0].clone())).collect()
+    }
+
+    /// Link `ids`; ones already linked are skipped.
+    pub async fn add_ids(&self, ids: impl IntoIterator<Item = i64>) -> Result<()> {
+        let source = self.source()?;
+        let have = self.ids().await?;
+        let mut want: Vec<i64> = ids.into_iter().filter(|i| !have.contains(i)).collect();
+        want.sort_unstable();
+        want.dedup();
+        // ponytail: one INSERT per link; batch them if relations get large.
+        for id in want {
+            insert_row(self.through, &[("source_id", Value::Int(source), FieldType::Int), ("target_id", Value::Int(id), FieldType::Int)])
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn remove_ids(&self, ids: impl IntoIterator<Item = i64>) -> Result<()> {
+        let mut q = self.links(self.source()?);
+        q.filter.push(Node::In("target_id", ids.into_iter().map(Value::Int).collect(), FieldType::Int));
+        q.delete().await.map(drop)
+    }
+
+    pub async fn clear(&self) -> Result<()> {
+        self.links(self.source()?).delete().await.map(drop)
+    }
+
+    /// Make the relation exactly `ids`, in one transaction.
+    pub async fn set_ids(&self, ids: impl IntoIterator<Item = i64>) -> Result<()> {
+        let ids: Vec<i64> = ids.into_iter().collect();
+        atomic(async {
+            let mut stale = self.links(self.source()?);
+            stale.filter.push(Node::Not(Box::new(Node::In("target_id", ids.iter().copied().map(Value::Int).collect(), FieldType::Int))));
+            stale.delete().await?;
+            self.add_ids(ids.iter().copied()).await
+        })
+        .await
+    }
+}
+
+impl<S, T: Model> Related<S, T> {
+    /// A queryset over the related rows, to filter or order further.
+    pub fn query(&self) -> QuerySet<T> {
+        let cond = Node::Cmp("source_id", "=", Value::Int(self.source.unwrap_or(-1)), FieldType::Int);
+        let mut qs = T::objects();
+        qs.q.filter.push(Node::InSub { col: "id", select: "target_id", from: self.through, cond: Box::new(cond) });
+        qs
+    }
+
+    pub async fn all(&self) -> Result<Vec<T>> {
+        self.source()?;
+        self.query().order_by(Order("id", false, PhantomData)).all().await
+    }
+
+    pub async fn count(&self) -> Result<i64> {
+        self.links(self.source()?).count().await
+    }
+
+    pub async fn add(&self, items: &[&T]) -> Result<()> {
+        self.add_ids(items.iter().filter_map(|t| t.pk())).await
+    }
+}
+
+/// Link rows of a join table directly, for code that works from metadata (admin, API).
+pub(crate) async fn set_links(through: &'static str, source: i64, ids: &[i64]) -> Result<()> {
+    Related::<(), ()> { through, source: Some(source), _p: PhantomData }.set_ids(ids.iter().copied()).await
+}
+
+pub(crate) async fn link_ids(through: &'static str, source: i64) -> Result<Vec<i64>> {
+    Related::<(), ()> { through, source: Some(source), _p: PhantomData }.ids().await
 }
 
 #[cfg(test)]

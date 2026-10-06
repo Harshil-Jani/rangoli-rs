@@ -20,14 +20,21 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
     }
     let mut table = ident.to_string().to_lowercase();
     let mut display: Option<String> = None;
+    let mut m2m: Vec<(syn::Ident, syn::Path)> = vec![];
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("model")) {
         attr.parse_nested_meta(|m| {
             if m.path.is_ident("table") {
                 table = m.value()?.parse::<LitStr>()?.value();
             } else if m.path.is_ident("display") {
                 display = Some(m.value()?.parse::<LitStr>()?.value());
+            } else if m.path.is_ident("m2m") {
+                m.parse_nested_meta(|rel| {
+                    let name = rel.path.get_ident().cloned().ok_or_else(|| rel.error("expected `name = Model`"))?;
+                    m2m.push((name, rel.value()?.parse()?));
+                    Ok(())
+                })?;
             } else {
-                return Err(m.error("expected `table` or `display`"));
+                return Err(m.error("expected `table`, `display` or `m2m(name = Model)`"));
             }
             Ok(())
         })?;
@@ -50,7 +57,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
 
         let (mut max_length, mut text, mut unique, mut password, mut cascade, mut fk) =
             (None::<u32>, false, false, false, false, None::<syn::Path>);
-        let (mut auto_now, mut auto_now_add) = (false, false);
+        let (mut auto_now, mut auto_now_add, mut index) = (false, false, false);
         for attr in f.attrs.iter().filter(|a| a.path().is_ident("field")) {
             attr.parse_nested_meta(|m| {
                 if m.path.is_ident("max_length") {
@@ -61,6 +68,8 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     unique = true;
                 } else if m.path.is_ident("password") {
                     password = true;
+                } else if m.path.is_ident("index") {
+                    index = true;
                 } else if m.path.is_ident("auto_now") {
                     auto_now = true;
                 } else if m.path.is_ident("auto_now_add") {
@@ -70,9 +79,9 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                 } else if m.path.is_ident("fk") {
                     fk = Some(m.value()?.parse()?);
                 } else {
-                    return Err(
-                        m.error("expected `max_length`, `text`, `unique`, `password`, `fk`, `cascade`, `auto_now` or `auto_now_add`")
-                    );
+                    return Err(m.error(
+                        "expected `max_length`, `text`, `unique`, `password`, `fk`, `cascade`, `index`, `auto_now` or `auto_now_add`",
+                    ));
                 }
                 Ok(())
             })?;
@@ -122,7 +131,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
             ::rangoli::orm::FieldMeta {
                 name: #name_s, ty: ::rangoli::orm::FieldType::#ty, null: #null,
                 unique: #unique, password: #password, fk: #fk_tokens, cascade: #cascade,
-                auto_now: #auto_now, auto_now_add: #auto_now_add,
+                auto_now: #auto_now, auto_now_add: #auto_now_add, index: #index,
             }
         });
         reads.push(quote! {
@@ -136,6 +145,19 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
         return Err(syn::Error::new_spanned(ident, "a Model needs `pub id: Option<i64>`"));
     }
 
+    let (mut m2m_metas, mut m2m_items) = (vec![], vec![]);
+    for (name, target) in &m2m {
+        let (name_s, through) = (name.to_string(), format!("{table}_{name}"));
+        let konst = format_ident!("{}", name_s.to_uppercase());
+        m2m_metas.push(quote! {
+            ::rangoli::orm::M2mMeta { name: #name_s, through: #through, target: <#target as ::rangoli::orm::Model>::TABLE }
+        });
+        m2m_items.push(quote! {
+            pub const #konst: ::rangoli::orm::M2m<Self, #target> = ::rangoli::orm::M2m::new(#through);
+            pub fn #name(&self) -> ::rangoli::orm::Related<Self, #target> { Self::#konst.of(self) }
+        });
+    }
+
     let name_s = ident.to_string();
     let display = match display {
         Some(d) => quote!(Some(#d)),
@@ -146,7 +168,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
             const TABLE: &'static str = #table;
             fn meta() -> &'static ::rangoli::orm::ModelMeta {
                 static META: ::rangoli::orm::ModelMeta = ::rangoli::orm::ModelMeta {
-                    name: #name_s, table: #table, display: #display, fields: &[#(#metas),*],
+                    name: #name_s, table: #table, display: #display, fields: &[#(#metas),*], m2m: &[#(#m2m_metas),*],
                 };
                 &META
             }
@@ -165,6 +187,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
         impl #ident {
             pub const ID: ::rangoli::orm::Col<Self, i64> = ::rangoli::orm::Col::new("id");
             #(#cols)*
+            #(#m2m_items)*
         }
     })
 }

@@ -14,6 +14,15 @@
       {% if f.kind == "readonly" %}
       <span class="field-label">{{ f.label }}</span>
       <div class="field-control"><div class="readonly">{{ f.value }}</div></div>
+      {% elif f.kind == "multiselect" %}
+      <label class="field-label" for="id_{{ f.name }}">{{ f.label }}</label>
+      <div class="field-control">
+        <select name="{{ f.name }}" id="id_{{ f.name }}" multiple size="{{ [f.options|length, 8]|min if f.options else 3 }}">
+          {% for o in f.options %}<option value="{{ o.id }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
+        </select>
+        {% if f.error %}<p class="field-error">{{ f.error }}</p>{% endif %}
+        <p class="help">{{ f.help }}</p>
+      </div>
       {% elif f.kind == "checkbox" %}
       <span class="field-label"></span>
       <div class="field-control">

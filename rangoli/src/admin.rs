@@ -965,7 +965,7 @@ fn db_error_message(e: &Error) -> Option<&'static str> {
 }
 
 /// Django's change message: "Changed title and body."
-fn change_message(meta: &ModelMeta, old: &[Value], cols: &[(&'static str, Value, FieldType)]) -> String {
+fn change_message(meta: &ModelMeta, old: &[Value], cols: &[(&'static str, Value, FieldType)], relations: &[&str]) -> String {
     let changed: Vec<String> = cols
         .iter()
         .filter(|(name, v, _)| {
@@ -975,6 +975,7 @@ fn change_message(meta: &ModelMeta, old: &[Value], cols: &[(&'static str, Value,
                 .is_some_and(|i| !meta.fields[i].is_auto() && (meta.fields[i].password || &old[i] != v))
         })
         .map(|(name, ..)| label(name).to_lowercase())
+        .chain(relations.iter().map(|r| label(r).to_lowercase()))
         .collect();
     match changed.as_slice() {
         [] => "No fields changed.".into(),
@@ -990,12 +991,25 @@ async fn form_page(
     meta: &'static ModelMeta,
     id: Option<i64>,
     raw: &HashMap<String, String>,
+    links: &Links,
     errors: HashMap<String, String>,
     status: StatusCode,
     messages: Option<minijinja::Value>,
 ) -> Page {
     let is_add = id.is_none();
-    let fields = form_fields(site, meta, raw, &errors, is_add, &options(site, meta).readonly_fields).await?;
+    let mut fields = form_fields(site, meta, raw, &errors, is_add, &options(site, meta).readonly_fields).await?;
+    for rel in meta.m2m {
+        let chosen = links.get(rel.name).cloned().unwrap_or_default();
+        let options: Vec<_> = label_rows(site, rel.target, None)
+            .await?
+            .into_iter()
+            .map(|(oid, l)| context! { id => oid, label => l, selected => chosen.contains(&oid) })
+            .collect();
+        fields.push(context! {
+            name => rel.name, label => label(rel.name), kind => "multiselect", options, error => errors.get(rel.name),
+            help => "Hold down Control, or Command on a Mac, to select more than one.",
+        });
+    }
     let obj = match id {
         Some(id) => Some(repr(meta, id, &fetch_row(meta, id).await?)),
         None => None,
@@ -1012,6 +1026,31 @@ async fn form_page(
     Ok((status, page).into_response())
 }
 
+/// Many-to-many selections: relation name -> related ids.
+type Links = HashMap<&'static str, Vec<i64>>;
+
+fn submitted_links(meta: &ModelMeta, pairs: &[(String, String)]) -> Links {
+    meta.m2m
+        .iter()
+        .map(|rel| (rel.name, pairs.iter().filter(|(k, _)| k == rel.name).filter_map(|(_, v)| v.parse().ok()).collect()))
+        .collect()
+}
+
+async fn current_links(meta: &ModelMeta, id: i64) -> crate::Result<Links> {
+    let mut out = Links::new();
+    for rel in meta.m2m {
+        out.insert(rel.name, orm::link_ids(rel.through, id).await?);
+    }
+    Ok(out)
+}
+
+async fn save_links(meta: &ModelMeta, id: i64, links: &Links) -> crate::Result<()> {
+    for rel in meta.m2m {
+        orm::set_links(rel.through, id, links.get(rel.name).map_or(&[][..], Vec::as_slice)).await?;
+    }
+    Ok(())
+}
+
 fn after_save(table: &str, id: i64, log_id: i64, form: &HashMap<String, String>) -> Response {
     let to = if form.contains_key("_continue") {
         format!("/admin/{table}/{id}/?log={log_id}")
@@ -1026,21 +1065,18 @@ fn after_save(table: &str, id: i64, log_id: i64, form: &HashMap<String, String>)
 async fn add_page(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>, UrlQuery(p): UrlQuery<Pairs>) -> Page {
     let u = staff(&user, &uri)?;
     let messages = message(&p, u, "add").await;
-    form_page(&site, u, model(&site, &table)?, None, &HashMap::new(), HashMap::new(), StatusCode::OK, messages).await
+    form_page(&site, u, model(&site, &table)?, None, &HashMap::new(), &Links::new(), HashMap::new(), StatusCode::OK, messages).await
 }
 
-async fn add_submit(
-    State(site): S,
-    user: CurrentUser,
-    uri: Uri,
-    Path(table): Path<String>,
-    Form(form): Form<HashMap<String, String>>,
-) -> Page {
+async fn add_submit(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>, Form(pairs): Form<Pairs>) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
+    let form: HashMap<String, String> = pairs.iter().cloned().collect();
+    let links = submitted_links(meta, &pairs);
     let errors = match validate(meta, &form, true, &options(&site, meta).readonly_fields).await {
         Ok(cols) => match crate::atomic(async {
             let id = orm::insert_row(meta.table, &cols).await?;
+            save_links(meta, id, &links).await?;
             let vals = row_values(meta, id).await?;
             Ok((id, log(u, meta, id, &repr(meta, id, &vals), ADDITION, "Added.".into()).await?))
         })
@@ -1051,7 +1087,7 @@ async fn add_submit(
         },
         Err(errors) => errors,
     };
-    form_page(&site, u, meta, None, &form, errors, StatusCode::UNPROCESSABLE_ENTITY, None).await
+    form_page(&site, u, meta, None, &form, &links, errors, StatusCode::UNPROCESSABLE_ENTITY, None).await
 }
 
 async fn change_page(
@@ -1064,8 +1100,9 @@ async fn change_page(
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
     let vals = fetch_row(meta, id).await?;
+    let links = current_links(meta, id).await.map_err(fail)?;
     let messages = message(&p, u, "change").await;
-    form_page(&site, u, meta, Some(id), &raw_values(meta, &vals), HashMap::new(), StatusCode::OK, messages).await
+    form_page(&site, u, meta, Some(id), &raw_values(meta, &vals), &links, HashMap::new(), StatusCode::OK, messages).await
 }
 
 async fn change_submit(
@@ -1073,19 +1110,30 @@ async fn change_submit(
     user: CurrentUser,
     uri: Uri,
     Path((table, id)): Path<(String, i64)>,
-    Form(form): Form<HashMap<String, String>>,
+    Form(pairs): Form<Pairs>,
 ) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
+    let form: HashMap<String, String> = pairs.iter().cloned().collect();
+    let links = submitted_links(meta, &pairs);
     let old = fetch_row(meta, id).await?;
+    let old_links = current_links(meta, id).await.map_err(fail)?;
     let errors = match validate(meta, &form, false, &options(&site, meta).readonly_fields).await {
         Ok(cols) => {
             let mut q = Query::new(meta);
             q.filter.push(by_id(id));
             let saved = crate::atomic(async {
                 q.update(&cols).await?;
+                save_links(meta, id, &links).await?;
                 let vals = row_values(meta, id).await?;
-                log(u, meta, id, &repr(meta, id, &vals), CHANGE, change_message(meta, &old, &cols)).await
+                let sorted = |l: &Links, n: &str| {
+                    let mut v = l.get(n).cloned().unwrap_or_default();
+                    v.sort_unstable();
+                    v.dedup();
+                    v
+                };
+                let rels: Vec<&str> = meta.m2m.iter().map(|r| r.name).filter(|n| sorted(&old_links, n) != sorted(&links, n)).collect();
+                log(u, meta, id, &repr(meta, id, &vals), CHANGE, change_message(meta, &old, &cols, &rels)).await
             })
             .await;
             match saved {
@@ -1095,7 +1143,7 @@ async fn change_submit(
         }
         Err(errors) => errors,
     };
-    form_page(&site, u, meta, Some(id), &form, errors, StatusCode::UNPROCESSABLE_ENTITY, None).await
+    form_page(&site, u, meta, Some(id), &form, &links, errors, StatusCode::UNPROCESSABLE_ENTITY, None).await
 }
 
 // ---------------------------------------------------------------- delete & history
@@ -1262,10 +1310,10 @@ mod tests {
 
     #[test]
     fn change_messages_read_like_django() {
-        static FIELDS: [FieldMeta; 3] = [
+        const fn field(name: &'static str, ty: FieldType) -> FieldMeta {
             FieldMeta {
-                name: "title",
-                ty: FieldType::Text,
+                name,
+                ty,
                 null: false,
                 unique: false,
                 password: false,
@@ -1273,31 +1321,12 @@ mod tests {
                 cascade: false,
                 auto_now: false,
                 auto_now_add: false,
-            },
-            FieldMeta {
-                name: "body",
-                ty: FieldType::Text,
-                null: false,
-                unique: false,
-                password: false,
-                fk: None,
-                cascade: false,
-                auto_now: false,
-                auto_now_add: false,
-            },
-            FieldMeta {
-                name: "author_id",
-                ty: FieldType::Int,
-                null: false,
-                unique: false,
-                password: false,
-                fk: None,
-                cascade: false,
-                auto_now: false,
-                auto_now_add: false,
-            },
-        ];
-        let meta = ModelMeta { name: "Post", table: "blog_post", display: None, fields: &FIELDS };
+                index: false,
+            }
+        }
+        static FIELDS: [FieldMeta; 3] =
+            [field("title", FieldType::Text), field("body", FieldType::Text), field("author_id", FieldType::Int)];
+        let meta = ModelMeta { name: "Post", table: "blog_post", display: None, fields: &FIELDS, m2m: &[] };
         let old = [Value::Text("a".into()), Value::Text("b".into()), Value::Int(1)];
         let cols = |t: &str, b: &str, a: i64| {
             vec![
@@ -1306,8 +1335,9 @@ mod tests {
                 ("author_id", Value::Int(a), FieldType::Int),
             ]
         };
-        assert_eq!(change_message(&meta, &old, &cols("a", "b", 1)), "No fields changed.");
-        assert_eq!(change_message(&meta, &old, &cols("x", "b", 1)), "Changed title.");
-        assert_eq!(change_message(&meta, &old, &cols("x", "y", 2)), "Changed title, body and author.");
+        assert_eq!(change_message(&meta, &old, &cols("a", "b", 1), &[]), "No fields changed.");
+        assert_eq!(change_message(&meta, &old, &cols("x", "b", 1), &[]), "Changed title.");
+        assert_eq!(change_message(&meta, &old, &cols("x", "y", 2), &[]), "Changed title, body and author.");
+        assert_eq!(change_message(&meta, &old, &cols("a", "b", 1), &["tags"]), "Changed tags.");
     }
 }
