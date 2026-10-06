@@ -62,7 +62,10 @@ async fn reset(db: &orm::Db) {
 async fn full_stack() {
     let dir = std::env::temp_dir().join(format!("rangoli-e2e-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let url = std::env::var("RANGOLI_TEST_DATABASE_URL").unwrap_or_else(|_| format!("sqlite://{}/test.sqlite3?mode=rwc", dir.display()));
+    let url = std::env::var("RANGOLI_TEST_DATABASE_URL")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| format!("sqlite://{}/test.sqlite3?mode=rwc", dir.display()));
     std::fs::create_dir_all(&dir).unwrap();
     let migrations = dir.join("migrations");
 
