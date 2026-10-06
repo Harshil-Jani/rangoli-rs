@@ -166,6 +166,7 @@ App::new()
 async fn home(Query(p): Query<Vec<(String, String)>>) -> rangoli::Result<Html<String>> {
     let posts = Post::objects().filter(Post::PUBLISHED.eq(true)).all().await?;
     let tags = Post::TAGS.prefetch(&posts).await?;          // Django's prefetch_related: 2 queries
+    // In tests: let (_, n) = rangoli::orm::count_queries(load()).await; assert_eq!(n, 3);  (assertNumQueries)
     // `home.html#posts` renders only that block (Django 6.0 template partials): an htmx search
     // box can swap just the results without a second template.
     let page = if p.iter().any(|(k, _)| k == "partial") { "home.html#posts" } else { "home.html" };
@@ -281,14 +282,14 @@ Known limits today: login lockouts are per process, the admin's foreign-key sele
 
 | | Rangoli | Django 6.1.2 |
 |---|---|---|
-| `/posts.json` (50 posts + author) | 13,976 req/s | 2,819 req/s |
-| Homepage template (50 posts + tags) | 3,589 req/s | 996 req/s |
-| JSON API list | 8,335 req/s | 1,057 req/s (DRF) |
-| Admin changelist (logged in) | 2,683 req/s | 194 req/s |
-| Startup to first response | 18 ms | 365 ms |
-| Memory under load | 57 MB | 521 MB |
+| `/posts.json` (50 posts + author) | 14,119 req/s | 2,909 req/s |
+| Homepage template (50 posts + tags) | 3,958 req/s | 1,384 req/s |
+| JSON API list | 8,653 req/s | 1,119 req/s (DRF) |
+| Admin changelist (logged in) | 2,757 req/s | 211 req/s |
+| Startup to first response (median of 5) | 15 ms | 232 ms |
+| Memory under load | 61 MB | 511 MB |
 
-The first run had Rangoli *slower* than Django on three of four pages. Profiling showed every SQLite connection in the process waiting on SQLite's global statistics mutexes; Django never sees them because each gunicorn worker is its own process. Rangoli now switches memory statistics off at runtime, and SQLite apps should copy [`.cargo/config.toml`](.cargo/config.toml), which also builds SQLite without its shared page cache. That took the homepage from 249 to 3,589 req/s. Rerun with `python bench/run.py`.
+The first run had Rangoli *slower* than Django on three of four pages. Profiling showed every SQLite connection in the process waiting on SQLite's global statistics mutexes; Django never sees them because each gunicorn worker is its own process. Rangoli now switches memory statistics off at runtime, and SQLite apps should copy [`.cargo/config.toml`](.cargo/config.toml), which also builds SQLite without its shared page cache. That took the homepage from 249 to about 3,900 req/s. Rerun with `python bench/run.py`; `python bench/experiments.py` reruns the behaviour comparisons (typos, branch migrations, N+1, security defaults, tasks).
 
 ## Development
 

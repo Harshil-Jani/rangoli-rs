@@ -1,5 +1,6 @@
 //! Where does a request's time go? Times the ORM pieces the homepage uses.
 #[path = "../src/models.rs"]
+#[allow(dead_code)]
 mod models;
 use models::*;
 use rangoli::prelude::*;

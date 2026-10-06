@@ -37,3 +37,32 @@ pub struct Post {
     #[field(auto_now)]
     pub updated_at: DateTime,
 }
+
+#[derive(Serialize)]
+pub struct Card {
+    pub title: String,
+    pub body: String,
+    pub author: String,
+    pub tags: Vec<String>,
+}
+
+/// The latest 50 published posts matching `q`, with author names and tags.
+/// Four queries however many posts: posts, their authors, the tag links, the tags.
+pub async fn latest_cards(q: &str) -> rangoli::Result<Vec<Card>> {
+    let mut posts = Post::objects().filter(Post::PUBLISHED.eq(true)).order_by(Post::CREATED_AT.desc());
+    if !q.is_empty() {
+        posts = posts.filter(Post::TITLE.contains(q) | Post::BODY.contains(q));
+    }
+    let posts = posts.limit(50).all().await?;
+    let authors = Author::in_bulk(posts.iter().map(|p| p.author_id)).await?;
+    let mut tags = Post::TAGS.prefetch(&posts).await?;
+    Ok(posts
+        .into_iter()
+        .map(|p| Card {
+            tags: tags.remove(&p.id.unwrap()).unwrap_or_default().into_iter().map(|t| t.name).collect(),
+            author: authors.get(&p.author_id).map(|a| a.name.clone()).unwrap_or_default(),
+            title: p.title,
+            body: p.body,
+        })
+        .collect())
+}

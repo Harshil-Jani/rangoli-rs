@@ -37,7 +37,7 @@ pub mod prelude {
 }
 
 use axum::extract::Request;
-use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{from_fn, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
@@ -190,6 +190,7 @@ pub async fn security_middleware(req: Request, next: Next) -> Response {
         (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         (header::X_FRAME_OPTIONS, "DENY"),
         (header::REFERRER_POLICY, "same-origin"),
+        (HeaderName::from_static("cross-origin-opener-policy"), "same-origin"),
     ] {
         // Handlers that set their own policy win.
         h.entry(name).or_insert(HeaderValue::from_static(value));

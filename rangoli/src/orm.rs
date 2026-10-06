@@ -443,7 +443,28 @@ pub async fn atomic<T, F: Future<Output = Result<T>>>(body: F) -> Result<T> {
     }
 }
 
+tokio::task_local! {
+    static QUERIES: std::cell::Cell<u64>;
+}
+
+/// Run `body` and count the SQL statements it sends, like Django's `assertNumQueries`:
+/// `let (cards, n) = count_queries(load_cards()).await; assert_eq!(n, 3);`
+/// Counts only this task's queries, so concurrent work doesn't disturb it.
+pub async fn count_queries<T>(body: impl Future<Output = T>) -> (T, u64) {
+    QUERIES
+        .scope(std::cell::Cell::new(0), async move {
+            let out = body.await;
+            (out, QUERIES.with(std::cell::Cell::get))
+        })
+        .await
+}
+
+fn note_query() {
+    let _ = QUERIES.try_with(|n| n.set(n.get() + 1));
+}
+
 pub(crate) async fn fetch_all(sql: &str, params: &Params) -> Result<Vec<AnyRow>> {
+    note_query();
     match TX.try_with(Arc::clone) {
         Ok(tx) => Ok(build(sql, params).fetch_all(&mut **tx.lock().await).await?),
         Err(_) => Ok(build(sql, params).fetch_all(&db().pool).await?),
@@ -451,6 +472,7 @@ pub(crate) async fn fetch_all(sql: &str, params: &Params) -> Result<Vec<AnyRow>>
 }
 
 pub(crate) async fn execute(sql: &str, params: &Params) -> Result<AnyQueryResult> {
+    note_query();
     match TX.try_with(Arc::clone) {
         Ok(tx) => Ok(build(sql, params).execute(&mut **tx.lock().await).await?),
         Err(_) => Ok(build(sql, params).execute(&db().pool).await?),

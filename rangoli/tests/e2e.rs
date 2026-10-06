@@ -341,7 +341,9 @@ async fn full_stack() {
     assert_eq!(PostV2::objects().filter(PostV2::TAGS.has(rust.id.unwrap())).count().await.unwrap(), 1, "filter across the relation");
     assert_eq!(PostV2::TAGS.reverse(&web).count().await.unwrap(), 1, "reverse direction");
     let all_posts = PostV2::objects().all().await.unwrap();
-    let prefetched = PostV2::TAGS.prefetch(&all_posts).await.unwrap();
+    let (prefetched, queries) = rangoli::orm::count_queries(PostV2::TAGS.prefetch(&all_posts)).await;
+    let prefetched = prefetched.unwrap();
+    assert_eq!(queries, 2, "prefetch is two queries however many posts");
     assert_eq!(prefetched.len(), all_posts.len(), "every source gets an entry");
     assert_eq!(prefetched[&first.id.unwrap()], vec![rust.clone(), web.clone()], "prefetch matches per-object access");
     first.tags().set_ids([web.id.unwrap()]).await.unwrap();
@@ -396,6 +398,7 @@ async fn full_stack() {
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert_eq!(headers[header::LOCATION], "/admin/login?next=%2Fadmin%2F");
     assert!(headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap().contains("default-src 'self'"));
+    assert_eq!(headers["cross-origin-opener-policy"], "same-origin");
 
     rangoli::auth::create_user("root", "correct horse", true).await.unwrap();
     let (status, _, body) = send(form("/admin/login", "", "username=root&password=nope")).await;

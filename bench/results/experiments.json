@@ -1,0 +1,95 @@
+{
+  "typo": {
+    "django_check": "System check identified no issues (0 silenced).",
+    "django_runtime_error": "django.core.exceptions.FieldError: Cannot resolve keyword 'titel' into field. Choices are: author, author_id, body, created_at, id, published, rating, tags, title, updated_at",
+    "rangoli_compiles": false,
+    "rangoli_compiler_error": "error[E0599]: no associated item named `TITEL` found for struct `Post` in the current scope\n  --> src/main.rs:13:42\n   |\n 5 | pub struct Post {\n   | --------------- associated item `TITEL` not found for this struct\n...\n13 |     let n = Post::objects().filter(Post::TITEL.eq(\"Hello\")).count().await?;\n   |                                          ^^^^^ associated item not found in `Post`"
+  },
+  "branch_migrations": {
+    "django": {
+      "exit_code": 1,
+      "output": "CommandError: Conflicting migrations detected; multiple leaf nodes in the migration graph: (0002_author_bio, 0002_tag_color in blog).\nTo fix them run 'python manage.py makemigrations --merge'"
+    },
+    "rangoli": {
+      "exit_code": 0,
+      "output": "Applied 00000000000000_rangoli_builtin\nApplied 00000000000001_rangoli_admin_log\nApplied 00000000000002_rangoli_tasks\nApplied 20261006205234_create_blog_author\nApplied 20261006214214_add_blog_post_created_at\nApplied 20261006221327_create_blog_tag\nApplied 20261007120000_add_blog_author_bio\nApplied 20261007120500_add_blog_tag_color"
+    },
+    "rangoli_real_conflict": {
+      "exit_code": 1,
+      "output": "Error: migration error: `20261007121000_add_blog_author_bio`: column `blog_author.bio` already exists (last changed by `20261007120000_add_blog_author_bio`; branches probably diverged)"
+    }
+  },
+  "n_plus_one": {
+    "django": {
+      "naive": 101,
+      "tuned": 2
+    },
+    "rangoli": {
+      "posts": 50,
+      "queries": 4
+    }
+  },
+  "new_project_defaults": {
+    "django_debug": "True",
+    "django_secret_key_in_source": true,
+    "django_csp_middleware": false
+  },
+  "security": {
+    "rangoli": {
+      "headers": {
+        "content-security-policy": "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        "x-frame-options": "DENY",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "same-origin",
+        "cross-origin-opener-policy": "same-origin"
+      },
+      "eight_wrong_passwords": [
+        401,
+        401,
+        401,
+        401,
+        401,
+        401,
+        401,
+        401
+      ],
+      "correct_password_after_guessing_logs_in": false,
+      "cross_site_login_post": 403
+    },
+    "django": {
+      "headers": {
+        "content-security-policy": null,
+        "x-frame-options": "DENY",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "same-origin",
+        "cross-origin-opener-policy": "same-origin"
+      },
+      "eight_wrong_passwords": [
+        200,
+        200,
+        200,
+        200,
+        200,
+        200,
+        200,
+        200
+      ],
+      "correct_password_after_guessing_logs_in": true,
+      "cross_site_login_post": 403
+    }
+  },
+  "tasks": {
+    "django_task_backend": "{'default': {'BACKEND': 'django.tasks.backends.immediate.ImmediateBackend'}}",
+    "django_worker_commands": [],
+    "rangoli_worker_command": [
+      "worker                      run background tasks (RANGOLI_WORKERS loops)"
+    ]
+  },
+  "footprint": {
+    "rangoli_binary_mb": 13.0,
+    "django_site_packages_mb": 42.8,
+    "django_python_packages": 5,
+    "rangoli_app_lines": 87,
+    "django_app_lines": 158
+  }
+}

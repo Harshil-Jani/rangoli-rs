@@ -1,0 +1,12 @@
+# A deliberately broken program: the field name is misspelled. `cargo check` must fail.
+[package]
+name = "typo_rangoli"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+rangoli = { path = "../../rangoli" }
+tokio = { version = "1", features = ["full"] }

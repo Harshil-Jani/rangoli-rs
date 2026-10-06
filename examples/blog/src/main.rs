@@ -21,35 +21,11 @@ async fn posts() -> rangoli::Result<Json<Vec<PostOut>>> {
     Ok(Json(posts.into_iter().map(|p| PostOut { author: authors.get(&p.author_id).map(|a| a.name.clone()), post: p }).collect()))
 }
 
-#[derive(Serialize)]
-struct Card {
-    title: String,
-    body: String,
-    author: String,
-    tags: Vec<String>,
-}
-
 /// The public homepage. `?partial=1` renders only the `posts` block, which the
 /// search box swaps in with htmx (Django 6.0 template partials).
 async fn home(Query(p): Query<Vec<(String, String)>>) -> rangoli::Result<Html<String>> {
     let q = p.iter().find(|(k, _)| k == "q").map(|(_, v)| v.trim().to_string()).unwrap_or_default();
-    let mut posts = Post::objects().filter(Post::PUBLISHED.eq(true)).order_by(Post::CREATED_AT.desc());
-    if !q.is_empty() {
-        posts = posts.filter(Post::TITLE.contains(&q) | Post::BODY.contains(&q));
-    }
-    let posts = posts.limit(50).all().await?;
-    // Three queries in total, however many posts: posts, their authors, their tags.
-    let authors = Author::in_bulk(posts.iter().map(|p| p.author_id)).await?;
-    let mut tags = Post::TAGS.prefetch(&posts).await?;
-    let cards: Vec<Card> = posts
-        .into_iter()
-        .map(|p| Card {
-            tags: tags.remove(&p.id.unwrap()).unwrap_or_default().into_iter().map(|t| t.name).collect(),
-            author: authors.get(&p.author_id).map(|a| a.name.clone()).unwrap_or_default(),
-            title: p.title,
-            body: p.body,
-        })
-        .collect();
+    let cards = latest_cards(&q).await?;
     let page = if p.iter().any(|(k, _)| k == "partial") { "home.html#posts" } else { "home.html" };
     render(page, context! { posts => cards, q })
 }

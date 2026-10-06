@@ -50,6 +50,17 @@ def start_django():
     return proc, wait_until_up(DJANGO + "/posts.json", t)
 
 
+def startup_median(start, runs=5):
+    """Median launch-to-first-response time; the first launch of a fresh binary can be slow on macOS."""
+    times = []
+    for _ in range(runs):
+        proc, t = start()
+        proc.terminate()
+        proc.wait()
+        times.append(t)
+    return sorted(times)[len(times) // 2]
+
+
 def rss_mb(pid):
     pids = [str(pid)] + subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True).stdout.split()
     out = subprocess.run(["ps", "-o", "rss=", "-p", ",".join(pids)], capture_output=True, text=True).stdout.split()
@@ -106,9 +117,10 @@ def main():
         "admin_changelist": ("/admin/blog_post/", "/admin/blog/post/", True, b"result_list"),
     }
     results = {"machine": {"cpu": subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip(), "cores": CORES},
-               "settings": {"duration": DURATION, "connections": CONNECTIONS, "django_workers": CORES}, "frameworks": {}}
+               "settings": {"duration": DURATION, "connections": CONNECTIONS, "django_workers": CORES, "startup": "median of 5 launches"}, "frameworks": {}}
     for name, start, base, idx in [("rangoli", start_rangoli, RANGOLI, 0), ("django", start_django, DJANGO, 1)]:
-        proc, startup = start()
+        startup = startup_median(start)
+        proc, _ = start()
         try:
             cookie = login_rangoli() if name == "rangoli" else login_django()
             fw = {"startup_ms": round(startup * 1000), "idle_rss_mb": rss_mb(proc.pid), "scenarios": {}}
