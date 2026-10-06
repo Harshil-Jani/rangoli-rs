@@ -13,6 +13,7 @@
 extern crate self as rangoli;
 
 pub mod admin;
+pub mod api;
 pub mod auth;
 pub mod datetime;
 pub mod migrate;
@@ -25,6 +26,7 @@ pub use rangoli_macros::Model;
 
 pub mod prelude {
     pub use crate::admin::ModelAdmin;
+    pub use crate::api::{Access, Api};
     pub use crate::auth::CurrentUser;
     pub use crate::{atomic, App, DateTime, Error, Model, Result};
 }
@@ -194,6 +196,7 @@ fn is_cross_origin(req: &Request) -> bool {
 pub struct App {
     models: Vec<&'static ModelMeta>,
     admin: Vec<(&'static ModelMeta, admin::Options)>,
+    api: Vec<(&'static ModelMeta, api::Options)>,
     routes: Router,
 }
 
@@ -210,6 +213,7 @@ impl App {
         App {
             models: vec![auth::User::meta(), auth::Session::meta(), admin::LogEntry::meta()],
             admin: vec![(auth::User::meta(), admin::Options::default())],
+            api: vec![],
             routes: Router::new(),
         }
     }
@@ -238,6 +242,14 @@ impl App {
         self.model::<M>()
     }
 
+    /// Serve a JSON API for a model at `/api/<table>/` (see [`api`]). Staff-only unless
+    /// `Api::read`/`Api::write` open it up.
+    pub fn api<M: orm::Model>(mut self, settings: api::Api<M>) -> Self {
+        self.api.retain(|(m, _)| m.table != M::TABLE);
+        self.api.push((M::meta(), settings.opts));
+        self.model::<M>()
+    }
+
     /// Your own axum routes, merged next to `/admin`.
     pub fn routes(mut self, r: Router) -> Self {
         self.routes = self.routes.merge(r);
@@ -253,6 +265,7 @@ impl App {
         self.routes
             .clone()
             .merge(admin::router(self.admin.clone(), self.models.clone()))
+            .merge(api::router(self.api.clone()))
             .layer(from_fn(auth::session_middleware))
             .layer(from_fn(security_middleware))
     }

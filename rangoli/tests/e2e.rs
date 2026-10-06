@@ -5,6 +5,7 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use rangoli::admin::ModelAdmin;
+use rangoli::api::{Access, Api};
 use rangoli::orm;
 use rangoli::{migrate, App, DateTime, Error, Model};
 use tower::ServiceExt;
@@ -156,15 +157,19 @@ async fn full_stack() {
     assert!(ada.delete().await.unwrap_err().is_foreign_key_violation(), "can't delete an author with posts");
 
     // ---- schema evolution: drop a column, add a NOT NULL one, widen another
-    let v2 = App::new().admin::<Author>().admin_with::<PostV2>(
-        ModelAdmin::new()
-            .list_display([&PostV2::TITLE, &PostV2::AUTHOR_ID, &PostV2::PUBLISHED, &PostV2::VIEWS, &PostV2::CREATED_AT])
-            .search_fields([&PostV2::TITLE])
-            .list_filter([&PostV2::PUBLISHED, &PostV2::AUTHOR_ID, &PostV2::CREATED_AT])
-            .ordering(PostV2::TITLE.asc())
-            .readonly_fields([&PostV2::VIEWS])
-            .list_per_page(2),
-    );
+    let v2 = App::new()
+        .admin::<Author>()
+        .admin_with::<PostV2>(
+            ModelAdmin::new()
+                .list_display([&PostV2::TITLE, &PostV2::AUTHOR_ID, &PostV2::PUBLISHED, &PostV2::VIEWS, &PostV2::CREATED_AT])
+                .search_fields([&PostV2::TITLE])
+                .list_filter([&PostV2::PUBLISHED, &PostV2::AUTHOR_ID, &PostV2::CREATED_AT])
+                .ordering(PostV2::TITLE.asc())
+                .readonly_fields([&PostV2::VIEWS])
+                .list_per_page(2),
+        )
+        .api::<PostV2>(Api::new().read(Access::Public))
+        .api::<Author>(Api::new().read(Access::Authenticated).write(Access::Nobody));
     let file = migrate::make(&migrations, v2.models(), Some("post_views")).unwrap().unwrap();
     let text = std::fs::read_to_string(&file).unwrap();
     for op in ["\"alter_column\"", "\"add_column\"", "\"drop_column\""] {
@@ -340,6 +345,82 @@ async fn full_stack() {
     assert_eq!(PostV2::objects().count().await.unwrap(), 3);
     let (_, headers, _) = send(form("/admin/blog_post/", &cookie, "action=delete_selected")).await;
     assert!(headers[header::LOCATION].to_str().unwrap().ends_with("warn=noitems"));
+
+    // ---- JSON API
+    let api = |method: &str, uri: &str, cookie: &str, body: &str| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::COOKIE, cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let json = |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap();
+    let total = PostV2::objects().count().await.unwrap();
+    let (status, _, body) = send(get("/api/blog_post/", "")).await;
+    assert_eq!(status, StatusCode::OK, "public read");
+    let page = json(&body);
+    assert_eq!(page["count"], total);
+    assert!(page["results"][0]["created_at"].as_str().unwrap().ends_with('Z'), "datetimes are ISO 8601");
+    let (_, _, body) = send(get("/api/blog_post/?limit=1&ordering=-title", "")).await;
+    let page = json(&body);
+    assert_eq!(page["results"].as_array().unwrap().len(), 1);
+    assert_eq!(page["next"], "/api/blog_post/?ordering=-title&limit=1&offset=1");
+    assert_eq!(page["results"][0]["title"], "Rust 50% off_sale");
+    let (_, _, body) = send(get(&format!("/api/blog_post/?author_id={}&published=true", ada.id.unwrap()), "")).await;
+    assert_eq!(json(&body)["count"], 2, "typed exact-match filters");
+    let (_, _, body) = send(get("/api/blog_post/?search=machinery", "")).await;
+    assert_eq!(json(&body)["count"], 1);
+    assert_eq!(send(get("/api/blog_post/?nope=1", "")).await.0, StatusCode::BAD_REQUEST);
+    let (status, _, body) = send(get("/api/blog_post/999999", "")).await;
+    assert_eq!((status, json(&body)["detail"].as_str()), (StatusCode::NOT_FOUND, Some("Not found.")));
+
+    let new_post = format!(
+        r#"{{"title": "From the API", "body": "b", "author_id": {}, "views": 1, "publish_at": "2026-05-01T10:00:00Z"}}"#,
+        alan.id.unwrap()
+    );
+    assert_eq!(send(api("POST", "/api/blog_post/", "", &new_post)).await.0, StatusCode::UNAUTHORIZED, "writes need staff");
+    let (status, _, body) = send(api("POST", "/api/blog_post/", &cookie, r#"{"title": "", "views": "many", "bogus": 1}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let errs = json(&body);
+    assert_eq!(errs["title"][0], "This field may not be blank.");
+    assert_eq!(errs["views"][0], "A valid integer is required.");
+    assert_eq!(errs["author_id"][0], "This field is required.");
+    assert_eq!(errs["bogus"][0], "Unknown field.");
+    let (status, _, body) = send(api("POST", "/api/blog_post/", &cookie, &new_post)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let created = json(&body);
+    let new_id = created["id"].as_i64().unwrap();
+    assert_eq!(created["publish_at"], "2026-05-01T10:00:00Z");
+    assert!(created["created_at"].as_str().is_some(), "auto_now_add is filled in");
+    let (status, _, body) = send(api("PATCH", &format!("/api/blog_post/{new_id}"), &cookie, r#"{"views": 42}"#)).await;
+    assert_eq!((status, json(&body)["views"].as_i64(), json(&body)["title"].as_str()), (StatusCode::OK, Some(42), Some("From the API")));
+    assert_eq!(
+        send(api("PUT", &format!("/api/blog_post/{new_id}"), &cookie, r#"{"views": 1}"#)).await.0,
+        StatusCode::BAD_REQUEST,
+        "PUT needs every field"
+    );
+    let orphan = r#"{"title": "x", "body": "b", "author_id": 424242, "views": 0}"#;
+    let (status, _, body) = send(api("POST", "/api/blog_post/", &cookie, orphan)).await;
+    assert!(status == StatusCode::BAD_REQUEST && body.contains("non_field_errors"), "foreign key errors are 400s: {body}");
+    assert_eq!(send(api("DELETE", &format!("/api/blog_post/{new_id}"), &cookie, "")).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(send(api("DELETE", &format!("/api/blog_post/{new_id}"), &cookie, "")).await.0, StatusCode::NOT_FOUND);
+
+    assert_eq!(send(get("/api/blog_author/", "")).await.0, StatusCode::UNAUTHORIZED, "authenticated-only read");
+    let (status, _, body) = send(get("/api/blog_author/", &cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("password"));
+    assert_eq!(send(api("POST", "/api/blog_author/", &cookie, "{}")).await.0, StatusCode::METHOD_NOT_ALLOWED, "write(Access::Nobody)");
+    assert_eq!(send(get("/api/rangoli_user/", &cookie)).await.0, StatusCode::NOT_FOUND, "only exposed models are served");
+
+    let (_, _, body) = send(get("/api/schema.json", "")).await;
+    let schema = json(&body);
+    assert_eq!(schema["openapi"], "3.0.3");
+    assert!(schema["paths"]["/api/blog_post/{id}"]["patch"].is_object());
+    assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["publish_at"]["format"], "date-time");
+    assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["created_at"]["readOnly"], true);
 
     // Password change, then log in with the new password.
     let (status, _, body) =

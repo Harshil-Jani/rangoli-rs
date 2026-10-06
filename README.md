@@ -139,6 +139,25 @@ App::new().admin_with::<Post>(
 
 Settings that can't work (searching a non-text column, filtering on an unsupported type) stop the app at startup, like Django's admin checks.
 
+## JSON API
+
+What Django needs Django REST framework and drf-spectacular for is one line:
+
+```rust
+App::new().api::<Post>(Api::new().read(Access::Public).write(Access::Staff))
+```
+
+| Request | Does |
+|---|---|
+| `GET /api/blog_post/?limit=20&offset=40&ordering=-created_at&search=rust&published=true` | Paginated list (`count`, `next`, `previous`, `results`), typed exact-match filters |
+| `POST /api/blog_post/` | Create; `201` with the object |
+| `GET /api/blog_post/7` | Detail; `404 {"detail": "Not found."}` |
+| `PUT` / `PATCH /api/blog_post/7` | Replace / partial update |
+| `DELETE /api/blog_post/7` | `204` |
+| `GET /api/schema.json` | OpenAPI 3 document for every exposed model |
+
+Validation uses the same rules as the admin and answers like DRF: `400 {"title": ["This field may not be blank."]}`. Access levels are `Public`, `Authenticated`, `Staff` (the default) and `Nobody`. Password fields are write-only, datetimes are ISO 8601, `auto_now` fields are filled in. Browser requests are covered by the same cross-origin protection as the admin.
+
 ## Databases
 
 Postgres, MySQL and SQLite share one code path through sqlx's `Any` driver. Only the SQL spelling differs per dialect. CI runs the same end-to-end test on all three.
@@ -166,7 +185,7 @@ This is the roadmap, in rough order. Nothing here is implemented yet:
 3. **Relations**: many-to-many, reverse accessors, `select_related`-style joins
 4. **More admin customization**: inlines, custom actions, fieldsets, per-model permissions, groups
 5. **Forms and templates for your own views** (typed forms, minijinja integration, Django 6.0-style template partials)
-6. **REST API layer** (what DRF does)
+6. **API tokens** for non-browser API clients, and per-object API permissions
 7. **Background tasks with a real worker** (Django 6.0 ships the task interface but no worker)
 8. **WebSockets** (what Channels does)
 9. Password reset, groups, email, caching, i18n, embedding migrations in the binary, multi-database routing

@@ -60,6 +60,7 @@ async fn main() -> rangoli::Result<()> {
                 .list_filter([&Post::PUBLISHED, &Post::AUTHOR_ID, &Post::CREATED_AT])
                 .ordering(Post::CREATED_AT.desc()),
         )
+        .api::<Post>(Api::new().read(Access::Public)) // /api/blog_post/ and /api/schema.json
         .routes(Router::new().route("/", get(posts)).route("/posts/{id}", get(post)))
         .run()
         .await
