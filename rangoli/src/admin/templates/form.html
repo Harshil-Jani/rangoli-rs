@@ -31,7 +31,9 @@
       {% else %}
       <label class="field-label{% if f.required %} required{% endif %}" for="id_{{ f.name }}">{{ f.label }}</label>
       <div class="field-control">
-        {% if f.kind == "textarea" %}
+        {% if f.kind == "json" %}
+        <textarea name="{{ f.name }}" id="id_{{ f.name }}" rows="8" class="code" spellcheck="false"{% if f.required %} required{% endif %}{% if f.error %} aria-invalid="true" aria-describedby="id_{{ f.name }}_error"{% endif %}>{{ f.value }}</textarea>
+        {% elif f.kind == "textarea" %}
         <textarea name="{{ f.name }}" id="id_{{ f.name }}" rows="8"{% if f.required %} required{% endif %}{% if f.error %} aria-invalid="true" aria-describedby="id_{{ f.name }}_error"{% endif %}>{{ f.value }}</textarea>
         {% elif f.kind == "select" %}
         <select name="{{ f.name }}" id="id_{{ f.name }}"{% if f.required %} required{% endif %}{% if f.error %} aria-invalid="true" aria-describedby="id_{{ f.name }}_error"{% endif %}>

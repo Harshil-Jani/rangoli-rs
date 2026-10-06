@@ -26,6 +26,8 @@ pub enum FieldType {
     Text,
     /// `crate::DateTime`, stored as Unix seconds.
     DateTime,
+    /// `crate::Json`, stored as text.
+    Json,
 }
 
 #[derive(Debug)]
@@ -46,6 +48,78 @@ pub struct FieldMeta {
     pub auto_now: bool,
     /// Has a database index (`#[field(index)]`).
     pub index: bool,
+    /// `(stored value, label)` pairs for a `#[field(choices)]` enum.
+    pub choices: Option<&'static [(&'static str, &'static str)]>,
+    /// `#[field(default = ...)]`: fills existing rows in migrations, new forms and API creates.
+    pub default: Option<Lit>,
+}
+
+/// A literal default value, usable in `'static` metadata.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Lit {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(&'static str),
+}
+
+impl Lit {
+    pub fn value(self) -> Value {
+        match self {
+            Lit::Int(i) => Value::Int(i),
+            Lit::Float(x) => Value::Float(x),
+            Lit::Bool(b) => Value::Bool(b),
+            Lit::Str(s) => Value::Text(s.into()),
+        }
+    }
+}
+
+/// A fieldless enum stored as a short string: implemented by `#[derive(Choices)]`.
+///
+/// ```no_run
+/// use rangoli::{Choices, Model};
+/// #[derive(Choices, Clone, Copy)]
+/// enum Size { #[choice(value = "extra-large")] Xl }
+/// #[derive(Model)]
+/// struct Shirt { id: Option<i64>, #[field(choices, max_length = 11)] size: Size }
+/// ```
+///
+/// A stored value that doesn't fit the column is a compile error, not a runtime surprise:
+///
+/// ```compile_fail
+/// use rangoli::{Choices, Model};
+/// #[derive(Choices, Clone, Copy)]
+/// enum Size { #[choice(value = "extra-large")] Xl }
+/// #[derive(Model)]
+/// struct Shirt { id: Option<i64>, #[field(choices, max_length = 4)] size: Size }
+/// ```
+pub trait Choice: Sized + Copy + 'static {
+    /// `(stored value, label)` for every variant, in declaration order.
+    const CHOICES: &'static [(&'static str, &'static str)];
+    fn as_str(self) -> &'static str;
+    fn from_db(s: &str) -> Option<Self>;
+    fn label(self) -> &'static str {
+        let v = self.as_str();
+        Self::CHOICES.iter().find(|(value, _)| *value == v).map_or(v, |(_, label)| label)
+    }
+}
+
+/// Any JSON document, stored as text: `#[derive(Model)] struct Event { payload: Json }`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Json(pub serde_json::Value);
+
+impl std::ops::Deref for Json {
+    type Target = serde_json::Value;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<serde_json::Value> for Json {
+    fn from(v: serde_json::Value) -> Self {
+        Json(v)
+    }
 }
 
 impl FieldMeta {
@@ -118,6 +192,11 @@ impl From<&str> for Value {
         Value::Text(v.to_owned())
     }
 }
+impl From<Json> for Value {
+    fn from(v: Json) -> Self {
+        Value::Text(v.0.to_string())
+    }
+}
 impl From<crate::DateTime> for Value {
     fn from(v: crate::DateTime) -> Self {
         Value::Int(v.unix())
@@ -171,6 +250,14 @@ impl FromValue for String {
         }
     }
 }
+impl FromValue for Json {
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::Text(s) => serde_json::from_str(&s).map(Json).map_err(|e| Error::Decode(format!("stored JSON is invalid: {e}"))),
+            v => mismatch(v, "JSON text"),
+        }
+    }
+}
 impl FromValue for crate::DateTime {
     fn from_value(v: Value) -> Result<Self> {
         match v {
@@ -206,6 +293,9 @@ impl Kind for String {
 }
 impl Kind for crate::DateTime {
     const KIND: FieldType = FieldType::DateTime;
+}
+impl Kind for Json {
+    const KIND: FieldType = FieldType::Json;
 }
 
 // ---------------------------------------------------------------- database
@@ -288,7 +378,7 @@ fn bind<'q>(q: AnyQuery<'q>, v: &Value, ty: FieldType) -> AnyQuery<'q> {
             FieldType::Int | FieldType::DateTime => q.bind(None::<i64>),
             FieldType::Float => q.bind(None::<f64>),
             FieldType::Bool => q.bind(None::<bool>),
-            FieldType::Varchar(_) | FieldType::Text => q.bind(None::<String>),
+            FieldType::Varchar(_) | FieldType::Text | FieldType::Json => q.bind(None::<String>),
         },
         Value::Bool(b) => q.bind(*b),
         Value::Int(i) => q.bind(*i),
@@ -376,7 +466,7 @@ pub fn read(row: &AnyRow, col: &str, ty: FieldType) -> Result<Value> {
             Ok(v) => v.map_or(Value::Null, Value::Bool),
             Err(_) => int(row, col)?.map_or(Value::Null, |i| Value::Bool(i != 0)),
         },
-        FieldType::Varchar(_) | FieldType::Text => match row.try_get::<Option<String>, _>(col) {
+        FieldType::Varchar(_) | FieldType::Text | FieldType::Json => match row.try_get::<Option<String>, _>(col) {
             Ok(v) => v.map_or(Value::Null, Value::Text),
             // MySQL TEXT columns surface as BLOB through the Any driver.
             Err(_) => match row.try_get::<Option<Vec<u8>>, _>(col)? {
@@ -899,6 +989,8 @@ impl<S, T> Related<S, T> {
             auto_now: false,
             auto_now_add: false,
             index: false,
+            choices: None,
+            default: None,
         }];
         let mut q =
             Query { table: self.through, fields: &LINK, filter: vec![], order: vec![("target_id", false)], limit: None, offset: None };

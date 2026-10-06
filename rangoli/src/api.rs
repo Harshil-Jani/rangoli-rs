@@ -156,6 +156,7 @@ fn to_json(meta: &ModelMeta, id: i64, vals: &[Value]) -> JsonValue {
             Value::Int(i) => json!(i),
             Value::Float(x) => json!(x),
             Value::Bool(b) => json!(b),
+            Value::Text(s) if f.ty == FieldType::Json => serde_json::from_str(s).unwrap_or(JsonValue::Null),
             Value::Text(s) => json!(s),
         };
         obj.insert(f.name.into(), j);
@@ -165,6 +166,10 @@ fn to_json(meta: &ModelMeta, id: i64, vals: &[Value]) -> JsonValue {
 
 /// Parse one JSON value for a field, with the admin's validation rules.
 fn from_json(f: &FieldMeta, j: &JsonValue) -> Result<Value, String> {
+    if f.ty == FieldType::Json {
+        // Any JSON document is valid content; `null` means SQL NULL only on nullable fields.
+        return Ok(if j.is_null() && f.null { Value::Null } else { Value::Text(j.to_string()) });
+    }
     if j.is_null() {
         return if f.null { Ok(Value::Null) } else { Err("This field may not be null.".into()) };
     }
@@ -180,9 +185,11 @@ fn from_json(f: &FieldMeta, j: &JsonValue) -> Result<Value, String> {
         FieldType::Varchar(n) => match j.as_str() {
             Some(s) if s.chars().count() > n as usize => Err(format!("Ensure this field has no more than {n} characters.")),
             Some(s) if s.is_empty() && !f.null => Err("This field may not be blank.".into()),
+            Some(s) if f.choices.is_some_and(|c| !c.iter().any(|(v, _)| *v == s)) => Err(format!("\"{s}\" is not a valid choice.")),
             Some(s) => Ok(Value::Text(s.into())),
             None => Err("Not a valid string.".into()),
         },
+        FieldType::Json => unreachable!("handled above"),
         FieldType::Text => match j.as_str() {
             Some(s) if s.is_empty() && !f.null => Err("This field may not be blank.".into()),
             Some(s) => Ok(Value::Text(s.into())),
@@ -228,6 +235,8 @@ const fn link_field(name: &'static str) -> FieldMeta {
         auto_now: false,
         auto_now_add: false,
         index: false,
+        choices: None,
+        default: None,
     }
 }
 
@@ -276,6 +285,7 @@ async fn columns(
         let value = match obj.get(f.name) {
             Some(j) => from_json(f, j),
             None if partial => continue,
+            None if f.default.is_some() => Ok(f.default.unwrap().value()),
             None if f.null => Ok(Value::Null),
             None if f.ty == FieldType::Bool => Ok(Value::Bool(false)),
             None => Err("This field is required.".into()),
@@ -324,6 +334,7 @@ async fn list(State(site): S, user: CurrentUser, Path(table): Path<String>, UrlQ
         }
         let f = meta.field(k).filter(|f| !f.password).ok_or_else(|| problem(StatusCode::BAD_REQUEST, &format!("Unknown filter `{k}`.")))?;
         let j = match f.ty {
+            FieldType::Json => return Err(problem(StatusCode::BAD_REQUEST, &format!("Cannot filter on JSON field `{k}`."))),
             FieldType::Varchar(_) | FieldType::Text | FieldType::DateTime => json!(raw),
             _ if raw == "null" => JsonValue::Null,
             _ => serde_json::from_str(raw).unwrap_or(JsonValue::String(raw.clone())),
@@ -448,7 +459,20 @@ fn field_schema(f: &FieldMeta) -> JsonValue {
         FieldType::Varchar(n) => json!({ "type": "string", "maxLength": n }),
         FieldType::Text => json!({ "type": "string" }),
         FieldType::DateTime => json!({ "type": "string", "format": "date-time" }),
+        FieldType::Json => json!({ "description": "Any JSON value" }),
     };
+    if let Some(choices) = f.choices {
+        s["enum"] = json!(choices.iter().map(|(v, _)| *v).collect::<Vec<_>>());
+    }
+    if let Some(d) = f.default {
+        s["default"] = match d.value() {
+            Value::Int(i) => json!(i),
+            Value::Float(x) => json!(x),
+            Value::Bool(b) => json!(b),
+            Value::Text(t) => json!(t),
+            Value::Null => JsonValue::Null,
+        };
+    }
     if f.null {
         s["nullable"] = json!(true);
     }
@@ -481,8 +505,12 @@ async fn schema(State(site): S) -> Json<JsonValue> {
                 json!({ "type": "array", "items": { "type": "integer" }, "description": format!("ids of related {} rows", rel.target) }),
             );
         }
-        let required: Vec<&str> =
-            meta.fields.iter().filter(|f| !f.null && !f.is_auto() && f.ty != FieldType::Bool).map(|f| f.name).collect();
+        let required: Vec<&str> = meta
+            .fields
+            .iter()
+            .filter(|f| !f.null && !f.is_auto() && f.ty != FieldType::Bool && f.default.is_none())
+            .map(|f| f.name)
+            .collect();
         schemas.insert(meta.name.into(), json!({ "type": "object", "properties": props, "required": required }));
         let item = json!({ "$ref": format!("#/components/schemas/{}", meta.name) });
         let page = json!({ "type": "object", "properties": {

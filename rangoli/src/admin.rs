@@ -145,8 +145,8 @@ impl<M: Model> ModelAdmin<M> {
             }
         }
         for n in self.opts.list_filter.iter().flatten() {
-            if !field(n).is_some_and(|f| matches!(f.ty, FieldType::Bool | FieldType::DateTime) || f.fk.is_some()) {
-                return Err(format!("{}: list_filter supports boolean, date and foreign key columns, not `{n}`", meta.name));
+            if !field(n).is_some_and(|f| matches!(f.ty, FieldType::Bool | FieldType::DateTime) || f.fk.is_some() || f.choices.is_some()) {
+                return Err(format!("{}: list_filter supports boolean, date, choice and foreign key columns, not `{n}`", meta.name));
             }
         }
         Ok(())
@@ -290,7 +290,10 @@ fn display(v: &Value, f: &FieldMeta) -> String {
         Value::Int(i) if f.ty == FieldType::DateTime => DateTime::from_unix(*i).human(),
         Value::Int(i) => i.to_string(),
         Value::Float(x) => x.to_string(),
-        Value::Text(s) if f.ty == FieldType::Text && s.chars().count() > 80 => s.chars().take(80).chain("…".chars()).collect(),
+        Value::Text(s) if f.choices.is_some() => f.choices.unwrap().iter().find(|(v, _)| v == s).map_or(s.clone(), |(_, l)| l.to_string()),
+        Value::Text(s) if matches!(f.ty, FieldType::Text | FieldType::Json) && s.chars().count() > 80 => {
+            s.chars().take(80).chain("…".chars()).collect()
+        }
         Value::Text(s) => s.clone(),
     }
 }
@@ -519,8 +522,13 @@ fn columns_for(meta: &'static ModelMeta, opts: &Options) -> Vec<Column> {
         return names.iter().filter_map(|n| if *n == "id" { Some(Column::Id) } else { field(n) }).collect();
     }
     // Default: the display field first (Django's `__str__` column), then the rest.
-    let mut cols: Vec<Column> =
-        meta.fields.iter().enumerate().filter(|(_, f)| !f.password && f.ty != FieldType::Text).map(|(i, f)| Column::Field(i, f)).collect();
+    let mut cols: Vec<Column> = meta
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| !f.password && !matches!(f.ty, FieldType::Text | FieldType::Json))
+        .map(|(i, f)| Column::Field(i, f))
+        .collect();
     if let Some(pos) = meta.display.and_then(|d| cols.iter().position(|c| c.name() == d)) {
         let first = cols.remove(pos);
         cols.insert(0, first);
@@ -541,7 +549,7 @@ fn search_fields(meta: &'static ModelMeta, opts: &Options) -> Vec<&'static str> 
 fn filter_fields(meta: &'static ModelMeta, opts: &Options) -> Vec<&'static FieldMeta> {
     match &opts.list_filter {
         Some(names) => names.iter().filter_map(|n| meta.field(n)).collect(),
-        None => meta.fields.iter().filter(|f| matches!(f.ty, FieldType::Bool | FieldType::DateTime)).collect(),
+        None => meta.fields.iter().filter(|f| matches!(f.ty, FieldType::Bool | FieldType::DateTime) || f.choices.is_some()).collect(),
     }
 }
 
@@ -584,6 +592,9 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
                 Ok(id) => Node::Cmp(f.name, "=", Value::Int(id), FieldType::Int),
                 Err(_) => continue,
             },
+            FieldType::Varchar(_) if f.choices.is_some_and(|c| c.iter().any(|(val, _)| *val == v)) => {
+                Node::Cmp(f.name, "=", Value::Text(v.to_string()), f.ty)
+            }
             _ => continue,
         };
         query.filter.push(node);
@@ -664,6 +675,9 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
         let choices: Vec<(String, String)> = match (f.ty, f.fk) {
             (FieldType::Bool, _) => [("", "All"), ("1", "Yes"), ("0", "No")].iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
             (FieldType::DateTime, _) => DATE_RANGES.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
+            (FieldType::Varchar(_), _) if f.choices.is_some() => std::iter::once((String::new(), "All".to_string()))
+                .chain(f.choices.unwrap().iter().map(|(v, l)| (v.to_string(), l.to_string())))
+                .collect(),
             (_, Some(target)) => std::iter::once((String::new(), "All".to_string()))
                 .chain(label_rows(&site, target, None).await?.into_iter().map(|(id, l)| (id.to_string(), l)))
                 .collect(),
@@ -803,6 +817,9 @@ fn raw_values(meta: &ModelMeta, vals: &[Value]) -> HashMap<String, String> {
                 Value::Int(i) if f.ty == FieldType::DateTime => DateTime::from_unix(*i).input_value(),
                 Value::Int(i) => i.to_string(),
                 Value::Float(x) => x.to_string(),
+                Value::Text(s) if f.ty == FieldType::Json => serde_json::from_str::<serde_json::Value>(s)
+                    .and_then(|j| serde_json::to_string_pretty(&j))
+                    .unwrap_or_else(|_| s.clone()),
                 Value::Text(s) => s.clone(),
             };
             Some((f.name.to_string(), s))
@@ -855,9 +872,10 @@ async fn form_fields(
 ) -> Result<Vec<minijinja::Value>, Response> {
     let mut out = vec![];
     for f in meta.fields.iter().filter(|f| !f.is_auto()) {
-        let options: Vec<(String, String)> = match f.fk {
-            Some(t) => label_rows(site, t, None).await?.into_iter().map(|(id, l)| (id.to_string(), l)).collect(),
-            None => vec![],
+        let options: Vec<(String, String)> = match (f.fk, f.choices) {
+            (Some(t), _) => label_rows(site, t, None).await?.into_iter().map(|(id, l)| (id.to_string(), l)).collect(),
+            (_, Some(choices)) => choices.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
+            _ => vec![],
         };
         if readonly.contains(&f.name) {
             let raw = raw.get(f.name).cloned().unwrap_or_default();
@@ -870,8 +888,9 @@ async fn form_fields(
             out.push(context! { name => f.name, label => label(f.name), kind => "readonly", value => shown });
             continue;
         }
-        let kind = match (f.fk.is_some(), f.password, f.ty) {
+        let kind = match (f.fk.is_some() || f.choices.is_some(), f.password, f.ty) {
             (true, ..) => "select",
+            (_, _, FieldType::Json) => "json",
             (_, true, _) => "password",
             (_, _, FieldType::Bool) => "checkbox",
             (_, _, FieldType::Int) => "number",
@@ -930,6 +949,12 @@ async fn validate(
             match f.ty {
                 FieldType::Int => raw.parse().map(Value::Int).map_err(|_| "Enter a whole number.".to_string()),
                 FieldType::DateTime => DateTime::parse(raw).map(Value::from).ok_or("Enter a valid date and time.".to_string()),
+                FieldType::Json => serde_json::from_str::<serde_json::Value>(raw)
+                    .map(|j| Value::Text(j.to_string()))
+                    .map_err(|e| format!("Enter valid JSON ({e}).")),
+                FieldType::Varchar(_) if f.choices.is_some_and(|c| !c.iter().any(|(v, _)| *v == raw)) => {
+                    Err(format!("Select a valid choice. {raw} is not one of the available choices."))
+                }
                 FieldType::Float => {
                     raw.parse::<f64>().ok().filter(|x| x.is_finite()).map(Value::Float).ok_or("Enter a number.".to_string())
                 }
@@ -1065,7 +1090,10 @@ fn after_save(table: &str, id: i64, log_id: i64, form: &HashMap<String, String>)
 async fn add_page(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>, UrlQuery(p): UrlQuery<Pairs>) -> Page {
     let u = staff(&user, &uri)?;
     let messages = message(&p, u, "add").await;
-    form_page(&site, u, model(&site, &table)?, None, &HashMap::new(), &Links::new(), HashMap::new(), StatusCode::OK, messages).await
+    let meta = model(&site, &table)?;
+    // New forms start from the model's defaults, like Django's `initial`.
+    let defaults: Vec<Value> = meta.fields.iter().map(|f| f.default.map_or(Value::Null, |d| d.value())).collect();
+    form_page(&site, u, meta, None, &raw_values(meta, &defaults), &Links::new(), HashMap::new(), StatusCode::OK, messages).await
 }
 
 async fn add_submit(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>, Form(pairs): Form<Pairs>) -> Page {
@@ -1322,6 +1350,8 @@ mod tests {
                 auto_now: false,
                 auto_now_add: false,
                 index: false,
+                choices: None,
+                default: None,
             }
         }
         static FIELDS: [FieldMeta; 3] =

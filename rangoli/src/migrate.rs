@@ -260,6 +260,7 @@ pub(crate) fn zero(ty: FieldType) -> Value {
         FieldType::Float => Value::Float(0.0),
         FieldType::Bool => Value::Bool(false),
         FieldType::Varchar(_) | FieldType::Text => Value::Text(String::new()),
+        FieldType::Json => Value::Text("null".into()),
     }
 }
 
@@ -329,7 +330,16 @@ fn target(op: &Op) -> Option<String> {
 
 /// Write a migration for model changes; `Ok(None)` when already up to date.
 pub fn make(dir: &Path, models: &[&'static ModelMeta], name: Option<&str>) -> Result<Option<PathBuf>> {
-    let ops = diff(&replay(&load(dir)?)?, &model_state(models));
+    let mut ops = diff(&replay(&load(dir)?)?, &model_state(models));
+    // A model's `default` is what existing rows should get when the column is added.
+    for op in &mut ops {
+        if let Op::AddColumn { table, column, default } = op {
+            let field = models.iter().find(|m| m.table == table).and_then(|m| m.field(&column.name));
+            if let Some(d) = field.and_then(|f| f.default) {
+                *default = Some(d.value());
+            }
+        }
+    }
     if ops.is_empty() {
         return Ok(None);
     }
@@ -371,7 +381,7 @@ fn col_type(d: Dialect, ty: FieldType) -> String {
         (FieldType::Bool, Dialect::Mysql) => "SMALLINT".into(),
         (FieldType::Bool, Dialect::Postgres) => "BOOLEAN".into(),
         (FieldType::Varchar(n), _) => format!("VARCHAR({n})"),
-        (FieldType::Text, _) => "TEXT".into(),
+        (FieldType::Text | FieldType::Json, _) => "TEXT".into(),
     }
 }
 
@@ -463,7 +473,12 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
         Op::Sql { sql } => vec![sql.clone()],
         Op::AddIndex { table, index } => {
             let cols = &state[table].columns;
-            if d == Dialect::Mysql && index.columns.iter().any(|c| cols.iter().any(|col| &col.name == c && col.ty == FieldType::Text)) {
+            if d == Dialect::Mysql
+                && index
+                    .columns
+                    .iter()
+                    .any(|c| cols.iter().any(|col| &col.name == c && matches!(col.ty, FieldType::Text | FieldType::Json)))
+            {
                 return Err(Error::Migration(format!("MySQL can't index TEXT column(s) of `{}`; use a max_length field", index.name)));
             }
             vec![create_index(d, table, index)]

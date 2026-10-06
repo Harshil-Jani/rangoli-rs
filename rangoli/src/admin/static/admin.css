@@ -173,6 +173,7 @@ select[multiple] { padding: var(--s1); }
 select[multiple] option { padding: var(--s1) var(--s2); }
 textarea { max-width: 640px; padding: var(--s2); line-height: 1.5; resize: vertical; }
 input.narrow { max-width: 160px; }
+textarea.code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: var(--fs-sm); }
 input[type=datetime-local].narrow { max-width: 220px; }
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--focus); outline-offset: -1px; border-color: var(--focus); }
 input[type=checkbox] { width: 16px; height: 16px; margin: 0; accent-color: var(--primary); }

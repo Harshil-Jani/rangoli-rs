@@ -178,7 +178,24 @@ Validation uses the same rules as the admin and answers like DRF: `400 {"title":
 
 Postgres, MySQL and SQLite share one code path through sqlx's `Any` driver. Only the SQL spelling differs per dialect. CI runs the same end-to-end test on all three.
 
-Field types for now: `i64`, `f64`, `bool`, `String` (`VARCHAR`, or `TEXT` with `#[field(text)]`) and `DateTime`, each optionally wrapped in `Option` for a nullable column. `DateTime` is UTC, stored as Unix seconds so it behaves identically on every database, and serializes as ISO 8601. `#[field(auto_now_add)]` and `#[field(auto_now)]` fill `created_at`/`updated_at` style fields on save, and the admin keeps them read-only. Field attributes: `max_length`, `text`, `unique`, `index`, `password`, `fk = Model`, `auto_now`, `auto_now_add`, and `cascade` (`ON DELETE CASCADE`; foreign keys protect referenced rows by default).
+Field types: `i64`, `f64`, `bool`, `String` (`VARCHAR`, or `TEXT` with `#[field(text)]`), `DateTime`, `Json` and choice enums, each optionally wrapped in `Option` for a nullable column.
+
+Choices are real Rust enums instead of Django's string tuples, so `Post::STATUS.eq(Status::Publisehd)` doesn't compile:
+
+```rust
+#[derive(Choices, Clone, Copy, Debug, PartialEq)]
+pub enum Status { Draft, Published, #[choice(value = "old", label = "Archived for good")] Archived }
+
+#[derive(Model)]
+pub struct Post {
+    // ...
+    #[field(choices, default = "draft")]
+    pub status: Status,     // VARCHAR, a dropdown and a filter in the admin, an `enum` in OpenAPI
+    pub extra: Option<Json>, // any JSON document; validated in the admin, real JSON in the API
+}
+```
+
+A stored value longer than the column's `max_length` is a compile error. `#[field(default = ...)]` takes a literal and is used for existing rows when `makemigrations` adds the column, as the initial value of new admin forms, and for fields an API client leaves out. `DateTime` is UTC, stored as Unix seconds so it behaves identically on every database, and serializes as ISO 8601. `#[field(auto_now_add)]` and `#[field(auto_now)]` fill `created_at`/`updated_at` style fields on save, and the admin keeps them read-only. Field attributes: `max_length`, `text`, `unique`, `index`, `choices`, `default = literal`, `password`, `fk = Model`, `auto_now`, `auto_now_add`, and `cascade` (`ON DELETE CASCADE`; foreign keys protect referenced rows by default).
 
 ## Migrations
 
@@ -196,7 +213,7 @@ Operations: `create_table`, `drop_table`, `add_column`, `drop_column`, `alter_co
 
 This is the roadmap, in rough order. Nothing here is implemented yet:
 
-1. **More field types**: date, decimal, uuid, json; defaults, indexes, choices
+1. **More field types**: date, decimal, uuid; model-level composite indexes
 2. Savepoints for nested `atomic` blocks (today a nested block joins the outer one)
 3. **Relations**: `select_related`-style joins, reverse foreign key accessors, composite indexes from models
 4. **More admin customization**: inlines, custom actions, fieldsets, per-model permissions, groups

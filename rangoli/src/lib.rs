@@ -21,14 +21,15 @@ pub mod orm;
 
 pub use axum;
 pub use datetime::DateTime;
-pub use orm::{atomic, Model};
-pub use rangoli_macros::Model;
+pub use orm::{atomic, Json, Model};
+pub use rangoli_macros::{Choices, Model};
+pub use serde;
 
 pub mod prelude {
     pub use crate::admin::ModelAdmin;
     pub use crate::api::{Access, Api};
     pub use crate::auth::CurrentUser;
-    pub use crate::{atomic, App, DateTime, Error, Model, Result};
+    pub use crate::{atomic, App, Choices, DateTime, Error, Json, Model, Result};
 }
 
 use axum::extract::Request;

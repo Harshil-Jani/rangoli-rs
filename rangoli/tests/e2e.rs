@@ -7,7 +7,8 @@ use axum::http::{header, Request, StatusCode};
 use rangoli::admin::ModelAdmin;
 use rangoli::api::{Access, Api};
 use rangoli::orm;
-use rangoli::{migrate, App, DateTime, Error, Model};
+use rangoli::orm::Choice;
+use rangoli::{migrate, App, Choices, DateTime, Error, Json, Model};
 use tower::ServiceExt;
 
 #[derive(Model, Clone, Debug, PartialEq)]
@@ -32,6 +33,14 @@ struct Post {
     #[field(fk = Author)]
     author_id: i64,
     rating: Option<f64>,
+}
+
+#[derive(Choices, Clone, Copy, Debug, PartialEq)]
+enum Status {
+    Draft,
+    Published,
+    #[choice(value = "old", label = "Archived for good")]
+    Archived,
 }
 
 #[derive(Model, Clone, Debug, PartialEq)]
@@ -61,6 +70,9 @@ struct PostV2 {
     #[field(auto_now)]
     updated_at: DateTime,
     publish_at: Option<DateTime>,
+    #[field(choices, default = "draft")]
+    status: Status,
+    meta: Option<Json>,
 }
 
 fn post(title: &str, author: &Author, published: bool, rating: Option<f64>) -> Post {
@@ -182,7 +194,7 @@ async fn full_stack() {
             ModelAdmin::new()
                 .list_display([&PostV2::TITLE, &PostV2::AUTHOR_ID, &PostV2::PUBLISHED, &PostV2::VIEWS, &PostV2::CREATED_AT])
                 .search_fields([&PostV2::TITLE])
-                .list_filter([&PostV2::PUBLISHED, &PostV2::AUTHOR_ID, &PostV2::CREATED_AT])
+                .list_filter([&PostV2::PUBLISHED, &PostV2::AUTHOR_ID, &PostV2::CREATED_AT, &PostV2::STATUS])
                 .ordering(PostV2::TITLE.asc())
                 .readonly_fields([&PostV2::VIEWS])
                 .list_per_page(2),
@@ -199,6 +211,7 @@ async fn full_stack() {
     let rows = PostV2::objects().order_by(PostV2::ID.asc()).all().await.unwrap();
     assert_eq!(rows.len(), 3, "data survives the migration");
     assert!(rows.iter().all(|p| p.views == 0));
+    assert!(rows.iter().all(|p| p.status == Status::Draft && p.meta.is_none()), "existing rows get the model default");
     let made = DateTime::now().start_of_day();
     assert!(rows.iter().all(|p| p.created_at >= made), "existing rows get the time the migration was made, not the epoch");
     let epoch = DateTime::from_unix(0);
@@ -212,6 +225,8 @@ async fn full_stack() {
         created_at: epoch,
         updated_at: epoch,
         publish_at: DateTime::parse("2026-01-02T03:04"),
+        status: Status::Published,
+        meta: Some(Json(serde_json::json!({ "source": "e2e", "tags": [1, 2] }))),
     };
     long.save().await.unwrap();
     let today = DateTime::now().start_of_day();
@@ -231,6 +246,15 @@ async fn full_stack() {
     assert_eq!(PostV2::objects().filter(PostV2::PUBLISH_AT.lt(jan1)).count().await.unwrap(), 0);
     assert_eq!(PostV2::objects().filter(PostV2::PUBLISH_AT.is_null()).count().await.unwrap(), 3);
     assert!(migrate::make(&migrations, v2.models(), None).unwrap().is_none(), "indexes and join tables round-trip");
+
+    // ---- choices and JSON
+    assert_eq!(
+        (Status::Archived.as_str(), Status::Archived.label(), Status::Draft.to_string()),
+        ("old", "Archived for good", "Draft".into())
+    );
+    assert_eq!(PostV2::objects().filter(PostV2::STATUS.eq(Status::Published)).count().await.unwrap(), 1, "typed choice filter");
+    assert_eq!(fresh.meta.as_ref().unwrap()["tags"][1], 2, "JSON round-trips");
+    assert_eq!(serde_json::to_string(&Status::Archived).unwrap(), "\"old\"");
 
     // ---- many-to-many
     let (mut rust, mut web) = (Tag { id: None, name: "rust".into() }, Tag { id: None, name: "web".into() });
@@ -357,8 +381,15 @@ async fn full_stack() {
     let post_url = format!("/admin/blog_post/{}/", long.id.unwrap());
     let (_, _, body) = send(get(&post_url, &cookie)).await;
     assert!(body.contains("<div class=\"readonly\">7</div>") && !body.contains("name=\"views\""), "read-only field");
+    let (status, _, body) =
+        send(form(&post_url, &cookie, &format!("title=x&body=b&author_id={}&status=bogus&meta=%7Bnope", alan.id.unwrap()))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body.contains("Select a valid choice. bogus is not one of the available choices."), "choices are validated");
+    assert!(body.contains("Enter valid JSON"), "JSON is validated");
+    let (_, _, body) = send(get("/admin/blog_post/add", &cookie)).await;
+    assert!(body.contains("<option value=\"draft\" selected>Draft</option>"), "new forms start from the default");
     let edit = format!(
-        "title=Long&body=b&published=on&author_id={}&views=999&tags={}&tags={}",
+        "title=Long&body=b&published=on&author_id={}&views=999&tags={}&tags={}&status=published&meta=%7B%22a%22%3A1%7D",
         alan.id.unwrap(),
         rust.id.unwrap(),
         web.id.unwrap()
@@ -368,7 +399,10 @@ async fn full_stack() {
     assert_eq!(long_now.views, 7, "posted values for read-only fields are ignored");
     assert_eq!(long_now.tags().ids().await.unwrap(), vec![rust.id.unwrap(), web.id.unwrap()], "admin saves the relation");
     let (_, _, body) = send(get(&format!("{post_url}history"), &cookie)).await;
-    assert!(body.contains("Changed title, body, published, publish at and tags."), "relation changes are logged");
+    assert!(body.contains("Changed title, body, published, publish at, meta and tags."), "relation changes are logged");
+    assert_eq!(PostV2::get(long.id.unwrap()).await.unwrap().meta, Some(Json(serde_json::json!({ "a": 1 }))));
+    let (_, _, body) = send(get("/admin/blog_post/?f.status=old", &cookie)).await;
+    assert!(body.contains("By status") && body.contains("Archived for good") && body.contains("0 results of"), "choice filter");
 
     let (_, _, body) = send(get("/admin/blog_post/?f.created_at=today", &cookie)).await;
     assert!(body.contains("By created at") && body.contains("Past 7 days") && body.contains("4 results of"), "date filter");
@@ -449,6 +483,13 @@ async fn full_stack() {
     let new_id = created["id"].as_i64().unwrap();
     assert_eq!(created["publish_at"], "2026-05-01T10:00:00Z");
     assert_eq!(created["tags"], serde_json::json!([]));
+    assert_eq!(created["status"], "draft", "missing fields take the model default");
+    let bad = format!(r#"{{"title": "t", "body": "b", "author_id": {}, "views": 0, "status": "nope"}}"#, alan.id.unwrap());
+    let (status, _, body) = send(api("POST", "/api/blog_post/", &cookie, &bad)).await;
+    assert_eq!((status, json(&body)["status"][0].as_str()), (StatusCode::BAD_REQUEST, Some("\"nope\" is not a valid choice.")));
+    let (_, _, body) =
+        send(api("PATCH", &format!("/api/blog_post/{}", created["id"]), &cookie, r#"{"meta": {"nested": [true, null]}}"#)).await;
+    assert_eq!(json(&body)["meta"]["nested"][0], true, "JSON fields are real JSON in the API");
     assert!(created["created_at"].as_str().is_some(), "auto_now_add is filled in");
     let (status, _, body) = send(api("PATCH", &format!("/api/blog_post/{new_id}"), &cookie, r#"{"views": 42}"#)).await;
     assert_eq!((status, json(&body)["views"].as_i64(), json(&body)["title"].as_str()), (StatusCode::OK, Some(42), Some("From the API")));
@@ -486,6 +527,8 @@ async fn full_stack() {
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["publish_at"]["format"], "date-time");
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["created_at"]["readOnly"], true);
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["tags"]["type"], "array");
+    assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["status"]["enum"], serde_json::json!(["draft", "published", "old"]));
+    assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["status"]["default"], "draft");
 
     // Password change, then log in with the new password.
     let (status, _, body) =
