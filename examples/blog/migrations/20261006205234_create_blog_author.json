@@ -1,0 +1,53 @@
+{
+  "operations": [
+    {
+      "op": "create_table",
+      "table": "blog_author",
+      "columns": [
+        {
+          "name": "name",
+          "type": {
+            "varchar": 100
+          }
+        },
+        {
+          "name": "email",
+          "type": {
+            "varchar": 254
+          },
+          "unique": true
+        }
+      ]
+    },
+    {
+      "op": "create_table",
+      "table": "blog_post",
+      "columns": [
+        {
+          "name": "title",
+          "type": {
+            "varchar": 200
+          }
+        },
+        {
+          "name": "body",
+          "type": "text"
+        },
+        {
+          "name": "published",
+          "type": "bool"
+        },
+        {
+          "name": "author_id",
+          "type": "int",
+          "fk": "blog_author"
+        },
+        {
+          "name": "rating",
+          "type": "float",
+          "null": true
+        }
+      ]
+    }
+  ]
+}

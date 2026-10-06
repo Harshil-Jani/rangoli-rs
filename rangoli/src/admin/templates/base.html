@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"includeIndicatorStyles": false}'>
+<title>{{ title }} · Rangoli admin</title>
+<link rel="stylesheet" href="/admin/static/admin.css">
+<script src="/admin/static/htmx.min.js" defer></script>
+</head>
+<body hx-boost="true">
+<header class="bar">
+  <a class="brand" href="/admin/"><span class="mark" aria-hidden="true"></span>Rangoli <small>admin</small></a>
+  {% if username %}
+  <form method="post" action="/admin/logout" class="who">
+    <span>{{ username }}</span><button class="link">Log out</button>
+  </form>
+  {% endif %}
+</header>
+<main class="wrap">
+  {% if crumbs %}
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="/admin/">Home</a>{% for c in crumbs %} <span aria-hidden="true">/</span> {% if c.url %}<a href="{{ c.url }}">{{ c.label }}</a>{% else %}<span aria-current="page">{{ c.label }}</span>{% endif %}{% endfor %}</nav>
+  {% endif %}
+  {% if msg %}<p class="flash {{ msg.kind }}" role="status">{{ msg.text }}</p>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

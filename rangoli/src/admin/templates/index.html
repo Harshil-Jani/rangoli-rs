@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Site administration</h1>
+<ul class="cards">
+  {% for m in models %}
+  <li class="card"><a class="card-title" href="/admin/{{ m.table }}/">{{ m.plural }}</a><a class="btn small ghost" href="/admin/{{ m.table }}/add">Add</a></li>
+  {% endfor %}
+</ul>
+{% endblock %}

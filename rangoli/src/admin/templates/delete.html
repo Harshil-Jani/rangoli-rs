@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Delete {{ obj }}?</h1>
+{% if error %}<p class="flash error" role="alert">{{ error }}</p>{% endif %}
+<p>This permanently removes the {{ name }} “{{ obj }}”. This can't be undone.</p>
+<form method="post" class="submit">
+  <button class="btn danger">Yes, delete</button>
+  <a class="btn ghost" href="/admin/{{ table }}/{{ id }}/">Cancel</a>
+</form>
+{% endblock %}
