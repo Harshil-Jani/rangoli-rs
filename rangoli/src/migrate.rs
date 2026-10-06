@@ -134,7 +134,12 @@ pub fn diff(from: &State, to: &State) -> Vec<Op> {
         for c in new {
             match old.iter().find(|o| o.name == c.name) {
                 None => {
-                    let default = (!c.null).then(|| zero(c.ty));
+                    // Existing rows need a value. For a datetime the epoch would read as bad data,
+                    // so use the moment the migration was made (Django's usual `timezone.now`).
+                    let default = (!c.null).then(|| match c.ty {
+                        FieldType::DateTime => Value::from(crate::DateTime::now()),
+                        _ => zero(c.ty),
+                    });
                     ops.push(Op::AddColumn { table: t.clone(), column: c.clone(), default });
                 }
                 Some(o) if o != c => ops.push(Op::AlterColumn { table: t.clone(), column: c.clone() }),

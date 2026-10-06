@@ -175,7 +175,8 @@ async fn full_stack() {
     let rows = PostV2::objects().order_by(PostV2::ID.asc()).all().await.unwrap();
     assert_eq!(rows.len(), 3, "data survives the migration");
     assert!(rows.iter().all(|p| p.views == 0));
-    assert!(rows.iter().all(|p| p.created_at.unix() == 0), "existing rows get the column default");
+    let made = DateTime::now().start_of_day();
+    assert!(rows.iter().all(|p| p.created_at >= made), "existing rows get the time the migration was made, not the epoch");
     let epoch = DateTime::from_unix(0);
     let mut long = PostV2 {
         id: None,
@@ -201,7 +202,9 @@ async fn full_stack() {
     long.save().await.unwrap();
     let fresh = PostV2::get(long.id.unwrap()).await.unwrap();
     assert_eq!((fresh.created_at, fresh.publish_at.unwrap().to_string()), (created, "2026-01-02T03:04:00Z".to_string()));
-    assert_eq!(PostV2::objects().filter(PostV2::CREATED_AT.gte(today)).count().await.unwrap(), 1, "datetimes compare in SQL");
+    let jan1 = DateTime::parse("2026-01-01").unwrap();
+    assert_eq!(PostV2::objects().filter(PostV2::PUBLISH_AT.gte(jan1)).count().await.unwrap(), 1, "datetimes compare in SQL");
+    assert_eq!(PostV2::objects().filter(PostV2::PUBLISH_AT.lt(jan1)).count().await.unwrap(), 0);
     assert_eq!(PostV2::objects().filter(PostV2::PUBLISH_AT.is_null()).count().await.unwrap(), 3);
 
     // ---- admin over HTTP
@@ -309,7 +312,7 @@ async fn full_stack() {
     assert_eq!(PostV2::get(long.id.unwrap()).await.unwrap().views, 7, "posted values for read-only fields are ignored");
 
     let (_, _, body) = send(get("/admin/blog_post/?f.created_at=today", &cookie)).await;
-    assert!(body.contains("By created at") && body.contains("Past 7 days") && body.contains("1 result of"), "date filter");
+    assert!(body.contains("By created at") && body.contains("Past 7 days") && body.contains("4 results of"), "date filter");
     assert!(body.contains(" UTC</td>"), "datetimes display in UTC");
 
     let (status, _, body) = send(get(&format!("/admin/blog_author/{}/delete", ada.id.unwrap()), &cookie)).await;
