@@ -28,7 +28,7 @@
         </select>
         {% else %}
         <input id="id_{{ f.name }}" name="{{ f.name }}"
-          {% if f.kind == "password" %}type="password" autocomplete="new-password"{% elif f.kind == "number" %}type="number" class="narrow" value="{{ f.value }}"{% elif f.kind == "float" %}type="number" step="any" class="narrow" value="{{ f.value }}"{% else %}type="text" value="{{ f.value }}"{% endif %}
+          {% if f.kind == "password" %}type="password" autocomplete="new-password"{% elif f.kind == "number" %}type="number" class="narrow" value="{{ f.value }}"{% elif f.kind == "float" %}type="number" step="any" class="narrow" value="{{ f.value }}"{% elif f.kind == "datetime" %}type="datetime-local" class="narrow" value="{{ f.value }}"{% else %}type="text" value="{{ f.value }}"{% endif %}
           {% if f.maxlength %}maxlength="{{ f.maxlength }}"{% endif %}{% if f.required %} required{% endif %}{% if f.error %} aria-invalid="true" aria-describedby="id_{{ f.name }}_error"{% endif %}>
         {% endif %}
         {% if f.error %}<p class="field-error" id="id_{{ f.name }}_error">{{ f.error }}</p>{% endif %}

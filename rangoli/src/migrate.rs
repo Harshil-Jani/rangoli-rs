@@ -153,7 +153,7 @@ pub fn diff(from: &State, to: &State) -> Vec<Op> {
 
 fn zero(ty: FieldType) -> Value {
     match ty {
-        FieldType::Int => Value::Int(0),
+        FieldType::Int | FieldType::DateTime => Value::Int(0),
         FieldType::Float => Value::Float(0.0),
         FieldType::Bool => Value::Bool(false),
         FieldType::Varchar(_) | FieldType::Text => Value::Text(String::new()),
@@ -246,36 +246,16 @@ pub fn make(dir: &Path, models: &[&'static ModelMeta], name: Option<&str>) -> Re
 
 /// `YYYYMMDDHHMMSS` in UTC.
 pub fn utc_stamp(secs: u64) -> String {
-    let (y, m, d, h, mi, s) = civil(secs);
+    let (y, m, d, h, mi, s) = crate::DateTime::from_unix(secs as i64).parts();
     format!("{y:04}{m:02}{d:02}{h:02}{mi:02}{s:02}")
-}
-
-/// `YYYY-MM-DD HH:MM UTC`, for people.
-pub fn utc_human(secs: u64) -> String {
-    let (y, m, d, h, mi, _) = civil(secs);
-    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02} UTC")
-}
-
-/// UTC calendar fields (Howard Hinnant's civil-from-days).
-fn civil(secs: u64) -> (i64, i64, i64, u64, u64, u64) {
-    let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
-    let z = days + 719_468;
-    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    (y, m, d, rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
 // ---------------------------------------------------------------- SQL
 
 fn col_type(d: Dialect, ty: FieldType) -> String {
     match (ty, d) {
-        (FieldType::Int, Dialect::Sqlite) => "INTEGER".into(),
-        (FieldType::Int, _) => "BIGINT".into(),
+        (FieldType::Int | FieldType::DateTime, Dialect::Sqlite) => "INTEGER".into(),
+        (FieldType::Int | FieldType::DateTime, _) => "BIGINT".into(),
         (FieldType::Float, Dialect::Postgres) => "DOUBLE PRECISION".into(),
         (FieldType::Float, Dialect::Mysql) => "DOUBLE".into(),
         (FieldType::Float, Dialect::Sqlite) => "REAL".into(),
@@ -517,7 +497,6 @@ mod tests {
         assert_eq!(utc_stamp(0), "19700101000000");
         assert_eq!(utc_stamp(1_700_000_000), "20231114221320");
         assert_eq!(utc_stamp(951_782_400), "20000229000000"); // leap day
-        assert_eq!(utc_human(1_700_000_000), "2023-11-14 22:13 UTC");
     }
 
     #[test]

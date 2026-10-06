@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::ops::{BitAnd, BitOr, Not};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 pub use sqlx::any::AnyRow;
 
@@ -24,6 +24,8 @@ pub enum FieldType {
     Bool,
     Varchar(u32),
     Text,
+    /// `crate::DateTime`, stored as Unix seconds.
+    DateTime,
 }
 
 #[derive(Debug)]
@@ -38,6 +40,17 @@ pub struct FieldMeta {
     pub fk: Option<&'static str>,
     /// `ON DELETE CASCADE` instead of the default, which protects referenced rows.
     pub cascade: bool,
+    /// Set to now when the row is first saved (`created_at`).
+    pub auto_now_add: bool,
+    /// Set to now on every save (`updated_at`).
+    pub auto_now: bool,
+}
+
+impl FieldMeta {
+    /// Filled in by the framework, never by forms.
+    pub fn is_auto(&self) -> bool {
+        self.auto_now || self.auto_now_add
+    }
 }
 
 #[derive(Debug)]
@@ -91,6 +104,11 @@ impl From<&str> for Value {
         Value::Text(v.to_owned())
     }
 }
+impl From<crate::DateTime> for Value {
+    fn from(v: crate::DateTime) -> Self {
+        Value::Int(v.unix())
+    }
+}
 impl<T: Into<Value>> From<Option<T>> for Value {
     fn from(v: Option<T>) -> Self {
         v.map_or(Value::Null, Into::into)
@@ -139,6 +157,14 @@ impl FromValue for String {
         }
     }
 }
+impl FromValue for crate::DateTime {
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::Int(i) => Ok(crate::DateTime::from_unix(i)),
+            v => mismatch(v, "datetime"),
+        }
+    }
+}
 impl<T: FromValue> FromValue for Option<T> {
     fn from_value(v: Value) -> Result<Self> {
         match v {
@@ -163,6 +189,9 @@ impl Kind for bool {
 }
 impl Kind for String {
     const KIND: FieldType = FieldType::Text;
+}
+impl Kind for crate::DateTime {
+    const KIND: FieldType = FieldType::DateTime;
 }
 
 // ---------------------------------------------------------------- database
@@ -242,7 +271,7 @@ type AnyQuery<'q> = sqlx::query::Query<'q, Any, AnyArguments<'q>>;
 fn bind<'q>(q: AnyQuery<'q>, v: &Value, ty: FieldType) -> AnyQuery<'q> {
     match v {
         Value::Null => match ty {
-            FieldType::Int => q.bind(None::<i64>),
+            FieldType::Int | FieldType::DateTime => q.bind(None::<i64>),
             FieldType::Float => q.bind(None::<f64>),
             FieldType::Bool => q.bind(None::<bool>),
             FieldType::Varchar(_) | FieldType::Text => q.bind(None::<String>),
@@ -258,12 +287,58 @@ fn build<'q>(sql: &'q str, params: &Params) -> AnyQuery<'q> {
     params.iter().fold(sqlx::query(sql), |q, (v, t)| bind(q, v, *t))
 }
 
+type SharedTx = Arc<tokio::sync::Mutex<sqlx::Transaction<'static, Any>>>;
+
+tokio::task_local! {
+    /// The transaction opened by `atomic` for the current task, if any.
+    static TX: SharedTx;
+}
+
+/// Run `body` in one database transaction, like Django's `transaction.atomic`.
+///
+/// Every ORM call inside it (in this task) uses the transaction automatically.
+/// `Ok` commits, `Err` rolls back. A nested `atomic` joins the outer one.
+/// Work spawned onto other tasks does not inherit the transaction.
+///
+/// ```ignore
+/// rangoli::atomic(async {
+///     order.save().await?;
+///     stock.update([Stock::COUNT.set(n - 1)]).await?;
+///     Ok(())
+/// }).await?;
+/// ```
+pub async fn atomic<T, F: Future<Output = Result<T>>>(body: F) -> Result<T> {
+    // ponytail: nested blocks join the outer transaction; add savepoints if partial rollback is needed.
+    if TX.try_with(|_| ()).is_ok() {
+        return body.await;
+    }
+    let tx: SharedTx = Arc::new(tokio::sync::Mutex::new(db().pool.begin().await?));
+    let out = TX.scope(tx.clone(), body).await;
+    let tx = Arc::try_unwrap(tx).map_err(|_| Error::Config("a transaction outlived its atomic block".into()))?.into_inner();
+    match out {
+        Ok(v) => {
+            tx.commit().await?;
+            Ok(v)
+        }
+        Err(e) => {
+            tx.rollback().await?;
+            Err(e)
+        }
+    }
+}
+
 pub(crate) async fn fetch_all(sql: &str, params: &Params) -> Result<Vec<AnyRow>> {
-    Ok(build(sql, params).fetch_all(&db().pool).await?)
+    match TX.try_with(Arc::clone) {
+        Ok(tx) => Ok(build(sql, params).fetch_all(&mut **tx.lock().await).await?),
+        Err(_) => Ok(build(sql, params).fetch_all(&db().pool).await?),
+    }
 }
 
 pub(crate) async fn execute(sql: &str, params: &Params) -> Result<AnyQueryResult> {
-    Ok(build(sql, params).execute(&db().pool).await?)
+    match TX.try_with(Arc::clone) {
+        Ok(tx) => Ok(build(sql, params).execute(&mut **tx.lock().await).await?),
+        Err(_) => Ok(build(sql, params).execute(&db().pool).await?),
+    }
 }
 
 /// Read one column as a `Value`, tolerating how each driver reports ints and bools.
@@ -278,7 +353,7 @@ pub fn read(row: &AnyRow, col: &str, ty: FieldType) -> Result<Value> {
         Ok(row.try_get::<Option<i16>, _>(col)?.map(i64::from))
     }
     Ok(match ty {
-        FieldType::Int => int(row, col)?.map_or(Value::Null, Value::Int),
+        FieldType::Int | FieldType::DateTime => int(row, col)?.map_or(Value::Null, Value::Int),
         FieldType::Float => match row.try_get::<Option<f64>, _>(col) {
             Ok(v) => v.map_or(Value::Null, Value::Float),
             Err(_) => int(row, col)?.map_or(Value::Null, |i| Value::Float(i as f64)),
@@ -612,6 +687,8 @@ pub trait Model: Sized + Send + Sync + Unpin + 'static {
     fn set_pk(&mut self, id: i64);
     /// Column values in `meta().fields` order.
     fn values(&self) -> Vec<Value>;
+    /// Called by `save()` first; the derive fills `auto_now`/`auto_now_add` fields here.
+    fn before_save(&mut self, _adding: bool) {}
 
     fn objects() -> QuerySet<Self> {
         QuerySet { q: Query::new(Self::meta()), _m: PhantomData }
@@ -636,6 +713,7 @@ pub trait Model: Sized + Send + Sync + Unpin + 'static {
     fn save(&mut self) -> impl Future<Output = Result<()>> + Send {
         async move {
             let meta = Self::meta();
+            self.before_save(self.pk().is_none());
             let cols: Vec<_> = meta.fields.iter().zip(self.values()).map(|(f, v)| (f.name, v, f.ty)).collect();
             match self.pk() {
                 Some(id) => {

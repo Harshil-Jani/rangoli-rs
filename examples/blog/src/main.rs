@@ -24,6 +24,10 @@ pub struct Post {
     #[field(fk = Author)]
     pub author_id: i64,
     pub rating: Option<f64>,
+    #[field(auto_now_add)]
+    pub created_at: DateTime,
+    #[field(auto_now)]
+    pub updated_at: DateTime,
 }
 
 #[derive(Serialize)]

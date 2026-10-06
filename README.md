@@ -79,6 +79,14 @@ post.title = "New title".into();
 post.save().await?;
 
 let authors = Author::in_bulk(posts.iter().map(|p| p.author_id)).await?; // one query, no N+1
+
+// Django's transaction.atomic: every ORM call inside uses one transaction. Ok commits, Err rolls back.
+rangoli::atomic(async {
+    order.save().await?;
+    Stock::objects().filter(Stock::ID.eq(item)).update([Stock::COUNT.set(left - 1)]).await?;
+    Ok(())
+})
+.await?;
 ```
 
 `Post::TITLE` is a `Col<Post, String>`. A typo, a string compared to an integer column, or a column from another model in the filter **does not compile**. In Django, `filter(titel__icontains=...)` only fails at runtime.
@@ -105,7 +113,7 @@ let authors = Author::in_bulk(posts.iter().map(|p| p.author_id)).await?; // one 
 
 Modeled on Django's admin, page for page: the blue header, breadcrumbs, the app-grouped index with Recent actions, the nav sidebar, and the same wording. Registering a model with `.admin::<M>()` gives you:
 
-- **Changelist**: "Select post to change", sortable columns, search with result counts (live as you type), boolean filters, pagination, an **Action** menu with "0 of N selected", and Django's confirmation page before a bulk delete
+- **Changelist**: "Select post to change", sortable columns, search with result counts (live as you type), boolean and date filters (Today, Past 7 days, This month, This year), pagination, an **Action** menu with "0 of N selected", and Django's confirmation page before a bulk delete
 - **Change form**: labels on the left, `Please correct the error below.`, foreign keys as selects, unique and foreign-key violations reported on the form, and the Save / Save and add another / Save and continue editing / Delete row
 - **Delete confirmation** that lists the protected related objects blocking the delete, or the related rows that cascade with it
 - **History** for every object and **Recent actions** on the index, recorded in an admin log (Django's `LogEntry`), with change messages like "Changed title and body."
@@ -117,7 +125,7 @@ Modeled on Django's admin, page for page: the blue header, breadcrumbs, the app-
 
 Postgres, MySQL and SQLite share one code path through sqlx's `Any` driver. Only the SQL spelling differs per dialect. CI runs the same end-to-end test on all three.
 
-Field types for now: `i64`, `f64`, `bool`, `String` (`VARCHAR`, or `TEXT` with `#[field(text)]`), each optionally wrapped in `Option` for a nullable column. Field attributes: `max_length`, `text`, `unique`, `password`, `fk = Model`, and `cascade` (`ON DELETE CASCADE`; foreign keys protect referenced rows by default).
+Field types for now: `i64`, `f64`, `bool`, `String` (`VARCHAR`, or `TEXT` with `#[field(text)]`) and `DateTime`, each optionally wrapped in `Option` for a nullable column. `DateTime` is UTC, stored as Unix seconds so it behaves identically on every database, and serializes as ISO 8601. `#[field(auto_now_add)]` and `#[field(auto_now)]` fill `created_at`/`updated_at` style fields on save, and the admin keeps them read-only. Field attributes: `max_length`, `text`, `unique`, `password`, `fk = Model`, `auto_now`, `auto_now_add`, and `cascade` (`ON DELETE CASCADE`; foreign keys protect referenced rows by default).
 
 ## Migrations
 
@@ -135,8 +143,8 @@ Operations: `create_table`, `drop_table`, `add_column`, `drop_column`, `alter_co
 
 This is the roadmap, in rough order. Nothing here is implemented yet:
 
-1. **Transactions** (`atomic`) for user code
-2. **More field types**: datetime, date, decimal, uuid, json; defaults, indexes, choices
+1. **More field types**: date, decimal, uuid, json; defaults, indexes, choices
+2. Savepoints for nested `atomic` blocks (today a nested block joins the outer one)
 3. **Relations**: many-to-many, reverse accessors, `select_related`-style joins
 4. **Admin customization**: `list_display`, `search_fields`, read-only fields, inlines, custom actions, per-model permissions, groups
 5. **Forms and templates for your own views** (typed forms, minijinja integration, Django 6.0-style template partials)

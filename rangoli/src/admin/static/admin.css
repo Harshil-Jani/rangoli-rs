@@ -158,7 +158,7 @@ a:hover { color: var(--link-hover); text-decoration: underline; }
 
 /* ---------------------------------------------------------------- controls */
 
-input[type=text], input[type=search], input[type=password], input[type=number], select, textarea {
+input[type=text], input[type=search], input[type=password], input[type=number], input[type=datetime-local], select, textarea {
   width: 100%;
   max-width: 420px;
   min-height: var(--control-h);
@@ -171,6 +171,7 @@ input[type=text], input[type=search], input[type=password], input[type=number], 
 }
 textarea { max-width: 640px; padding: var(--s2); line-height: 1.5; resize: vertical; }
 input.narrow { max-width: 160px; }
+input[type=datetime-local].narrow { max-width: 220px; }
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--focus); outline-offset: -1px; border-color: var(--focus); }
 input[type=checkbox] { width: 16px; height: 16px; margin: 0; accent-color: var(--primary); }
 

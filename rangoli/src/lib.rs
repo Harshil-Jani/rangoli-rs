@@ -14,16 +14,18 @@ extern crate self as rangoli;
 
 pub mod admin;
 pub mod auth;
+pub mod datetime;
 pub mod migrate;
 pub mod orm;
 
 pub use axum;
-pub use orm::Model;
+pub use datetime::DateTime;
+pub use orm::{atomic, Model};
 pub use rangoli_macros::Model;
 
 pub mod prelude {
     pub use crate::auth::CurrentUser;
-    pub use crate::{App, Error, Model, Result};
+    pub use crate::{atomic, App, DateTime, Error, Model, Result};
 }
 
 use axum::extract::Request;

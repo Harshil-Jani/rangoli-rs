@@ -6,9 +6,8 @@
 #![allow(clippy::result_large_err)]
 
 use crate::auth::{self, CurrentUser, User};
-use crate::migrate::utc_human;
 use crate::orm::{self, by_id, like_escape, FieldMeta, FieldType, Model, ModelMeta, Node, Query, Value};
-use crate::Error;
+use crate::{DateTime, Error};
 use axum::extract::{Form, Path, Query as UrlQuery, State};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -169,6 +168,7 @@ fn display(v: &Value, f: &FieldMeta) -> String {
     match v {
         Value::Null => "-".into(),
         Value::Bool(b) => (if *b { "True" } else { "False" }).into(),
+        Value::Int(i) if f.ty == FieldType::DateTime => DateTime::from_unix(*i).human(),
         Value::Int(i) => i.to_string(),
         Value::Float(x) => x.to_string(),
         Value::Text(s) if f.ty == FieldType::Text && s.chars().count() > 80 => s.chars().take(80).chain("…".chars()).collect(),
@@ -188,13 +188,17 @@ fn repr(meta: &ModelMeta, id: i64, vals: &[Value]) -> String {
         .unwrap_or_else(|| format!("{} object ({id})", meta.name))
 }
 
-async fn fetch_row(meta: &'static ModelMeta, id: i64) -> Result<Vec<Value>, Response> {
+async fn row_values(meta: &'static ModelMeta, id: i64) -> crate::Result<Vec<Value>> {
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
-    Ok(q.rows().await.map_err(fail)?.pop().ok_or_else(|| StatusCode::NOT_FOUND.into_response())?.1)
+    Ok(q.rows().await?.pop().ok_or(Error::NotFound)?.1)
 }
 
-async fn log(u: &User, meta: &ModelMeta, object_id: i64, object_repr: &str, action: i64, message: String) -> Result<i64, Response> {
+async fn fetch_row(meta: &'static ModelMeta, id: i64) -> Result<Vec<Value>, Response> {
+    row_values(meta, id).await.map_err(fail)
+}
+
+async fn log(u: &User, meta: &ModelMeta, object_id: i64, object_repr: &str, action: i64, message: String) -> crate::Result<i64> {
     let mut e = LogEntry {
         id: None,
         user_id: u.id.unwrap_or_default(),
@@ -205,7 +209,7 @@ async fn log(u: &User, meta: &ModelMeta, object_id: i64, object_repr: &str, acti
         message,
         at: auth::now(),
     };
-    e.save().await.map_err(fail)?;
+    e.save().await?;
     Ok(e.id.unwrap())
 }
 
@@ -399,6 +403,7 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
     let searchable: Vec<&'static str> =
         meta.fields.iter().filter(|f| !f.password && matches!(f.ty, FieldType::Varchar(_) | FieldType::Text)).map(|f| f.name).collect();
     let bools: Vec<&'static FieldMeta> = meta.fields.iter().filter(|f| f.ty == FieldType::Bool).collect();
+    let dates: Vec<&'static FieldMeta> = meta.fields.iter().filter(|f| f.ty == FieldType::DateTime).collect();
 
     let mut query = Query::new(meta);
     if !q.is_empty() && !searchable.is_empty() {
@@ -408,6 +413,11 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
     for f in &bools {
         if let Some(v @ ("1" | "0")) = param(&p, &format!("f.{}", f.name)) {
             query.filter.push(Node::Cmp(f.name, "=", Value::Bool(v == "1"), FieldType::Bool));
+        }
+    }
+    for f in &dates {
+        if let Some(since) = param(&p, &format!("f.{}", f.name)).and_then(date_range_start) {
+            query.filter.push(Node::Cmp(f.name, ">=", Value::Int(since.unix()), FieldType::DateTime));
         }
     }
     let filtered = !query.filter.is_empty();
@@ -483,6 +493,13 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
                 .collect();
             context! { label => label(f.name).to_lowercase(), options => opts }
         })
+        .chain(dates.iter().map(|f| {
+            let key = format!("f.{}", f.name);
+            let current = param(&p, &key).unwrap_or("");
+            let opts: Vec<_> =
+                DATE_RANGES.iter().map(|(v, l)| context! { label => l, url => link(&[(&key, v)]), active => current == *v }).collect();
+            context! { label => label(f.name).to_lowercase(), options => opts }
+        }))
         .collect();
     let keep: Vec<(String, String)> = p.iter().filter(|(k, _)| k.starts_with("f.") || k == "o").cloned().collect();
     let page_links: Vec<_> = (1..=pages)
@@ -500,6 +517,21 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
             ..chrome(&site, u, Some(meta))
         },
     )
+}
+
+/// Django's date filter choices: (URL value, label).
+const DATE_RANGES: [(&str, &str); 5] =
+    [("", "Any date"), ("today", "Today"), ("7d", "Past 7 days"), ("month", "This month"), ("year", "This year")];
+
+fn date_range_start(v: &str) -> Option<DateTime> {
+    let now = DateTime::now();
+    Some(match v {
+        "today" => now.start_of_day(),
+        "7d" => DateTime::from_unix(now.start_of_day().unix() - 6 * 86_400),
+        "month" => now.start_of_month(),
+        "year" => now.start_of_year(),
+        _ => return None,
+    })
 }
 
 /// Actions from the changelist. Like Django, deleting asks for confirmation on its own page first.
@@ -531,10 +563,16 @@ async fn bulk(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
             },
         );
     }
-    q.delete().await.map_err(fail)?;
-    for (id, vals) in &rows {
-        log(u, meta, *id, &repr(meta, *id, vals), DELETION, String::new()).await?;
-    }
+    // The rows and their log entries go together or not at all.
+    crate::atomic(async {
+        q.delete().await?;
+        for (id, vals) in &rows {
+            log(u, meta, *id, &repr(meta, *id, vals), DELETION, String::new()).await?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(fail)?;
     let what = if rows.len() == 1 { meta.name.to_lowercase() } else { plural(meta.name).to_lowercase() };
     let qs = serde_urlencoded::to_string([("deleted", rows.len().to_string()), ("what", what)]).unwrap();
     Ok(Redirect::to(&format!("/admin/{table}/?{qs}")).into_response())
@@ -590,6 +628,7 @@ fn raw_values(meta: &ModelMeta, vals: &[Value]) -> HashMap<String, String> {
             let s = match v {
                 Value::Null | Value::Bool(false) => return None,
                 Value::Bool(true) => "on".into(),
+                Value::Int(i) if f.ty == FieldType::DateTime => DateTime::from_unix(*i).input_value(),
                 Value::Int(i) => i.to_string(),
                 Value::Float(x) => x.to_string(),
                 Value::Text(s) => s.clone(),
@@ -642,7 +681,7 @@ async fn form_fields(
     is_add: bool,
 ) -> Result<Vec<minijinja::Value>, Response> {
     let mut out = vec![];
-    for f in meta.fields {
+    for f in meta.fields.iter().filter(|f| !f.is_auto()) {
         let options: Vec<(String, String)> = match f.fk {
             Some(t) => label_rows(site, t, None).await?.into_iter().map(|(id, l)| (id.to_string(), l)).collect(),
             None => vec![],
@@ -654,6 +693,7 @@ async fn form_fields(
             (_, _, FieldType::Int) => "number",
             (_, _, FieldType::Float) => "float",
             (_, _, FieldType::Text) => "textarea",
+            (_, _, FieldType::DateTime) => "datetime",
             _ => "text",
         };
         let value = raw.get(f.name).cloned().unwrap_or_default();
@@ -661,7 +701,7 @@ async fn form_fields(
             name => f.name, label => label(f.name), kind, checked => !value.is_empty(), value, options,
             required => !f.null && f.ty != FieldType::Bool && (is_add || !f.password),
             maxlength => match f.ty { FieldType::Varchar(n) => Some(n), _ => None },
-            help => (f.password && !is_add).then_some("Leave blank to keep the current password."),
+            help => if f.password && !is_add { Some("Leave blank to keep the current password.") } else if f.ty == FieldType::DateTime { Some("Date and time in UTC.") } else { None },
             error => errors.get(f.name),
         });
     }
@@ -676,6 +716,12 @@ async fn validate(
 ) -> Result<Vec<(&'static str, Value, FieldType)>, HashMap<String, String>> {
     let (mut cols, mut errors) = (vec![], HashMap::new());
     for f in meta.fields {
+        if f.is_auto() {
+            if f.auto_now || is_add {
+                cols.push((f.name, Value::Int(DateTime::now().unix()), f.ty));
+            }
+            continue;
+        }
         let raw = form.get(f.name).map(|s| s.trim()).unwrap_or("");
         let v = if f.ty == FieldType::Bool {
             Ok(Value::Bool(!raw.is_empty()))
@@ -691,6 +737,7 @@ async fn validate(
         } else {
             match f.ty {
                 FieldType::Int => raw.parse().map(Value::Int).map_err(|_| "Enter a whole number.".to_string()),
+                FieldType::DateTime => DateTime::parse(raw).map(Value::from).ok_or("Enter a valid date and time.".to_string()),
                 FieldType::Float => {
                     raw.parse::<f64>().ok().filter(|x| x.is_finite()).map(Value::Float).ok_or("Enter a number.".to_string())
                 }
@@ -729,7 +776,12 @@ fn db_error_message(e: &Error) -> Option<&'static str> {
 fn change_message(meta: &ModelMeta, old: &[Value], cols: &[(&'static str, Value, FieldType)]) -> String {
     let changed: Vec<String> = cols
         .iter()
-        .filter(|(name, v, _)| meta.fields.iter().position(|f| f.name == *name).is_some_and(|i| meta.fields[i].password || &old[i] != v))
+        .filter(|(name, v, _)| {
+            meta.fields
+                .iter()
+                .position(|f| f.name == *name)
+                .is_some_and(|i| !meta.fields[i].is_auto() && (meta.fields[i].password || &old[i] != v))
+        })
         .map(|(name, ..)| label(name).to_lowercase())
         .collect();
     match changed.as_slice() {
@@ -795,12 +847,14 @@ async fn add_submit(
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
     let errors = match validate(meta, &form, true).await {
-        Ok(cols) => match orm::insert_row(meta.table, &cols).await {
-            Ok(id) => {
-                let vals = fetch_row(meta, id).await?;
-                let log_id = log(u, meta, id, &repr(meta, id, &vals), ADDITION, "Added.".into()).await?;
-                return Ok(after_save(&table, id, log_id, &form));
-            }
+        Ok(cols) => match crate::atomic(async {
+            let id = orm::insert_row(meta.table, &cols).await?;
+            let vals = row_values(meta, id).await?;
+            Ok((id, log(u, meta, id, &repr(meta, id, &vals), ADDITION, "Added.".into()).await?))
+        })
+        .await
+        {
+            Ok((id, log_id)) => return Ok(after_save(&table, id, log_id, &form)),
             Err(e) => [("__all__".to_string(), db_error_message(&e).ok_or_else(|| fail(e))?.to_string())].into(),
         },
         Err(errors) => errors,
@@ -836,13 +890,14 @@ async fn change_submit(
         Ok(cols) => {
             let mut q = Query::new(meta);
             q.filter.push(by_id(id));
-            match q.update(&cols).await {
-                Ok(_) => {
-                    let msg = change_message(meta, &old, &cols);
-                    let vals = fetch_row(meta, id).await?;
-                    let log_id = log(u, meta, id, &repr(meta, id, &vals), CHANGE, msg).await?;
-                    return Ok(after_save(&table, id, log_id, &form));
-                }
+            let saved = crate::atomic(async {
+                q.update(&cols).await?;
+                let vals = row_values(meta, id).await?;
+                log(u, meta, id, &repr(meta, id, &vals), CHANGE, change_message(meta, &old, &cols)).await
+            })
+            .await;
+            match saved {
+                Ok(log_id) => return Ok(after_save(&table, id, log_id, &form)),
                 Err(e) => [("__all__".to_string(), db_error_message(&e).ok_or_else(|| fail(e))?.to_string())].into(),
             }
         }
@@ -877,11 +932,13 @@ async fn delete_submit(State(site): S, user: CurrentUser, uri: Uri, Path((table,
     let obj = repr(meta, id, &fetch_row(meta, id).await?);
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
-    match q.delete().await {
-        Ok(_) => {
-            let log_id = log(u, meta, id, &obj, DELETION, String::new()).await?;
-            Ok(Redirect::to(&format!("/admin/{table}/?log={log_id}")).into_response())
-        }
+    let deleted = crate::atomic(async {
+        q.delete().await?;
+        log(u, meta, id, &obj, DELETION, String::new()).await
+    })
+    .await;
+    match deleted {
+        Ok(log_id) => Ok(Redirect::to(&format!("/admin/{table}/?log={log_id}")).into_response()),
         // The confirmation page already lists what blocks this; show it again.
         Err(e) if e.is_foreign_key_violation() => delete_page(State(site), user, uri, Path((table, id))).await,
         Err(e) => Err(fail(e)),
@@ -903,7 +960,7 @@ async fn history(State(site): S, user: CurrentUser, uri: Uri, Path((table, id)):
         .iter()
         .map(|e| {
             context! {
-                at => utc_human(e.at as u64),
+                at => DateTime::from_unix(e.at).human(),
                 user => users.get(&e.user_id).map_or("(deleted user)".to_string(), |u| u.username.clone()),
                 message => e.message,
             }
@@ -1005,9 +1062,39 @@ mod tests {
     #[test]
     fn change_messages_read_like_django() {
         static FIELDS: [FieldMeta; 3] = [
-            FieldMeta { name: "title", ty: FieldType::Text, null: false, unique: false, password: false, fk: None, cascade: false },
-            FieldMeta { name: "body", ty: FieldType::Text, null: false, unique: false, password: false, fk: None, cascade: false },
-            FieldMeta { name: "author_id", ty: FieldType::Int, null: false, unique: false, password: false, fk: None, cascade: false },
+            FieldMeta {
+                name: "title",
+                ty: FieldType::Text,
+                null: false,
+                unique: false,
+                password: false,
+                fk: None,
+                cascade: false,
+                auto_now: false,
+                auto_now_add: false,
+            },
+            FieldMeta {
+                name: "body",
+                ty: FieldType::Text,
+                null: false,
+                unique: false,
+                password: false,
+                fk: None,
+                cascade: false,
+                auto_now: false,
+                auto_now_add: false,
+            },
+            FieldMeta {
+                name: "author_id",
+                ty: FieldType::Int,
+                null: false,
+                unique: false,
+                password: false,
+                fk: None,
+                cascade: false,
+                auto_now: false,
+                auto_now_add: false,
+            },
         ];
         let meta = ModelMeta { name: "Post", table: "blog_post", display: None, fields: &FIELDS };
         let old = [Value::Text("a".into()), Value::Text("b".into()), Value::Int(1)];

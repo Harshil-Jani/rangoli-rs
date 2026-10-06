@@ -1,0 +1,22 @@
+{
+  "operations": [
+    {
+      "op": "add_column",
+      "table": "blog_post",
+      "column": {
+        "name": "created_at",
+        "type": "date_time"
+      },
+      "default": 0
+    },
+    {
+      "op": "add_column",
+      "table": "blog_post",
+      "column": {
+        "name": "updated_at",
+        "type": "date_time"
+      },
+      "default": 0
+    }
+  ]
+}

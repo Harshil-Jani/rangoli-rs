@@ -41,7 +41,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
     };
 
     let mut has_id = false;
-    let (mut metas, mut reads, mut values, mut cols) = (vec![], vec![], vec![], vec![]);
+    let (mut metas, mut reads, mut values, mut cols, mut touches) = (vec![], vec![], vec![], vec![], vec![]);
     for f in &fields.named {
         let name = f.ident.as_ref().unwrap();
         let name_s = name.to_string();
@@ -50,6 +50,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
 
         let (mut max_length, mut text, mut unique, mut password, mut cascade, mut fk) =
             (None::<u32>, false, false, false, false, None::<syn::Path>);
+        let (mut auto_now, mut auto_now_add) = (false, false);
         for attr in f.attrs.iter().filter(|a| a.path().is_ident("field")) {
             attr.parse_nested_meta(|m| {
                 if m.path.is_ident("max_length") {
@@ -60,12 +61,18 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     unique = true;
                 } else if m.path.is_ident("password") {
                     password = true;
+                } else if m.path.is_ident("auto_now") {
+                    auto_now = true;
+                } else if m.path.is_ident("auto_now_add") {
+                    auto_now_add = true;
                 } else if m.path.is_ident("cascade") {
                     cascade = true;
                 } else if m.path.is_ident("fk") {
                     fk = Some(m.value()?.parse()?);
                 } else {
-                    return Err(m.error("expected `max_length`, `text`, `unique`, `password`, `fk` or `cascade`"));
+                    return Err(
+                        m.error("expected `max_length`, `text`, `unique`, `password`, `fk`, `cascade`, `auto_now` or `auto_now_add`")
+                    );
                 }
                 Ok(())
             })?;
@@ -81,6 +88,14 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
         if fk.is_some() && base != "i64" {
             return Err(syn::Error::new_spanned(&f.ty, "a `fk` field must be `i64` or `Option<i64>`"));
         }
+        if (auto_now || auto_now_add) && (base != "DateTime" || null) {
+            return Err(syn::Error::new_spanned(&f.ty, "`auto_now` and `auto_now_add` need a `DateTime` field (not an Option)"));
+        }
+        if auto_now {
+            touches.push(quote!(self.#name = ::rangoli::DateTime::now();));
+        } else if auto_now_add {
+            touches.push(quote!(if adding { self.#name = ::rangoli::DateTime::now(); }));
+        }
         if cascade && fk.is_none() {
             return Err(syn::Error::new_spanned(name, "`cascade` needs `fk = Model`"));
         }
@@ -92,6 +107,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
             "i64" => quote!(Int),
             "f64" => quote!(Float),
             "bool" => quote!(Bool),
+            "DateTime" => quote!(DateTime),
             _ if text => quote!(Text),
             _ => {
                 let n = max_length.unwrap_or(255);
@@ -106,6 +122,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
             ::rangoli::orm::FieldMeta {
                 name: #name_s, ty: ::rangoli::orm::FieldType::#ty, null: #null,
                 unique: #unique, password: #password, fk: #fk_tokens, cascade: #cascade,
+                auto_now: #auto_now, auto_now_add: #auto_now_add,
             }
         });
         reads.push(quote! {
@@ -142,6 +159,8 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
             fn pk(&self) -> Option<i64> { self.id }
             fn set_pk(&mut self, id: i64) { self.id = Some(id); }
             fn values(&self) -> Vec<::rangoli::orm::Value> { vec![#(#values),*] }
+            #[allow(unused_variables)]
+            fn before_save(&mut self, adding: bool) { #(#touches)* }
         }
         impl #ident {
             pub const ID: ::rangoli::orm::Col<Self, i64> = ::rangoli::orm::Col::new("id");
@@ -168,12 +187,12 @@ fn unwrap_option(ty: &Type) -> (&Type, bool) {
 fn base_type(ty: &Type) -> syn::Result<&'static str> {
     if let Type::Path(p) = ty {
         if let Some(seg) = p.path.segments.last() {
-            for t in ["i64", "f64", "bool", "String"] {
+            for t in ["i64", "f64", "bool", "String", "DateTime"] {
                 if seg.ident == t {
                     return Ok(t);
                 }
             }
         }
     }
-    Err(syn::Error::new_spanned(ty, "supported field types: i64, f64, bool, String (optionally wrapped in Option)"))
+    Err(syn::Error::new_spanned(ty, "supported field types: i64, f64, bool, String, DateTime (optionally wrapped in Option)"))
 }

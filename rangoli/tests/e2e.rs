@@ -5,7 +5,7 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use rangoli::orm;
-use rangoli::{migrate, App, Error, Model};
+use rangoli::{migrate, App, DateTime, Error, Model};
 use tower::ServiceExt;
 
 #[derive(Model, Clone, Debug, PartialEq)]
@@ -45,6 +45,11 @@ struct PostV2 {
     #[field(fk = Author)]
     author_id: i64,
     views: i64,
+    #[field(auto_now_add)]
+    created_at: DateTime,
+    #[field(auto_now)]
+    updated_at: DateTime,
+    publish_at: Option<DateTime>,
 }
 
 fn post(title: &str, author: &Author, published: bool, rating: Option<f64>) -> Post {
@@ -127,6 +132,22 @@ async fn full_stack() {
     assert_eq!(authors.len(), 2);
     assert_eq!(authors[&ada.id.unwrap()], ada);
 
+    // ---- transactions
+    let before = Author::objects().count().await.unwrap();
+    let temp = |n: &str| Author { id: None, name: n.into(), email: format!("{n}@example.com") };
+    let failed: rangoli::Result<()> = rangoli::atomic(async {
+        temp("temp1").save_new().await?;
+        rangoli::atomic(async { temp("temp2").save_new().await }).await?; // nested joins the outer block
+        assert_eq!(Author::objects().count().await?, before + 2, "writes are visible inside the transaction");
+        Err(Error::NotFound)
+    })
+    .await;
+    assert!(matches!(failed, Err(Error::NotFound)));
+    assert_eq!(Author::objects().count().await.unwrap(), before, "an Err rolls everything back");
+    rangoli::atomic(async { temp("temp3").save_new().await }).await.unwrap();
+    assert_eq!(Author::objects().filter(Author::NAME.eq("temp3")).count().await.unwrap(), 1, "an Ok commits");
+    Author::objects().filter(Author::NAME.eq("temp3")).delete().await.unwrap();
+
     let dup = Author { id: None, name: "Copy".into(), email: "ada@example.com".into() }.save_new().await;
     assert!(dup.unwrap_err().is_unique_violation());
     let orphan = post("Orphan", &Author { id: Some(424242), ..ada.clone() }, true, None).save_new().await;
@@ -145,9 +166,34 @@ async fn full_stack() {
     let rows = PostV2::objects().order_by(PostV2::ID.asc()).all().await.unwrap();
     assert_eq!(rows.len(), 3, "data survives the migration");
     assert!(rows.iter().all(|p| p.views == 0));
-    let mut long =
-        PostV2 { id: None, title: "x".repeat(300), body: String::new(), published: false, author_id: alan.id.unwrap(), views: 7 };
+    assert!(rows.iter().all(|p| p.created_at.unix() == 0), "existing rows get the column default");
+    let epoch = DateTime::from_unix(0);
+    let mut long = PostV2 {
+        id: None,
+        title: "x".repeat(300),
+        body: String::new(),
+        published: false,
+        author_id: alan.id.unwrap(),
+        views: 7,
+        created_at: epoch,
+        updated_at: epoch,
+        publish_at: DateTime::parse("2026-01-02T03:04"),
+    };
     long.save().await.unwrap();
+    let today = DateTime::now().start_of_day();
+    assert!(long.created_at >= today && long.updated_at >= today, "auto_now_add and auto_now fill in on insert");
+    let created = long.created_at;
+    long.updated_at = epoch;
+    long.created_at = epoch;
+    long.save().await.unwrap();
+    assert!(long.updated_at >= today, "auto_now refreshes on every save");
+    assert_eq!(long.created_at, epoch, "auto_now_add only applies when adding");
+    long.created_at = created;
+    long.save().await.unwrap();
+    let fresh = PostV2::get(long.id.unwrap()).await.unwrap();
+    assert_eq!((fresh.created_at, fresh.publish_at.unwrap().to_string()), (created, "2026-01-02T03:04:00Z".to_string()));
+    assert_eq!(PostV2::objects().filter(PostV2::CREATED_AT.gte(today)).count().await.unwrap(), 1, "datetimes compare in SQL");
+    assert_eq!(PostV2::objects().filter(PostV2::PUBLISH_AT.is_null()).count().await.unwrap(), 3);
 
     // ---- admin over HTTP
     let app = v2.router();
@@ -235,6 +281,11 @@ async fn full_stack() {
 
     let (_, _, body) = send(get(&format!("/admin/blog_post/{}/", long.id.unwrap()), &cookie)).await;
     assert!(body.contains(">Grace Hopper</option>") && body.contains(">Alan</option>"), "foreign keys render as a select");
+    assert!(body.contains("type=\"datetime-local\"") && body.contains("value=\"2026-01-02T03:04\""), "datetime input");
+    assert!(!body.contains("name=\"created_at\"") && !body.contains("name=\"updated_at\""), "auto fields are not editable");
+    let (_, _, body) = send(get("/admin/blog_post/?f.created_at=today", &cookie)).await;
+    assert!(body.contains("By created at") && body.contains("Past 7 days") && body.contains("1 result of"), "date filter");
+    assert!(body.contains(" UTC</td>"), "datetimes display in UTC");
 
     let (status, _, body) = send(get(&format!("/admin/blog_author/{}/delete", ada.id.unwrap()), &cookie)).await;
     assert_eq!(status, StatusCode::CONFLICT);
