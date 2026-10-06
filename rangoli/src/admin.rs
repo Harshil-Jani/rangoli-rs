@@ -47,6 +47,7 @@ struct Site {
     admin: Vec<&'static ModelMeta>,
     models: Vec<&'static ModelMeta>,
     env: Environment<'static>,
+    version: String,
 }
 
 type S = State<Arc<Site>>;
@@ -68,6 +69,8 @@ pub fn router(admin: Vec<&'static ModelMeta>, models: Vec<&'static ModelMeta>) -
     ] {
         env.add_template(name, src).expect("admin template");
     }
+    let version = asset_version();
+    env.add_global("v", version.clone());
     Router::new()
         .route("/admin", get(|| async { Redirect::permanent("/admin/") }))
         .route("/admin/", get(index))
@@ -80,7 +83,7 @@ pub fn router(admin: Vec<&'static ModelMeta>, models: Vec<&'static ModelMeta>) -
         .route("/admin/{table}/{id}/", get(change_page).post(change_submit))
         .route("/admin/{table}/{id}/delete", get(delete_page).post(delete_submit))
         .route("/admin/{table}/{id}/history", get(history))
-        .with_state(Arc::new(Site { admin, models, env }))
+        .with_state(Arc::new(Site { admin, models, env, version }))
 }
 
 // ---------------------------------------------------------------- helpers
@@ -311,20 +314,35 @@ async fn password_submit(State(site): S, user: CurrentUser, uri: Uri, Form(f): F
     render(&site, "password_change.html", context! { title => "Password change successful", done => true, ..chrome(&site, u, None) })
 }
 
-async fn static_file(Path(file): Path<String>) -> Response {
-    let (body, ty): (&'static [u8], &str) = match file.as_str() {
-        "admin.css" => (include_bytes!("admin/static/admin.css"), "text/css; charset=utf-8"),
-        "admin.js" => (include_bytes!("admin/static/admin.js"), "text/javascript; charset=utf-8"),
-        "htmx.min.js" => (include_bytes!("admin/static/htmx.min.js"), "text/javascript; charset=utf-8"),
-        "icon-yes.svg" => (include_bytes!("admin/static/icon-yes.svg"), "image/svg+xml"),
-        "icon-no.svg" => (include_bytes!("admin/static/icon-no.svg"), "image/svg+xml"),
-        "icon-addlink.svg" => (include_bytes!("admin/static/icon-addlink.svg"), "image/svg+xml"),
-        "icon-changelink.svg" => (include_bytes!("admin/static/icon-changelink.svg"), "image/svg+xml"),
-        "icon-deletelink.svg" => (include_bytes!("admin/static/icon-deletelink.svg"), "image/svg+xml"),
-        "search.svg" => (include_bytes!("admin/static/search.svg"), "image/svg+xml"),
-        _ => return StatusCode::NOT_FOUND.into_response(),
+/// Admin assets, compiled into the binary.
+const ASSETS: &[(&str, &[u8], &str)] = &[
+    ("admin.css", include_bytes!("admin/static/admin.css"), "text/css; charset=utf-8"),
+    ("admin.js", include_bytes!("admin/static/admin.js"), "text/javascript; charset=utf-8"),
+    ("htmx.min.js", include_bytes!("admin/static/htmx.min.js"), "text/javascript; charset=utf-8"),
+    ("icon-yes.svg", include_bytes!("admin/static/icon-yes.svg"), "image/svg+xml"),
+    ("icon-no.svg", include_bytes!("admin/static/icon-no.svg"), "image/svg+xml"),
+    ("icon-addlink.svg", include_bytes!("admin/static/icon-addlink.svg"), "image/svg+xml"),
+    ("icon-changelink.svg", include_bytes!("admin/static/icon-changelink.svg"), "image/svg+xml"),
+    ("icon-deletelink.svg", include_bytes!("admin/static/icon-deletelink.svg"), "image/svg+xml"),
+    ("search.svg", include_bytes!("admin/static/search.svg"), "image/svg+xml"),
+];
+
+/// Content hash of every asset. Pages link `?v=<hash>`, so a new build can never be
+/// shown with a stylesheet the browser cached from an old one.
+fn asset_version() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ASSETS.iter().for_each(|(_, body, _)| body.hash(&mut h));
+    format!("{:016x}", h.finish())
+}
+
+async fn static_file(State(site): S, Path(file): Path<String>, UrlQuery(p): UrlQuery<Pairs>) -> Response {
+    let Some((_, body, ty)) = ASSETS.iter().find(|(name, ..)| *name == file) else {
+        return StatusCode::NOT_FOUND.into_response();
     };
-    ([(header::CONTENT_TYPE, ty), (header::CACHE_CONTROL, "public, max-age=3600")], body).into_response()
+    // Versioned URLs never change; anything else must be revalidated.
+    let cache = if param(&p, "v") == Some(site.version.as_str()) { "public, max-age=31536000, immutable" } else { "no-cache" };
+    ([(header::CONTENT_TYPE, *ty), (header::CACHE_CONTROL, cache)], *body).into_response()
 }
 
 // ---------------------------------------------------------------- index
@@ -909,6 +927,71 @@ mod tests {
         assert_eq!(app_of("blog_post"), "Blog");
         assert_eq!(app_of("rangoli_user"), "Authentication and Authorization");
         assert_eq!(app_of("things"), "Things");
+    }
+
+    /// The designer review as a test: every text/background pair in the stylesheet
+    /// meets WCAG AA (4.5:1), and control borders meet the 3:1 non-text minimum.
+    #[test]
+    fn admin_contrast() {
+        let css = std::str::from_utf8(ASSETS[0].1).unwrap();
+        let tokens = |block: &str| -> HashMap<String, (f64, f64, f64)> {
+            block
+                .lines()
+                .filter_map(|l| {
+                    let (name, value) = l.trim().strip_prefix("--")?.split_once(": #")?;
+                    let hex = value.trim_end_matches(';');
+                    let c = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok().map(|v| f64::from(v) / 255.0);
+                    Some((name.to_string(), (c(0)?, c(2)?, c(4)?)))
+                })
+                .collect()
+        };
+        let light = tokens(&css[..css.find("@media (prefers-color-scheme: dark)").unwrap()]);
+        let mut dark = light.clone();
+        let dark_block = &css[css.find(":root[data-theme=\"dark\"]").unwrap()..];
+        dark.extend(tokens(&dark_block[..dark_block.find('}').unwrap()]));
+
+        let lum = |(r, g, b): (f64, f64, f64)| {
+            let f = |c: f64| if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+            0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+        };
+        let ratio = |a, b| {
+            let (x, y) = (lum(a), lum(b));
+            (x.max(y) + 0.05) / (x.min(y) + 0.05)
+        };
+        let text_pairs = [
+            ("text", "surface"),
+            ("text", "bg"),
+            ("text", "surface-2"),
+            ("text", "selected"),
+            ("text-2", "surface"),
+            ("text-2", "surface-2"),
+            ("text-2", "bg"),
+            ("brand-text", "brand"),
+            ("brand-mark", "brand"),
+            ("brand-muted", "brand"),
+            ("crumb-text", "crumb-bg"),
+            ("link", "surface"),
+            ("link", "bg"),
+            ("link", "surface-2"),
+            ("link", "crumb-bg"),
+            ("on-primary", "primary"),
+            ("on-primary", "primary-hover"),
+            ("on-danger", "danger"),
+            ("on-danger", "danger-hover"),
+            ("success-text", "success-bg"),
+            ("warning-text", "warning-bg"),
+            ("error-text", "error-bg"),
+            ("error-text", "surface"),
+        ];
+        let ui_pairs = [("line-strong", "surface"), ("focus", "surface"), ("primary", "surface"), ("error-line", "surface")];
+        for (theme, t) in [("light", &light), ("dark", &dark)] {
+            for (pairs, min) in [(&text_pairs[..], 4.5), (&ui_pairs[..], 3.0)] {
+                for (fg, bg) in pairs {
+                    let r = ratio(t[*fg], t[*bg]);
+                    assert!(r >= min, "{theme}: --{fg} on --{bg} is {r:.2}:1, needs {min}:1");
+                }
+            }
+        }
     }
 
     #[test]

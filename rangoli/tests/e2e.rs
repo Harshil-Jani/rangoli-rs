@@ -188,16 +188,19 @@ async fn full_stack() {
 
     let (status, _, body) = send(get("/admin/", &cookie)).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("Rangoli administration") && body.contains("Welcome, <strong>root</strong>"));
-    assert!(body.contains(">Blog</span>") && body.contains(">Authentication and Authorization</span>"), "models grouped by app");
-    assert!(body.contains("Recent actions") && body.contains("None available"));
+    assert!(body.contains("Rangoli administration") && body.contains("Signed in as <strong>root</strong>"));
+    assert!(
+        body.contains("<caption>Blog</caption>") && body.contains("<caption>Authentication and Authorization</caption>"),
+        "models grouped by app"
+    );
+    assert!(body.contains("Recent actions") && body.contains("Nothing yet."));
 
     let (_, _, body) = send(get("/admin/blog_post/?q=machinery", &cookie)).await;
     assert!(
         body.contains("Select postv2 to change") && body.contains("Computing Machinery") && !body.contains("Rust 50%"),
         "search filters rows"
     );
-    assert!(body.contains("1 result (<a href=") && body.contains(">4 total</a>)"), "search shows result counts");
+    assert!(body.contains("1 result of <a href=") && body.contains(">4 total</a>"), "search shows result counts");
     assert!(body.contains("<td>\n                Alan") || body.contains(">Alan<"), "foreign keys show their label in the list");
     let (_, _, body) = send(get("/admin/blog_post/?o=title&f.published=1", &cookie)).await;
     assert!(body.contains("sorted ascending") && !body.contains("xxxxxxxxxx"), "sort + boolean filter");
@@ -235,7 +238,7 @@ async fn full_stack() {
 
     let (status, _, body) = send(get(&format!("/admin/blog_author/{}/delete", ada.id.unwrap()), &cookie)).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert!(body.contains("would require deleting the following protected related objects") && body.contains("PostV2: Rust 50% off_sale"));
+    assert!(body.contains("would require deleting these protected related objects") && body.contains("PostV2: Rust 50% off_sale"));
     let (status, _, _) = send(form(&format!("/admin/blog_author/{}/delete", ada.id.unwrap()), &cookie, "")).await;
     assert_eq!(status, StatusCode::CONFLICT, "protected by foreign key");
     let (status, _, body) = send(get(&format!("{grace_url}delete"), &cookie)).await;

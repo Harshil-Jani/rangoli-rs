@@ -1,26 +1,27 @@
 {% extends "base.html" %}
 {% block bodyclass %}delete-confirmation{% endblock %}
-{% block crumbs %} › {% if bulk %}Delete multiple objects{% else %}<a href="/admin/{{ table }}/{{ id }}/">{{ obj }}</a> › Delete{% endif %}{% endblock %}
+{% block crumbs %}<span aria-hidden="true">›</span>{% if bulk %}Delete selected{% else %}<a href="/admin/{{ table }}/{{ id }}/">{{ obj }}</a><span aria-hidden="true">›</span>Delete{% endif %}{% endblock %}
 {% block content %}
+<div class="panel prose">
 {% if protected %}
-<p>Deleting the {% if bulk %}selected {{ plural|lower }}{% else %}{{ name }} “{{ obj }}”{% endif %} would require deleting the following protected related objects:</p>
-<ul>{% for p in protected %}<li>{{ p }}</li>{% endfor %}</ul>
+  <p>Deleting the {% if bulk %}selected {{ plural|lower }}{% else %}{{ name }} “{{ obj }}”{% endif %} would require deleting these protected related objects first:</p>
+  <ul>{% for p in protected %}<li>{{ p }}</li>{% endfor %}</ul>
+  <a href="{% if bulk %}/admin/{{ table }}/{% else %}/admin/{{ table }}/{{ id }}/{% endif %}" class="btn">Go back</a>
 {% else %}
-<p>{% if bulk %}Are you sure you want to delete the selected {{ plural|lower }}? All of the following objects and their related items will be deleted:{% else %}Are you sure you want to delete the {{ name }} “{{ obj }}”? All of the following related items will be deleted:{% endif %}</p>
-<h2>Summary</h2>
-<ul>{% for s in summary %}<li>{{ s }}</li>{% endfor %}</ul>
-<h2>Objects</h2>
-<ul>
-  {% for o in objects %}<li>{{ o.model }}: <a href="{{ o.url }}">{{ o.repr }}</a></li>{% endfor %}
-  {% if cascaded %}<li>Related<ul>{% for c in cascaded %}<li>{{ c.label }}</li>{% endfor %}</ul></li>{% endif %}
-</ul>
-<form method="post"{% if bulk %} action="/admin/{{ table }}/"{% endif %}>
-  <div>
+  <p>{% if bulk %}Are you sure you want to delete the selected {{ plural|lower }}? These objects and their related items will be deleted:{% else %}Are you sure you want to delete the {{ name }} “{{ obj }}”? These related items will be deleted too:{% endif %}</p>
+  <h2>Summary</h2>
+  <ul>{% for s in summary %}<li>{{ s }}</li>{% endfor %}</ul>
+  <h2>Objects</h2>
+  <ul>
+    {% for o in objects %}<li>{{ o.model }}: <a href="{{ o.url }}">{{ o.repr }}</a></li>{% endfor %}
+    {% for c in cascaded %}<li>{{ c.label }}</li>{% endfor %}
+  </ul>
+  <form method="post"{% if bulk %} action="/admin/{{ table }}/"{% endif %} class="submit-row">
     <input type="hidden" name="post" value="yes">
     {% if bulk %}<input type="hidden" name="action" value="delete_selected">{% for i in ids %}<input type="hidden" name="_selected_action" value="{{ i }}">{% endfor %}{% endif %}
-    <input type="submit" value="Yes, I’m sure">
-    <a href="{% if bulk %}/admin/{{ table }}/{% else %}/admin/{{ table }}/{{ id }}/{% endif %}" class="button cancel-link">No, take me back</a>
-  </div>
-</form>
+    <button type="submit" class="btn danger">Yes, delete</button>
+    <a href="{% if bulk %}/admin/{{ table }}/{% else %}/admin/{{ table }}/{{ id }}/{% endif %}" class="btn">No, take me back</a>
+  </form>
 {% endif %}
+</div>
 {% endblock %}

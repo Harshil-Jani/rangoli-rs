@@ -1,78 +1,68 @@
 {% extends "base.html" %}
 {% block bodyclass %}change-list{% endblock %}
-{% block coltype %}flex{% endblock %}
-{% block breadcrumbs %}<nav aria-label="Breadcrumbs"><div class="breadcrumbs"><a href="/admin/">Home</a> › {{ app }} › {{ plural }}</div></nav>{% endblock %}
+{% block breadcrumbs %}<nav class="crumbs" aria-label="Breadcrumbs"><a href="/admin/">Home</a><span aria-hidden="true">›</span>{{ app }}<span aria-hidden="true">›</span>{{ plural }}</nav>{% endblock %}
+{% block tools %}<a href="/admin/{{ table }}/add" class="btn primary">Add {{ name }}</a>{% endblock %}
 {% block content %}
-<div id="content-main">
-  <ul class="object-tools"><li><a href="/admin/{{ table }}/add" class="addlink">Add {{ name }}</a></li></ul>
-  <div class="module{% if filters %} filtered{% endif %}" id="changelist">
-    <div class="changelist-form-container">
-      {% if searchable %}
-      <div id="toolbar">
-        <form id="changelist-search" method="get" action="/admin/{{ table }}/" role="search">
-          <div>
-            <label for="searchbar"><img src="/admin/static/search.svg" alt="Search"></label>
-            <input type="text" size="40" name="q" value="{{ q }}" id="searchbar" aria-label="Search {{ plural|lower }}"
-              hx-get="/admin/{{ table }}/" hx-trigger="input changed delay:300ms" hx-include="#changelist-search"
-              hx-target="#changelist-form" hx-select="#changelist-form" hx-swap="outerHTML"
-              hx-select-oob="#search-count,#changelist-filter" hx-push-url="true">
-            {% for k, v in keep %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
-            <input type="submit" value="Search">
-            <span id="search-count" class="small quiet">{% if filtered %}{{ count }} result{% if count != 1 %}s{% endif %} (<a href="{{ clear_url }}">{{ full_count }} total</a>){% endif %}</span>
-          </div>
-        </form>
-      </div>
-      {% endif %}
-      <form id="changelist-form" method="post" action="/admin/{{ table }}/" novalidate>
-        <div class="actions">
-          <label>Action: <select name="action" required>
-            <option value="" selected>---------</option>
-            <option value="delete_selected">Delete selected {{ plural|lower }}</option>
-          </select></label>
-          <button type="submit" class="button" title="Run the selected action">Go</button>
-          <span class="action-counter" data-total="{{ rows|length }}">0 of {{ rows|length }} selected</span>
-        </div>
-        <div class="results">
-          <table id="result_list">
-            <thead><tr>
-              <th scope="col" class="action-checkbox-column"><div class="text"><span><input type="checkbox" id="action-toggle" aria-label="Select all objects on this page for an action"></span></div></th>
-              {% for c in columns %}
-              <th scope="col" class="{% if c.url %}sortable{% endif %}{% if c.sorted %} sorted {{ c.sorted }}{% endif %}">
-                <div class="text">{% if c.url %}<a href="{{ c.url }}">{{ c.label }}</a>{% else %}<span>{{ c.label }}</span>{% endif %}</div>
-              </th>
-              {% endfor %}
-            </tr></thead>
-            <tbody>
-              {% for r in rows %}
-              <tr>
-                <td class="action-checkbox"><input type="checkbox" name="_selected_action" value="{{ r.id }}" class="action-select" aria-label="Select this object for an action - {{ r.repr }}"></td>
-                {% for cell in r.cells %}
-                {% if loop.first %}<th scope="row">{% else %}<td>{% endif %}
-                {% if loop.first %}<a href="{{ r.url }}">{% endif %}{% if cell.bool is defined %}<img src="/admin/static/icon-{% if cell.bool %}yes{% else %}no{% endif %}.svg" alt="{{ cell.bool }}">{% else %}{{ cell.text }}{% endif %}{% if loop.first %}</a>{% endif %}
-                {% if loop.first %}</th>{% else %}</td>{% endif %}
-                {% endfor %}
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-        <p class="paginator">
-          {% if page_links|length > 1 %}{% for l in page_links %}{% if l.current %}<span class="this-page">{{ l.n }}</span>{% else %}<a href="{{ l.url }}">{{ l.n }}</a>{% endif %} {% endfor %}{% endif %}
-          {{ count }} {{ what }}
-        </p>
-      </form>
-    </div>
-    {% if filters %}
-    <nav id="changelist-filter" aria-labelledby="changelist-filter-header">
-      <h2 id="changelist-filter-header">Filter</h2>
-      {% for f in filters %}
-      <details open>
-        <summary>By {{ f.label }}</summary>
-        <ul>{% for o in f.options %}<li{% if o.active %} class="selected"{% endif %}><a href="{{ o.url }}">{{ o.label }}</a></li>{% endfor %}</ul>
-      </details>
-      {% endfor %}
-    </nav>
+<div class="changelist{% if filters %} has-filters{% endif %}">
+  <div class="changelist-main">
+    {% if searchable %}
+    <form id="changelist-search" class="toolbar" method="get" action="/admin/{{ table }}/" role="search">
+      <label for="searchbar" class="sr">Search {{ plural|lower }}</label>
+      <input type="search" name="q" value="{{ q }}" id="searchbar" placeholder="Search {{ plural|lower }}"
+        hx-get="/admin/{{ table }}/" hx-trigger="input changed delay:300ms" hx-include="#changelist-search"
+        hx-target="#changelist-form" hx-select="#changelist-form" hx-swap="outerHTML"
+        hx-select-oob="#search-count,#changelist-filter" hx-push-url="true">
+      {% for k, v in keep %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+      <button type="submit" class="btn">Search</button>
+      <span id="search-count" class="meta">{% if filtered %}{{ count }} result{% if count != 1 %}s{% endif %} of <a href="{{ clear_url }}">{{ full_count }} total</a>{% endif %}</span>
+    </form>
     {% endif %}
+    <form id="changelist-form" method="post" action="/admin/{{ table }}/" novalidate>
+      <div class="actions">
+        <label for="action-select">Action</label>
+        <select name="action" id="action-select">
+          <option value="" selected>Choose an action</option>
+          <option value="delete_selected">Delete selected {{ plural|lower }}</option>
+        </select>
+        <button type="submit" class="btn">Go</button>
+        <span class="action-counter meta">0 of {{ rows|length }} selected</span>
+      </div>
+      <div class="table-wrap">
+        <table id="result_list" class="results">
+          <thead><tr>
+            <th scope="col" class="check"><input type="checkbox" id="action-toggle" aria-label="Select all {{ plural|lower }} on this page"></th>
+            {% for c in columns %}
+            <th scope="col"{% if c.sorted %} class="sorted {{ c.sorted }}" aria-sort="{{ c.sorted }}"{% endif %}>{% if c.url %}<a href="{{ c.url }}">{{ c.label }}</a>{% else %}{{ c.label }}{% endif %}</th>
+            {% endfor %}
+          </tr></thead>
+          <tbody>
+            {% for r in rows %}
+            <tr>
+              <td class="check"><input type="checkbox" name="_selected_action" value="{{ r.id }}" class="action-select" aria-label="Select {{ r.repr }}"></td>
+              {% for cell in r.cells %}
+              {% if loop.first %}<th scope="row"><a href="{{ r.url }}">{% else %}<td>{% endif %}{% if cell.bool is defined %}<img src="/admin/static/icon-{% if cell.bool %}yes{% else %}no{% endif %}.svg?v={{ v }}" alt="{% if cell.bool %}Yes{% else %}No{% endif %}" width="14" height="14">{% else %}{{ cell.text }}{% endif %}{% if loop.first %}</a></th>{% else %}</td>{% endif %}
+              {% endfor %}
+            </tr>
+            {% else %}
+            <tr><td colspan="{{ columns|length + 1 }}" class="empty">{% if filtered %}No {{ plural|lower }} match these filters.{% else %}No {{ plural|lower }} yet. <a href="/admin/{{ table }}/add">Add the first one</a>.{% endif %}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="paginator">
+        {% if page_links|length > 1 %}{% for l in page_links %}{% if l.current %}<span class="this-page" aria-current="page">{{ l.n }}</span>{% else %}<a href="{{ l.url }}">{{ l.n }}</a>{% endif %}{% endfor %}{% endif %}
+        <span class="meta">{{ count }} {{ what }}</span>
+      </p>
+    </form>
   </div>
+  {% if filters %}
+  <aside id="changelist-filter" class="filters" aria-labelledby="filter-title">
+    <h2 id="filter-title">Filter</h2>
+    {% for f in filters %}
+    <h3>By {{ f.label }}</h3>
+    <ul>{% for o in f.options %}<li{% if o.active %} class="selected"{% endif %}><a href="{{ o.url }}"{% if o.active %} aria-current="true"{% endif %}>{{ o.label }}</a></li>{% endfor %}</ul>
+    {% endfor %}
+  </aside>
+  {% endif %}
 </div>
 {% endblock %}
