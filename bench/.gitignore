@@ -1,0 +1,3 @@
+.venv/
+results/*.sqlite3*
+django_blog/**/__pycache__/

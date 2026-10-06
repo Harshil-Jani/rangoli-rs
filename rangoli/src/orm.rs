@@ -349,6 +349,16 @@ pub async fn connect(url: &str) -> Result<&'static Db> {
     }
     sqlx::any::install_default_drivers();
     let dialect = Dialect::from_url(url)?;
+    if dialect == Dialect::Sqlite {
+        // SQLite's memory statistics take one process-wide mutex on every malloc, so pooled
+        // connections in one process serialize on it (measured: throughput fell from 680 to
+        // 250 req/s going from 1 to 8 concurrent requests). Nothing reads the statistics.
+        static SQLITE_CONFIG: std::sync::Once = std::sync::Once::new();
+        SQLITE_CONFIG.call_once(|| unsafe {
+            // Only effective before SQLite initializes; a later call is a harmless no-op.
+            libsqlite3_sys::sqlite3_config(libsqlite3_sys::SQLITE_CONFIG_MEMSTATUS, 0 as std::os::raw::c_int);
+        });
+    }
     let pool = AnyPoolOptions::new()
         .max_connections(10)
         .after_connect(move |conn, _| {

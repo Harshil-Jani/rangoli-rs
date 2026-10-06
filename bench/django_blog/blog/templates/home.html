@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Field notes</title></head>
+<body>
+<main>
+<form action="/"><input type="search" name="q" value="{{ q }}"></form>
+<section id="posts">
+{% partialdef posts inline %}
+  {% for p in posts %}
+  <article>
+    <h2>{{ p.title }}</h2>
+    <p class="byline">{{ p.author.name }}{% if p.tags.all %} · {{ p.tags.all|join:", " }}{% endif %}</p>
+    <p>{{ p.body }}</p>
+  </article>
+  {% empty %}
+  <p>Nothing published yet.</p>
+  {% endfor %}
+{% endpartialdef %}
+</section>
+</main>
+</body></html>

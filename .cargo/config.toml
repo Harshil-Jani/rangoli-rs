@@ -1,0 +1,6 @@
+[env]
+# libsqlite3-sys builds SQLite with SQLITE_ENABLE_MEMORY_MANAGEMENT, which puts every
+# connection in the process behind one page-cache mutex, and with memory statistics that
+# take a global mutex on each malloc (page-cache overflow stats likewise). Rangoli pools connections in one process, so both
+# serialize concurrent requests (see bench/README.md). Copy this into SQLite apps.
+LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DISABLE_PAGECACHE_OVERFLOW_STATS"

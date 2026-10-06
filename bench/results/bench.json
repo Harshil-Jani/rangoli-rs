@@ -1,0 +1,115 @@
+{
+  "machine": {
+    "cpu": "Apple M1 Pro",
+    "cores": 8
+  },
+  "settings": {
+    "duration": "15s",
+    "connections": 64,
+    "django_workers": 8
+  },
+  "frameworks": {
+    "rangoli": {
+      "startup_ms": 18,
+      "idle_rss_mb": 32.5,
+      "scenarios": {
+        "posts_json": {
+          "path": "/posts.json",
+          "bytes": 28354,
+          "rps": 13976.1,
+          "p50_ms": 4.39,
+          "p99_ms": 7.05,
+          "success_rate": 1.0,
+          "status_codes": {
+            "200": 209611
+          }
+        },
+        "home_html": {
+          "path": "/",
+          "bytes": 26311,
+          "rps": 3589.0,
+          "p50_ms": 16.81,
+          "p99_ms": 34.45,
+          "success_rate": 1.0,
+          "status_codes": {
+            "200": 53785
+          }
+        },
+        "api_list": {
+          "path": "/api/blog_post/?limit=50",
+          "bytes": 28298,
+          "rps": 8335.0,
+          "p50_ms": 7.44,
+          "p99_ms": 11.2,
+          "success_rate": 1.0,
+          "status_codes": {
+            "200": 124986
+          }
+        },
+        "admin_changelist": {
+          "path": "/admin/blog_post/",
+          "bytes": 72496,
+          "rps": 2682.6,
+          "p50_ms": 23.25,
+          "p99_ms": 32.27,
+          "success_rate": 1.0,
+          "status_codes": {
+            "200": 40184
+          }
+        }
+      },
+      "loaded_rss_mb": 57.0
+    },
+    "django": {
+      "startup_ms": 365,
+      "idle_rss_mb": 357.2,
+      "scenarios": {
+        "posts_json": {
+          "path": "/posts.json",
+          "bytes": 25453,
+          "rps": 2818.7,
+          "p50_ms": 22.0,
+          "p99_ms": 33.18,
+          "success_rate": 1.0,
+          "status_codes": {
+            "200": 42224
+          }
+        },
+        "home_html": {
+          "path": "/",
+          "bytes": 25629,
+          "rps": 995.7,
+          "p50_ms": 68.33,
+          "p99_ms": 112.44,
+          "success_rate": 0.8168682795698925,
+          "status_codes": {
+            "200": 12155
+          }
+        },
+        "api_list": {
+          "path": "/api/posts/?limit=50",
+          "bytes": 28165,
+          "rps": 1056.8,
+          "p50_ms": 59.74,
+          "p99_ms": 76.51,
+          "success_rate": 1.0,
+          "status_codes": {
+            "200": 15792
+          }
+        },
+        "admin_changelist": {
+          "path": "/admin/blog/post/",
+          "bytes": 68988,
+          "rps": 194.3,
+          "p50_ms": 323.21,
+          "p99_ms": 445.02,
+          "success_rate": 1.0,
+          "status_codes": {
+            "200": 2852
+          }
+        }
+      },
+      "loaded_rss_mb": 521.2
+    }
+  }
+}

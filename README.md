@@ -262,9 +262,9 @@ Operations: `create_table`, `drop_table`, `add_column`, `drop_column`, `alter_co
 
 This is the roadmap, in rough order. Nothing here is implemented yet:
 
-1. **More field types**: date, decimal, uuid; model-level composite indexes
+1. **More field types**: date, decimal, uuid
 2. Savepoints for nested `atomic` blocks (today a nested block joins the outer one)
-3. **Relations**: `select_related`-style joins, reverse foreign key accessors, composite indexes from models
+3. **Relations**: `select_related`-style joins, reverse foreign key accessors
 4. **More admin customization**: inlines, custom actions, fieldsets, per-model permissions, groups
 5. **Form rendering helpers** (widgets from model metadata); template filters for dates and choices
 6. **API tokens** for non-browser API clients, and per-object API permissions
@@ -274,6 +274,21 @@ This is the roadmap, in rough order. Nothing here is implemented yet:
 10. **WebAssembly**, explored later: the same validation rules running in the browser and on the server, and sandboxed WASM plugins
 
 Known limits today: login lockouts are per process, the admin's foreign-key select loads at most 1000 rows, and changing `unique`/`fk` on an existing column needs an `sql` operation on Postgres and MySQL.
+
+## Performance
+
+`bench/` holds the same blog written in Django 6.1.2 (with DRF and gunicorn) and a script that loads both with identical data and measures them with [oha](https://github.com/hatoo/oha). On an Apple M1 Pro, SQLite, 64 concurrent connections, Django on 8 sync workers:
+
+| | Rangoli | Django 6.1.2 |
+|---|---|---|
+| `/posts.json` (50 posts + author) | 13,976 req/s | 2,819 req/s |
+| Homepage template (50 posts + tags) | 3,589 req/s | 996 req/s |
+| JSON API list | 8,335 req/s | 1,057 req/s (DRF) |
+| Admin changelist (logged in) | 2,683 req/s | 194 req/s |
+| Startup to first response | 18 ms | 365 ms |
+| Memory under load | 57 MB | 521 MB |
+
+The first run had Rangoli *slower* than Django on three of four pages. Profiling showed every SQLite connection in the process waiting on SQLite's global statistics mutexes; Django never sees them because each gunicorn worker is its own process. Rangoli now switches memory statistics off at runtime, and SQLite apps should copy [`.cargo/config.toml`](.cargo/config.toml), which also builds SQLite without its shared page cache. That took the homepage from 249 to 3,589 req/s. Rerun with `python bench/run.py`.
 
 ## Development
 

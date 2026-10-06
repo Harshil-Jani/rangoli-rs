@@ -4,42 +4,8 @@ use rangoli::axum::{routing::get, Json, Router};
 use rangoli::prelude::*;
 use serde::Serialize;
 
-#[derive(Model, Serialize, Clone, Debug)]
-#[model(table = "blog_author", display = "name")]
-pub struct Author {
-    pub id: Option<i64>,
-    #[field(max_length = 100)]
-    pub name: String,
-    #[field(max_length = 254, unique)]
-    pub email: String,
-}
-
-#[derive(Model, Serialize, Clone, Debug)]
-#[model(table = "blog_tag", display = "name")]
-pub struct Tag {
-    pub id: Option<i64>,
-    #[field(max_length = 50, unique)]
-    pub name: String,
-}
-
-#[derive(Model, Serialize, Clone, Debug)]
-#[model(table = "blog_post", display = "title", m2m(tags = Tag))]
-pub struct Post {
-    pub id: Option<i64>,
-    #[field(max_length = 200)]
-    pub title: String,
-    #[field(text)]
-    pub body: String,
-    #[field(index)]
-    pub published: bool,
-    #[field(fk = Author)]
-    pub author_id: i64,
-    pub rating: Option<f64>,
-    #[field(auto_now_add)]
-    pub created_at: DateTime,
-    #[field(auto_now)]
-    pub updated_at: DateTime,
-}
+mod models;
+use models::*;
 
 #[derive(Serialize)]
 struct PostOut {
@@ -50,7 +16,7 @@ struct PostOut {
 
 /// Published posts with their authors in two queries total, never N+1.
 async fn posts() -> rangoli::Result<Json<Vec<PostOut>>> {
-    let posts = Post::objects().filter(Post::PUBLISHED.eq(true)).order_by(Post::ID.desc()).all().await?;
+    let posts = Post::objects().filter(Post::PUBLISHED.eq(true)).order_by(Post::ID.desc()).limit(50).all().await?;
     let authors = Author::in_bulk(posts.iter().map(|p| p.author_id)).await?;
     Ok(Json(posts.into_iter().map(|p| PostOut { author: authors.get(&p.author_id).map(|a| a.name.clone()), post: p }).collect()))
 }
@@ -71,7 +37,7 @@ async fn home(Query(p): Query<Vec<(String, String)>>) -> rangoli::Result<Html<St
     if !q.is_empty() {
         posts = posts.filter(Post::TITLE.contains(&q) | Post::BODY.contains(&q));
     }
-    let posts = posts.all().await?;
+    let posts = posts.limit(50).all().await?;
     // Three queries in total, however many posts: posts, their authors, their tags.
     let authors = Author::in_bulk(posts.iter().map(|p| p.author_id)).await?;
     let mut tags = Post::TAGS.prefetch(&posts).await?;
