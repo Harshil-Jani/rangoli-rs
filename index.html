@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rangoli: a Django-style web framework for Rust</title>
+<meta name="description" content="Typed ORM, branch-safe migrations, a Django-style admin, a JSON API with OpenAPI, and background tasks in one Rust binary, measured against Django 6.1.2.">
+<style>
+:root {
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px; --s8: 72px;
+  --bg: #fbfaf8; --surface: #ffffff; --ink: #1c2430; --ink-2: #4a5565; --line: #dde1e7;
+  --brand: #1f4e66; --brand-ink: #ffffff; --mark: #f5dd5d; --link: #1d5a7a; --code-bg: #f0f2f5;
+  --series-1: #2a78d6; --series-2: #eb6834; --win: #1e5b2c;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12161b; --surface: #1a1f26; --ink: #e6e9ee; --ink-2: #b4bcc8; --line: #2e3540;
+    --brand: #16323f; --link: #7cc4e8; --code-bg: #222831; --series-1: #3987e5; --series-2: #d95926; --win: #a6e3b5;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12161b; --surface: #1a1f26; --ink: #e6e9ee; --ink-2: #b4bcc8; --line: #2e3540;
+  --brand: #16323f; --link: #7cc4e8; --code-bg: #222831; --series-1: #3987e5; --series-2: #d95926; --win: #a6e3b5;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 17px/1.6 var(--font); }
+a { color: var(--link); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+code, pre { font-family: var(--mono); font-size: 0.86em; }
+code { background: var(--code-bg); padding: 1px 5px; }
+pre { margin: var(--s3) 0; padding: var(--s3) var(--s4); background: var(--code-bg); overflow-x: auto; line-height: 1.5; }
+pre code { background: none; padding: 0; overflow-wrap: normal; }
+h1, h2, h3, h4 { line-height: 1.2; margin: 0; }
+h2 { font-size: 28px; margin-bottom: var(--s4); }
+h3 { font-size: 20px; margin-bottom: var(--s2); }
+h4 { font-size: 13px; color: var(--ink-2); margin-bottom: var(--s2); }
+p { margin: 0 0 var(--s4); }
+
+.top { background: var(--brand); color: var(--brand-ink); }
+.top .in { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); flex-wrap: wrap; padding: var(--s3) var(--s5); max-width: 1080px; margin: 0 auto; }
+.word { color: var(--mark); font-weight: 700; font-size: 20px; text-decoration: none; }
+.top nav { display: flex; gap: var(--s4); flex-wrap: wrap; font-size: 15px; }
+.top nav a { color: var(--brand-ink); text-decoration: none; }
+.top nav a:hover { text-decoration: underline; }
+
+main { max-width: 1080px; margin: 0 auto; padding: 0 var(--s5); }
+section { padding: var(--s8) 0 var(--s6); border-bottom: 1px solid var(--line); }
+.hero { padding-top: var(--s7); }
+.hero h1 { font-size: clamp(34px, 5vw, 54px); letter-spacing: -0.5px; max-width: 18ch; margin-bottom: var(--s4); }
+.lede { font-size: 20px; color: var(--ink-2); max-width: 62ch; }
+.actions { display: flex; gap: var(--s3); flex-wrap: wrap; margin: var(--s5) 0 var(--s6); }
+.btn { display: inline-block; padding: var(--s2) var(--s4); border: 1px solid var(--brand); background: var(--brand); color: var(--brand-ink); text-decoration: none; font-weight: 600; font-size: 15px; }
+.btn.ghost { background: transparent; color: var(--link); border-color: var(--link); }
+video { display: block; width: 100%; max-width: 1080px; aspect-ratio: 16 / 9; background: #12161b; border: 1px solid var(--line); }
+.caption { font-size: 14px; color: var(--ink-2); margin-top: var(--s2); }
+
+.steps { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s5); max-width: 820px; counter-reset: step; }
+.step { counter-increment: step; min-width: 0; }
+.step h3::before { content: counter(step) ". "; color: var(--ink-2); }
+.features { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: var(--s4) var(--s6); margin: 0; }
+.features dt { font-weight: 700; }
+.features dd { margin: 0 0 var(--s3); color: var(--ink-2); }
+
+.method { color: var(--ink-2); font-size: 15px; max-width: 75ch; }
+.chart { margin: var(--s5) 0; padding: var(--s5); background: var(--surface); border: 1px solid var(--line); }
+.chart figcaption { font-weight: 700; margin-bottom: var(--s2); }
+.legend { display: flex; gap: var(--s5); font-size: 14px; color: var(--ink-2); margin-bottom: var(--s4); }
+.swatch { display: inline-block; width: 12px; height: 12px; margin-right: var(--s2); vertical-align: -1px; }
+.s1 { background: var(--series-1); } .s2 { background: var(--series-2); }
+.bar-row { display: grid; grid-template-columns: 220px 1fr; gap: var(--s4); align-items: center; padding: var(--s3) 0; border-top: 1px solid var(--line); }
+.bar-label { display: flex; flex-direction: column; font-size: 15px; }
+.bar-label span { font-size: 13px; color: var(--ink-2); line-height: 1.35; }
+.bar-line { display: flex; align-items: center; gap: var(--s2); height: 22px; margin: 2px 0; }
+.bar { position: relative; display: block; width: var(--w); min-width: 2px; height: 16px; }
+.bar-value { font-size: 14px; font-variant-numeric: tabular-nums; color: var(--ink); }
+.tip { display: none; position: absolute; left: 0; bottom: 22px; padding: var(--s1) var(--s2); background: var(--ink); color: var(--bg); font-size: 13px; white-space: nowrap; z-index: 2; }
+.bar:hover .tip, .bar:focus .tip { display: block; }
+.axis { margin-left: calc(220px + var(--s4)); position: relative; height: 22px; border-top: 1px solid var(--line); }
+.ticks span { position: absolute; top: 4px; transform: translateX(-50%); font-size: 12px; color: var(--ink-2); }
+.ticks span:first-child { transform: none; }
+
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 15px; background: var(--surface); }
+caption { text-align: left; font-weight: 700; padding: var(--s2) 0; }
+th, td { text-align: left; padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); vertical-align: top; }
+thead th { font-size: 13px; color: var(--ink-2); }
+td.win { color: var(--win); font-weight: 700; }
+.table-wrap { overflow-x: auto; max-width: 100%; border: 1px solid var(--line); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--s4); margin: var(--s5) 0; }
+.tile { padding: var(--s4); background: var(--surface); border: 1px solid var(--line); }
+.tile .label { font-size: 14px; color: var(--ink-2); }
+.tile .value { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.tile .vs { font-size: 14px; color: var(--ink-2); }
+.story { border-left: 4px solid var(--series-2); padding: var(--s3) var(--s4); background: var(--surface); max-width: 80ch; }
+.story p:last-child { margin: 0; }
+
+.finding { padding: var(--s6) 0; border-top: 1px solid var(--line); }
+.finding:first-of-type { border-top: 0; }
+.setup { color: var(--ink-2); }
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s5); }
+.side { min-width: 0; padding: var(--s4); background: var(--surface); border: 1px solid var(--line); font-size: 15px; }
+.output { white-space: pre-wrap; word-break: break-word; font-size: 13px; }
+.meaning { margin-top: var(--s4); font-weight: 600; max-width: 80ch; }
+.gaps li { margin-bottom: var(--s2); }
+footer { max-width: 1080px; margin: 0 auto; padding: var(--s6) var(--s5) var(--s7); color: var(--ink-2); font-size: 14px; }
+
+@media (max-width: 760px) {
+  main, .top .in, footer { padding-left: var(--s4); padding-right: var(--s4); }
+  section { padding-top: var(--s7); }
+  .compare { grid-template-columns: 1fr; }
+  code { overflow-wrap: anywhere; }
+  pre code { overflow-wrap: normal; }
+  .bar-row { grid-template-columns: 1fr; gap: var(--s2); }
+  .axis { margin-left: 0; }
+  .chart { padding: var(--s4); }
+}
+@media (prefers-reduced-motion: reduce) { video { animation: none; } }
+</style>
+</head>
+<body>
+<header class="top"><div class="in">
+  <a class="word" href="#">Rangoli</a>
+  <nav aria-label="Sections"><a href="#start">Get started</a><a href="#results">Results</a><a href="#findings">Findings</a><a href="#gaps">Not done yet</a><a href="https://github.com/Harshil-Jani/rangoli-rs">GitHub</a></nav>
+</div></header>
+<main>
+<section class="hero">
+  <h1>A Django-style web framework for Rust</h1>
+  <p class="lede">Rangoli gives you what Django gives you: models, migrations, an admin, auth, forms, templates, a JSON API and background tasks. It adds what Django can't: queries the compiler checks, migrations that don't conflict across branches, safe defaults, and one fast binary to deploy.</p>
+  <div class="actions"><a class="btn" href="#start">Get started</a><a class="btn ghost" href="https://github.com/Harshil-Jani/rangoli-rs">Source on GitHub</a><a class="btn ghost" href="#results">See the benchmarks</a></div>
+  <video controls preload="metadata" poster="rangoli-demo-poster.jpg" aria-describedby="video-caption">
+    <source src="rangoli-demo.mp4" type="video/mp4">
+    Your browser can't play this video. <a href="rangoli-demo.mp4">Download it</a>.
+  </video>
+  <p class="caption" id="video-caption">49 seconds, no sound: define models, run the commands, then the public pages, the admin, the JSON API and the task list of the example blog. Recorded from the real app.</p>
+</section>
+
+<section id="start">
+  <h2>Get started</h2>
+  <div class="steps">
+    <div class="step"><h3>Add the crate</h3>
+<pre><code>[dependencies]
+rangoli = { git = "https://github.com/Harshil-Jani/rangoli-rs" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }</code></pre></div>
+    <div class="step"><h3>Describe your data</h3>
+<pre><code>use rangoli::prelude::*;
+
+#[derive(Model, Clone, Debug)]
+#[model(table = "blog_post", display = "title")]
+pub struct Post {
+    pub id: Option&lt;i64&gt;,
+    #[field(max_length = 200)]
+    pub title: String,
+    pub published: bool,
+    #[field(auto_now_add)]
+    pub created_at: DateTime,
+}
+
+#[tokio::main]
+async fn main() -&gt; rangoli::Result&lt;()&gt; {
+    App::new()
+        .admin::&lt;Post&gt;()
+        .api::&lt;Post&gt;(Api::new().read(Access::Public))
+        .run()
+        .await
+}</code></pre></div>
+    <div class="step"><h3>Run it</h3>
+<pre><code>cargo run -- makemigrations
+cargo run -- migrate
+cargo run -- createsuperuser admin
+RANGOLI_DEBUG=1 cargo run</code></pre>
+<p>Open <code>http://127.0.0.1:8000/admin/</code> for the admin, <code>/api/blog_post/</code> for the API and <code>/api/schema.json</code> for its OpenAPI document. Postgres or MySQL: set <code>RANGOLI_DATABASE_URL</code>.</p></div>
+  </div>
+  <h3 style="margin-top: var(--s6)">What you get</h3>
+  <dl class="features">
+    <div><dt>Typed ORM</dt><dd><code>Post::objects().filter(Post::TITLE.contains("rust"))</code>: a misspelled field doesn't compile. Transactions, many-to-many, <code>in_bulk</code> and <code>prefetch</code>.</dd></div>
+    <div><dt>Migrations</dt><dd>Generated from your models, applied as a set so branches don't conflict. Postgres, MySQL and SQLite.</dd></div>
+    <div><dt>The admin</dt><dd>Django's admin, page for page: filters, search, actions, history, delete protection, password change.</dd></div>
+    <div><dt>JSON API</dt><dd>List, detail, create, update and delete with validation, pagination and filters, plus an OpenAPI schema.</dd></div>
+    <div><dt>Background tasks</dt><dd>Queued in your database, run by a worker in the same binary, with retries.</dd></div>
+    <div><dt>Pages and forms</dt><dd>Templates with Django 6.0 style partials, static files, and <code>ModelForm</code> returning typed models.</dd></div>
+  </dl>
+</section>
+
+<section id="results">
+  <h2>Measured against Django 6.1.2</h2>
+  <p class="method">The same blog (authors, posts, tags) written in both, loaded with identical data: 1,000 posts, 722 published, 2,000 tag links. Apple M1 Pro, 8 cores, SQLite, 64 concurrent connections for 15s after a warm-up, measured with oha. Django 6.1.2 runs under gunicorn with 8 sync workers and DEBUG off; Rangoli runs its release build. Startup is the median of five launches.</p>
+  <figure class="chart" aria-labelledby="chart-title">
+  <figcaption id="chart-title">Requests per second, higher is better</figcaption>
+  <div class="legend"><span><i class="swatch s1"></i>Rangoli</span><span><i class="swatch s2"></i>Django 6.1.2</span></div>
+  <div class="bar-row"><div class="bar-label"><strong>/posts.json</strong><span>50 posts with their author, as JSON</span></div><div class="bar-pair"><div class="bar-line"><span class="bar s1" style="--w:88.24%" tabindex="0" aria-label="Rangoli: 14,119 requests per second"><span class="tip">Rangoli: 14,119 req/s</span></span><span class="bar-value">14,119</span></div><div class="bar-line"><span class="bar s2" style="--w:18.18%" tabindex="0" aria-label="Django 6.1.2: 2,909 requests per second"><span class="tip">Django 6.1.2: 2,909 req/s</span></span><span class="bar-value">2,909</span></div></div></div><div class="bar-row"><div class="bar-label"><strong>Homepage</strong><span>a template with 50 posts and their tags</span></div><div class="bar-pair"><div class="bar-line"><span class="bar s1" style="--w:24.74%" tabindex="0" aria-label="Rangoli: 3,958 requests per second"><span class="tip">Rangoli: 3,958 req/s</span></span><span class="bar-value">3,958</span></div><div class="bar-line"><span class="bar s2" style="--w:8.65%" tabindex="0" aria-label="Django 6.1.2: 1,384 requests per second"><span class="tip">Django 6.1.2: 1,384 req/s</span></span><span class="bar-value">1,384</span></div></div></div><div class="bar-row"><div class="bar-label"><strong>JSON API list</strong><span>Rangoli&#x27;s built-in API vs Django REST framework</span></div><div class="bar-pair"><div class="bar-line"><span class="bar s1" style="--w:54.08%" tabindex="0" aria-label="Rangoli: 8,653 requests per second"><span class="tip">Rangoli: 8,653 req/s</span></span><span class="bar-value">8,653</span></div><div class="bar-line"><span class="bar s2" style="--w:6.99%" tabindex="0" aria-label="Django 6.1.2: 1,119 requests per second"><span class="tip">Django 6.1.2: 1,119 req/s</span></span><span class="bar-value">1,119</span></div></div></div><div class="bar-row"><div class="bar-label"><strong>Admin changelist</strong><span>logged in, 100 rows</span></div><div class="bar-pair"><div class="bar-line"><span class="bar s1" style="--w:17.23%" tabindex="0" aria-label="Rangoli: 2,756 requests per second"><span class="tip">Rangoli: 2,756 req/s</span></span><span class="bar-value">2,756</span></div><div class="bar-line"><span class="bar s2" style="--w:1.32%" tabindex="0" aria-label="Django 6.1.2: 211 requests per second"><span class="tip">Django 6.1.2: 211 req/s</span></span><span class="bar-value">211</span></div></div></div>
+  <div class="axis"><div class="ticks"><span style="left:0.00%">0</span><span style="left:25.00%">4,000</span><span style="left:50.00%">8,000</span><span style="left:75.00%">12,000</span><span style="left:100.00%">16,000</span></div></div>
+</figure>
+  <div class="table-wrap"><table>
+    <caption class="sr">Benchmark results</caption>
+    <thead><tr><th scope="col">Page</th><th scope="col">Rangoli req/s</th><th scope="col">Django req/s</th><th scope="col">Rangoli p99</th><th scope="col">Django p99</th><th scope="col">Rangoli is</th></tr></thead>
+    <tbody><tr><th scope='row'>/posts.json</th><td>14,119</td><td>2,909</td><td>8 ms</td><td>40 ms</td><td class='win'>4.9×</td></tr><tr><th scope='row'>Homepage</th><td>3,958</td><td>1,384</td><td>25 ms</td><td>1324 ms</td><td class='win'>2.9×</td></tr><tr><th scope='row'>JSON API list</th><td>8,653</td><td>1,119</td><td>12 ms</td><td>88 ms</td><td class='win'>7.7×</td></tr><tr><th scope='row'>Admin changelist</th><td>2,756</td><td>211</td><td>33 ms</td><td>376 ms</td><td class='win'>13.1×</td></tr></tbody>
+  </table></div>
+  <div class="tiles">
+    <div class="tile"><div class="label">Startup to first response</div><div class="value">15 ms</div><div class="vs">Django: 232 ms</div></div>
+    <div class="tile"><div class="label">Memory under load</div><div class="value">61 MB</div><div class="vs">Django, 8 workers: 511 MB</div></div>
+    <div class="tile"><div class="label">Memory at rest</div><div class="value">32 MB</div><div class="vs">Django: 278 MB</div></div>
+  </div>
+  <div class="story">
+    <p><strong>The first run went the other way.</strong> Rangoli was slower than Django on three of the four pages, and got slower as concurrency rose. Profiling showed every SQLite connection in the process waiting on SQLite's global mutexes for memory statistics and its shared page cache. Django never hits them, because each gunicorn worker is a separate process.</p>
+    <p>Rangoli now turns memory statistics off at runtime, and SQLite apps build SQLite without the shared page cache (<a href="https://github.com/Harshil-Jani/rangoli-rs/blob/main/.cargo/config.toml">.cargo/config.toml</a>). The homepage went from 249 to 3,958 req/s. With Postgres or MySQL, neither applies.</p>
+  </div>
+</section>
+
+<section id="findings">
+  <h2>Findings</h2>
+  <p class="method">Each finding runs the same code or command in both and shows the actual output, captured by <a href="https://github.com/Harshil-Jani/rangoli-rs/blob/main/bench/experiments.py">bench/experiments.py</a>.</p>
+  <article class="finding" id="typo">
+  <h3>A typo in a query</h3>
+  <p class="setup">Both projects run a query on a field spelled <code>titel</code> instead of <code>title</code>.</p>
+  <div class="compare">
+    <div class="side"><h4>Django 6.1.2</h4><code>manage.py check</code> reports <em>System check identified no issues (0 silenced).</em>, so the code ships. It fails when the line runs:<pre class='output'>django.core.exceptions.FieldError: Cannot resolve keyword &#x27;titel&#x27; into field. Choices are: author, author_id, body, created_at, id, published, rating, tags, title, updated_at</pre></div>
+    <div class="side"><h4>Rangoli</h4>The program does not compile, so it never ships:<pre class='output'>error[E0599]: no associated item named `TITEL` found for struct `Post` in the current scope
+  --&gt; src/main.rs:13:42
+   |
+ 5 | pub struct Post {
+   | --------------- associated item `TITEL` not found for this struct
+...
+13 |     let n = Post::objects().filter(Post::TITEL.eq(&quot;Hello&quot;)).count().await?;
+   |                                          ^^^^^ associated item not found in `Post`</pre></div>
+  </div>
+  <p class="meaning">Every field lookup in Rangoli is a typed constant, so misspelled fields, comparing a text column with a number, and columns from another model are caught before deploy.</p>
+</article>
+<article class="finding" id="branches">
+  <h3>Two branches each add a migration</h3>
+  <p class="setup">Two feature branches each add a column to a different table; both are merged and <code>migrate</code> runs.</p>
+  <div class="compare">
+    <div class="side"><h4>Django 6.1.2</h4>Exit code 1:<pre class='output'>CommandError: Conflicting migrations detected; multiple leaf nodes in the migration graph: (0002_author_bio, 0002_tag_color in blog).
+To fix them run &#x27;python manage.py makemigrations --merge&#x27;</pre></div>
+    <div class="side"><h4>Rangoli</h4>Exit code 0, both applied:<pre class='output'>Applied 20261007120000_add_blog_author_bio
+Applied 20261007120500_add_blog_tag_color</pre>When two branches really do collide (both add the same column), Rangoli refuses and names both files:<pre class='output'>Error: migration error: `20261007121000_add_blog_author_bio`: column `blog_author.bio` already exists (last changed by `20261007120000_add_blog_author_bio`; branches probably diverged)</pre></div>
+  </div>
+  <p class="meaning">Rangoli records the set of applied migrations instead of a chain, so unrelated work never needs a merge migration, while real conflicts are still caught.</p>
+</article>
+<article class="finding" id="n1">
+  <h3>N+1 queries</h3>
+  <p class="setup">Both load the latest 50 published posts with each post's author and tags.</p>
+  <div class="compare">
+    <div class="side"><h4>Django 6.1.2</h4>Written the obvious way (<code>post.author.name</code> in a loop): <strong>101 queries</strong>. With <code>select_related</code> and <code>prefetch_related</code>: <strong>2 queries</strong>. Nothing warns you about the first version.</div>
+    <div class="side"><h4>Rangoli</h4><strong>4 queries</strong>, measured with <code>count_queries</code>. A foreign key is an id, so there is no lazy <code>post.author</code> to call in a loop; related rows are fetched explicitly with <code>in_bulk</code> and <code>prefetch</code>.</div>
+  </div>
+  <p class="meaning">Rangoli can't fall into the 101-query trap by accident, but tuned Django is better here: it joins authors in, and Rangoli has no join (<code>select_related</code>) yet. That is on the roadmap.</p>
+</article>
+<article class="finding" id="defaults">
+  <h3>A new project's defaults</h3>
+  <p class="setup">What <code>django-admin startproject</code> generates in Django 6.1.2, compared with Rangoli's defaults.</p>
+  <div class="compare">
+    <div class="side"><h4>Django 6.1.2</h4><code>DEBUG = True</code>; a <code>SECRET_KEY</code> written into <code>settings.py</code> (yes); Content Security Policy middleware enabled: no (Django 6.0 added it as opt-in).</div>
+    <div class="side"><h4>Rangoli</h4>Debug is off unless <code>RANGOLI_DEBUG=1</code>; there is no secret key at all (sessions are random keys in the database and CSRF protection needs no token); a strict CSP is sent on every response.</div>
+  </div>
+  <p class="meaning">Production-safe settings shouldn't be something you have to remember to change.</p>
+</article>
+<article class="finding" id="guessing">
+  <h3>Guessing the admin password</h3>
+  <p class="setup">Eight wrong passwords for <code>admin</code>, then the right one.</p>
+  <div class="compare">
+    <div class="side"><h4>Django 6.1.2</h4>Status codes: 200, 200, 200, 200, 200, 200, 200, 200. The correct password then logs in: guessing is unlimited without an extra package.</div>
+    <div class="side"><h4>Rangoli</h4>Status codes: 401, 401, 401, 401, 401, 401, 401, 401. The correct password then is refused: after five failures the username is locked for 15 minutes.</div>
+  </div>
+  <p class="meaning">Cross-site login POSTs are rejected by both (Rangoli 403, Django 403). Rangoli's lockout is per process today; across several servers it needs a shared store.</p>
+</article>
+<article class="finding" id="tasks">
+  <h3>Background tasks</h3>
+  <p class="setup">Can the framework run a task in the background, out of the box?</p>
+  <div class="compare">
+    <div class="side"><h4>Django 6.1.2</h4>Django 6.x ships a tasks interface; its default backend is <code>{&#x27;default&#x27;: {&#x27;BACKEND&#x27;: &#x27;django.tasks.backends.immediate.ImmediateBackend&#x27;}}</code>, which runs tasks immediately in the request. Worker commands in <code>manage.py</code>: none. Production use still means Celery plus Redis or RabbitMQ.</div>
+    <div class="side"><h4>Rangoli</h4>Tasks are queued in your database and run in the same binary: in-process by <code>runserver</code>, or by <code>cargo run -- worker</code>. Retries with backoff, caught panics, and recovery from crashed workers are built in.</div>
+  </div>
+  <p class="meaning">One binary and your database instead of three moving parts.</p>
+</article>
+<article class="finding" id="footprint">
+  <h3>What you deploy</h3>
+  <p class="setup">The example blog app and everything it needs to run.</p>
+  <div class="compare">
+    <div class="side"><h4>Django 6.1.2</h4>42.8 MB of Python packages (5 of them) plus a Python runtime and gunicorn; 158 lines of app code across models, admin, views, URLs and settings.</div>
+    <div class="side"><h4>Rangoli</h4>One 13.0 MB binary with the admin's templates, CSS and JavaScript compiled in, plus your own templates; 87 lines of app code.</div>
+  </div>
+  <p class="meaning">Both counts skip blank lines and comments.</p>
+</article>
+
+  <article class="finding" id="headers">
+    <h3>Security headers on a normal page</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">Header</th><th scope="col">Rangoli</th><th scope="col">Django 6.1.2</th></tr></thead>
+      <tbody><tr><th scope='row'><code>content-security-policy</code></th><td>default-src &#x27;self&#x27;; frame-ancestors &#x27;none&#x27;; base-uri &#x27;self&#x27;; form-action &#x27;self&#x27;</td><td>not sent</td></tr><tr><th scope='row'><code>x-frame-options</code></th><td>DENY</td><td>DENY</td></tr><tr><th scope='row'><code>x-content-type-options</code></th><td>nosniff</td><td>nosniff</td></tr><tr><th scope='row'><code>referrer-policy</code></th><td>same-origin</td><td>same-origin</td></tr><tr><th scope='row'><code>cross-origin-opener-policy</code></th><td>same-origin</td><td>same-origin</td></tr></tbody>
+    </table></div>
+  </article>
+</section>
+
+<section id="gaps">
+  <h2>Where Django is still ahead</h2>
+  <ul class="gaps">
+    <li><strong>Twenty years of ecosystem.</strong> Thousands of packages, books, hosting guides and people who know it. Rangoli is brand new and not yet published on crates.io.</li>
+    <li><strong>Joins.</strong> No <code>select_related</code> yet, so the example homepage takes 4 queries where tuned Django takes 2.</li>
+    <li><strong>Admin depth.</strong> No inlines, custom actions, fieldsets, per-model permissions or groups.</li>
+    <li><strong>The rest of the batteries.</strong> Internationalization, email, caching, password reset, savepoints in nested transactions, WebSockets and API tokens are on the roadmap.</li>
+    <li><strong>SQLite tuning.</strong> Getting full SQLite throughput needs one config file in your project. Postgres and MySQL need nothing.</li>
+  </ul>
+  <p>The full list is in the <a href="https://github.com/Harshil-Jani/rangoli-rs#whats-not-done-yet">README</a>.</p>
+</section>
+
+<section id="reproduce">
+  <h2>Reproduce it</h2>
+<pre><code>git clone https://github.com/Harshil-Jani/rangoli-rs && cd rangoli-rs
+cargo build --release -p blog
+cd bench && uv venv .venv && uv pip install --python .venv/bin/python "django==6.1.2" djangorestframework gunicorn
+python seed.py results/rangoli.sqlite3 results/django.sqlite3   # after migrating both, see bench/README
+python run.py          # throughput, latency, memory, startup -> results/bench.json
+python experiments.py  # the findings above -> results/experiments.json</code></pre>
+</section>
+</main>
+<footer>Rangoli is open source under MIT or Apache-2.0. Numbers from <a href="https://github.com/Harshil-Jani/rangoli-rs/blob/main/bench/results/bench.json">bench.json</a> and <a href="https://github.com/Harshil-Jani/rangoli-rs/blob/main/bench/results/experiments.json">experiments.json</a>.</footer>
+</body>
+</html>
