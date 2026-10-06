@@ -21,12 +21,20 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
     let mut table = ident.to_string().to_lowercase();
     let mut display: Option<String> = None;
     let mut m2m: Vec<(syn::Ident, syn::Path)> = vec![];
+    let mut indexes: Vec<Vec<String>> = vec![];
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("model")) {
         attr.parse_nested_meta(|m| {
             if m.path.is_ident("table") {
                 table = m.value()?.parse::<LitStr>()?.value();
             } else if m.path.is_ident("display") {
                 display = Some(m.value()?.parse::<LitStr>()?.value());
+            } else if m.path.is_ident("index") {
+                let mut cols = vec![];
+                m.parse_nested_meta(|col| {
+                    cols.push(col.path.get_ident().ok_or_else(|| col.error("expected a field name"))?.to_string());
+                    Ok(())
+                })?;
+                indexes.push(cols);
             } else if m.path.is_ident("m2m") {
                 m.parse_nested_meta(|rel| {
                     let name = rel.path.get_ident().cloned().ok_or_else(|| rel.error("expected `name = Model`"))?;
@@ -34,7 +42,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     Ok(())
                 })?;
             } else {
-                return Err(m.error("expected `table`, `display` or `m2m(name = Model)`"));
+                return Err(m.error("expected `table`, `display`, `index(a, b)` or `m2m(name = Model)`"));
             }
             Ok(())
         })?;
@@ -208,6 +216,14 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
         });
     }
 
+    let field_names: Vec<String> = fields.named.iter().map(|f| f.ident.as_ref().unwrap().to_string()).collect();
+    for cols in &indexes {
+        if let Some(bad) = cols.iter().find(|c| !field_names.contains(c) || *c == "id") {
+            return Err(syn::Error::new_spanned(ident, format!("index(...) names unknown field `{bad}`")));
+        }
+    }
+    let index_tokens = indexes.iter().map(|cols| quote!(&[#(#cols),*]));
+
     let name_s = ident.to_string();
     let display = match display {
         Some(d) => quote!(Some(#d)),
@@ -220,6 +236,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
             fn meta() -> &'static ::rangoli::orm::ModelMeta {
                 static META: ::rangoli::orm::ModelMeta = ::rangoli::orm::ModelMeta {
                     name: #name_s, table: #table, display: #display, fields: &[#(#metas),*], m2m: &[#(#m2m_metas),*],
+                    indexes: &[#(#index_tokens),*],
                 };
                 &META
             }

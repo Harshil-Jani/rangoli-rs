@@ -8,6 +8,7 @@ use rangoli::admin::ModelAdmin;
 use rangoli::api::{Access, Api};
 use rangoli::orm;
 use rangoli::orm::Choice;
+use rangoli::tasks::{self, Task, TaskRecord, TaskStatus};
 use rangoli::web::ModelForm;
 use rangoli::{migrate, App, Choices, DateTime, Error, Json, Model};
 use tower::ServiceExt;
@@ -76,6 +77,44 @@ struct PostV2 {
     meta: Option<Json>,
 }
 
+// ---- background tasks used by the test
+static GREETED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static FLAKY_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Greet {
+    name: String,
+}
+impl Task for Greet {
+    const NAME: &'static str = "greet";
+    async fn run(self) -> rangoli::Result<()> {
+        GREETED.lock().unwrap().push(self.name);
+        Ok(())
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Flaky;
+impl Task for Flaky {
+    const NAME: &'static str = "flaky";
+    async fn run(self) -> rangoli::Result<()> {
+        match FLAKY_RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => Err(Error::Task("boom".into())),
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Explodes;
+impl Task for Explodes {
+    const NAME: &'static str = "explodes";
+    const MAX_ATTEMPTS: i64 = 1;
+    async fn run(self) -> rangoli::Result<()> {
+        panic!("kaboom")
+    }
+}
+
 /// A page rendered from a template; `?partial` renders only the `rows` block.
 async fn tag_page(axum::extract::Query(p): axum::extract::Query<Vec<(String, String)>>) -> rangoli::Result<axum::response::Html<String>> {
     let names: Vec<String> = Tag::objects().order_by(Tag::NAME.asc()).all().await?.into_iter().map(|t| t.name).collect();
@@ -94,6 +133,7 @@ async fn reset(db: &orm::Db) {
         "blog_post",
         "rangoli_session",
         "rangoli_admin_log",
+        "rangoli_task",
         "blog_author",
         "rangoli_user",
         "rangoli_migrations",
@@ -123,7 +163,7 @@ async fn full_stack() {
     let db = orm::connect(&url).await.unwrap();
     reset(db).await;
     let applied = migrate::run(&migrations).await.unwrap();
-    assert_eq!(applied.len(), 3, "two built-in + app: {applied:?}");
+    assert_eq!(applied.len(), 4, "three built-in + app: {applied:?}");
     assert!(migrate::run(&migrations).await.unwrap().is_empty());
 
     // ---- ORM
@@ -225,6 +265,9 @@ async fn full_stack() {
                 .readonly_fields([&PostV2::VIEWS])
                 .list_per_page(2),
         )
+        .task::<Greet>()
+        .task::<Flaky>()
+        .task::<Explodes>()
         .api::<PostV2>(Api::new().read(Access::Public))
         .templates(dir.join("templates"))
         .static_files("/static", dir.join("static"))
@@ -375,7 +418,7 @@ async fn full_stack() {
 
     let (_, _, body) = send(get("/admin/blog_post/?q=machinery", &cookie)).await;
     assert!(
-        body.contains("Select postv2 to change") && body.contains("Computing Machinery") && !body.contains("Rust 50%"),
+        body.contains("Select post v2 to change") && body.contains("Computing Machinery") && !body.contains("Rust 50%"),
         "search filters rows"
     );
     assert!(body.contains("1 result of <a href=") && body.contains(">4 total</a>"), "search shows result counts");
@@ -420,7 +463,7 @@ async fn full_stack() {
     let (_, _, body) = send(get("/admin/blog_post/", &cookie)).await;
     assert!(body.contains("class=\"sorted ascending\"") && body.contains(">Title</a>"), "default ordering");
     assert!(body.contains(">Views</a>") && !body.contains(">Rating</a>"), "list_display picks the columns");
-    assert!(body.contains("class=\"this-page\"") && body.contains("4 postv2s"), "list_per_page paginates");
+    assert!(body.contains("class=\"this-page\"") && body.contains("4 post v2s"), "list_per_page paginates");
     let (_, _, body) = send(get("/admin/blog_post/?q=Body+of", &cookie)).await;
     assert!(body.contains("0 results of"), "search_fields limits what is searched");
     let (_, _, body) = send(get(&format!("/admin/blog_post/?f.author_id={}", alan.id.unwrap()), &cookie)).await;
@@ -457,7 +500,7 @@ async fn full_stack() {
 
     let (status, _, body) = send(get(&format!("/admin/blog_author/{}/delete", ada.id.unwrap()), &cookie)).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert!(body.contains("would require deleting these protected related objects") && body.contains("PostV2: Rust 50% off_sale"));
+    assert!(body.contains("would require deleting these protected related objects") && body.contains("Post v2: Rust 50% off_sale"));
     let (status, _, _) = send(form(&format!("/admin/blog_author/{}/delete", ada.id.unwrap()), &cookie, "")).await;
     assert_eq!(status, StatusCode::CONFLICT, "protected by foreign key");
     let (status, _, body) = send(get(&format!("{grace_url}delete"), &cookie)).await;
@@ -471,12 +514,12 @@ async fn full_stack() {
     let pick = format!("action=delete_selected&_selected_action={}", long.id.unwrap());
     let (status, _, body) = send(form("/admin/blog_post/", &cookie, &pick)).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("Are you sure you want to delete the selected postv2s?") && body.contains("Summary"));
+    assert!(body.contains("Are you sure you want to delete the selected post v2s?") && body.contains("Summary"));
     assert_eq!(PostV2::objects().count().await.unwrap(), 4, "nothing deleted before confirming");
     let (status, headers, _) = send(form("/admin/blog_post/", &cookie, &format!("{pick}&post=yes"))).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     let (_, _, body) = send(get(headers[header::LOCATION].to_str().unwrap(), &cookie)).await;
-    assert!(body.contains("Successfully deleted 1 postv2."));
+    assert!(body.contains("Successfully deleted 1 post v2."));
     assert_eq!(PostV2::objects().count().await.unwrap(), 3);
     let (_, headers, _) = send(form("/admin/blog_post/", &cookie, "action=delete_selected")).await;
     assert!(headers[header::LOCATION].to_str().unwrap().ends_with("warn=noitems"));
@@ -591,6 +634,56 @@ async fn full_stack() {
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["tags"]["type"], "array");
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["status"]["enum"], serde_json::json!(["draft", "published", "old"]));
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["status"]["default"], "draft");
+
+    // ---- background tasks
+    let greet = Greet { name: "Ada".into() }.enqueue().await.unwrap();
+    let later = Greet { name: "Later".into() }.enqueue_in(std::time::Duration::from_secs(3600)).await.unwrap();
+    assert_eq!(tasks::run_due(10).await.unwrap(), 1, "only due runs run");
+    assert_eq!(*GREETED.lock().unwrap(), vec!["Ada".to_string()]);
+    let done = TaskRecord::get(greet).await.unwrap();
+    assert_eq!((done.status, done.attempts, done.finished_at.is_some()), (TaskStatus::Done, 1, true));
+    assert_eq!(TaskRecord::get(later).await.unwrap().status, TaskStatus::Queued);
+
+    let flaky = Flaky.enqueue().await.unwrap();
+    tasks::run_due(10).await.unwrap();
+    let after_fail = TaskRecord::get(flaky).await.unwrap();
+    assert_eq!(
+        (after_fail.status, after_fail.attempts, after_fail.last_error.as_deref()),
+        (TaskStatus::Queued, 1, Some("task error: boom"))
+    );
+    assert!(after_fail.run_at.unix() >= DateTime::now().unix() + 9, "retries back off");
+    let in_two_hours = DateTime::from_unix(DateTime::now().unix() + 7200);
+    tasks::run_due_at(in_two_hours, 10).await.unwrap();
+    let recovered = TaskRecord::get(flaky).await.unwrap();
+    assert_eq!((recovered.status, recovered.attempts, recovered.last_error), (TaskStatus::Done, 2, None), "a retry succeeds");
+    assert!(GREETED.lock().unwrap().contains(&"Later".to_string()), "the delayed run ran once due");
+
+    let boom = Explodes.enqueue().await.unwrap();
+    tasks::run_due(10).await.unwrap();
+    let failed = TaskRecord::get(boom).await.unwrap();
+    assert_eq!(failed.status, TaskStatus::Failed, "MAX_ATTEMPTS = 1");
+    assert!(failed.last_error.unwrap().contains("panicked: kaboom"), "panics are caught and recorded");
+
+    let unknown = tasks::enqueue_raw("not_registered", "{}".into(), DateTime::now(), 3).await.unwrap();
+    tasks::run_due(10).await.unwrap();
+    assert_eq!(TaskRecord::get(unknown).await.unwrap().status, TaskStatus::Failed, "an unknown task fails instead of retrying");
+
+    // A worker that died mid-run leaves the record `running`; after the lease it is retried.
+    let stuck = Greet { name: "Stuck".into() }.enqueue().await.unwrap();
+    let hour_ago = DateTime::from_unix(DateTime::now().unix() - 3600);
+    TaskRecord::objects()
+        .filter(TaskRecord::ID.eq(stuck))
+        .update([TaskRecord::STATUS.set(TaskStatus::Running), TaskRecord::STARTED_AT.set(hour_ago)])
+        .await
+        .unwrap();
+    tasks::run_due(10).await.unwrap();
+    assert_eq!(TaskRecord::get(stuck).await.unwrap().status, TaskStatus::Done, "stale runs are recovered");
+
+    let (_, _, body) = send(get("/admin/rangoli_task/?f.status=failed", &cookie)).await;
+    assert!(
+        body.contains("Select task record to change") && body.contains("2 results of") && body.contains("By status"),
+        "tasks in the admin"
+    );
 
     // Password change, then log in with the new password.
     let (status, _, body) =

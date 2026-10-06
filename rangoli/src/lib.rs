@@ -18,6 +18,7 @@ pub mod auth;
 pub mod datetime;
 pub mod migrate;
 pub mod orm;
+pub mod tasks;
 pub mod web;
 
 pub use axum;
@@ -30,6 +31,7 @@ pub mod prelude {
     pub use crate::admin::ModelAdmin;
     pub use crate::api::{Access, Api};
     pub use crate::auth::CurrentUser;
+    pub use crate::tasks::Task;
     pub use crate::web::{context, render, ModelForm};
     pub use crate::{atomic, App, Choices, DateTime, Error, Json, Model, Result};
 }
@@ -58,6 +60,8 @@ pub enum Error {
     Locked,
     /// A template failed to load or render.
     Template(String),
+    /// A background task failed.
+    Task(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -74,6 +78,7 @@ impl std::fmt::Display for Error {
             Error::Io(e) => write!(f, "io error: {e}"),
             Error::Locked => f.write_str("too many failed logins, try again in 15 minutes"),
             Error::Template(m) => write!(f, "template error: {m}"),
+            Error::Task(m) => write!(f, "task error: {m}"),
         }
     }
 }
@@ -139,6 +144,9 @@ pub struct Settings {
     pub migrations: PathBuf,
     /// `RANGOLI_TEMPLATES`, default `templates`.
     pub templates: PathBuf,
+    /// `RANGOLI_WORKERS`: task loops `runserver` runs in-process (default 1, 0 turns them off);
+    /// also the concurrency of the `worker` command.
+    pub workers: usize,
 }
 
 impl Settings {
@@ -152,6 +160,7 @@ impl Settings {
             bind: var("RANGOLI_BIND").unwrap_or_else(|| "127.0.0.1:8000".into()),
             migrations: var("RANGOLI_MIGRATIONS").unwrap_or_else(|| "migrations".into()).into(),
             templates: var("RANGOLI_TEMPLATES").unwrap_or_else(|| "templates".into()).into(),
+            workers: var("RANGOLI_WORKERS").and_then(|v| v.parse().ok()).unwrap_or(1),
         }
     }
 }
@@ -220,8 +229,24 @@ impl App {
     pub fn new() -> Self {
         use orm::Model;
         App {
-            models: vec![auth::User::meta(), auth::Session::meta(), admin::LogEntry::meta()],
-            admin: vec![(auth::User::meta(), admin::Options::default())],
+            models: vec![auth::User::meta(), auth::Session::meta(), admin::LogEntry::meta(), tasks::TaskRecord::meta()],
+            admin: vec![
+                (auth::User::meta(), admin::Options::default()),
+                (
+                    tasks::TaskRecord::meta(),
+                    admin::ModelAdmin::<tasks::TaskRecord>::new()
+                        .list_display([
+                            &tasks::TaskRecord::NAME,
+                            &tasks::TaskRecord::STATUS,
+                            &tasks::TaskRecord::ATTEMPTS,
+                            &tasks::TaskRecord::RUN_AT,
+                            &tasks::TaskRecord::FINISHED_AT,
+                        ])
+                        .search_fields([&tasks::TaskRecord::NAME, &tasks::TaskRecord::LAST_ERROR])
+                        .list_filter([&tasks::TaskRecord::STATUS, &tasks::TaskRecord::CREATED_AT])
+                        .opts,
+                ),
+            ],
             api: vec![],
             routes: Router::new(),
         }
@@ -257,6 +282,12 @@ impl App {
         self.api.retain(|(m, _)| m.table != M::TABLE);
         self.api.push((M::meta(), settings.opts));
         self.model::<M>()
+    }
+
+    /// Register a background task so workers in this process can run it.
+    pub fn task<T: tasks::Task>(self) -> Self {
+        tasks::register::<T>();
+        self
     }
 
     /// Where `rangoli::web::render` finds templates (overrides `RANGOLI_TEMPLATES`).
@@ -317,7 +348,7 @@ impl App {
         }
         if matches!(cmd, "help" | "--help" | "-h") {
             println!(
-                "commands:\n  runserver [addr]            serve the app (default {})\n  migrate [--check]           apply pending migrations\n  makemigrations [name] [--check]\n  createsuperuser [username]  password from RANGOLI_PASSWORD or a prompt",
+                "commands:\n  runserver [addr]            serve the app (default {})\n  migrate [--check]           apply pending migrations\n  makemigrations [name] [--check]\n  createsuperuser [username]  password from RANGOLI_PASSWORD or a prompt\n  worker                      run background tasks (RANGOLI_WORKERS loops)",
                 s.bind
             );
             return Ok(());
@@ -354,7 +385,14 @@ impl App {
                 auth::create_user(&username, &password, true).await?;
                 println!("Superuser `{username}` created.");
             }
+            "worker" => {
+                println!("Rangoli worker running {} task loop(s)", s.workers.max(1));
+                tasks::work(s.workers).await;
+            }
             "runserver" => {
+                if s.workers > 0 {
+                    tokio::spawn(tasks::work(s.workers));
+                }
                 let pending = migrate::pending(&s.migrations).await?;
                 if !pending.is_empty() {
                     eprintln!("warning: {} unapplied migration(s); run `migrate`", pending.len());

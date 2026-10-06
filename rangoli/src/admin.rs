@@ -232,6 +232,28 @@ fn options<'a>(site: &'a Site, meta: &ModelMeta) -> &'a Options {
     site.options.get(meta.table).unwrap_or_else(|| DEFAULT.get_or_init(Options::default))
 }
 
+/// `TaskRecord` -> `task record`, Django's default `verbose_name`.
+fn verbose(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            out.push(' ');
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
+}
+
+/// `TaskRecord` -> `task records`.
+fn verbose_plural(name: &str) -> String {
+    plural(&verbose(name))
+}
+
+/// `TaskRecord` -> `Task records`, for headings and the sidebar.
+fn title_plural(name: &str) -> String {
+    capitalize(&verbose_plural(name))
+}
+
 fn plural(name: &str) -> String {
     match name.strip_suffix('y') {
         Some(stem) if !stem.ends_with(['a', 'e', 'i', 'o', 'u']) => format!("{stem}ies"),
@@ -262,7 +284,7 @@ fn apps(site: &Site, current: Option<&str>) -> Vec<minijinja::Value> {
     let mut groups: Vec<(String, Vec<minijinja::Value>)> = vec![];
     for m in &site.admin {
         let app = app_of(m.table);
-        let entry = context! { table => m.table, plural => plural(m.name), current => current == Some(m.table) };
+        let entry = context! { table => m.table, plural => title_plural(m.name), current => current == Some(m.table) };
         match groups.iter_mut().find(|(a, _)| *a == app) {
             Some((_, models)) => models.push(entry),
             None => groups.push((app, vec![entry])),
@@ -278,8 +300,8 @@ fn chrome(site: &Site, u: &User, current: Option<&'static ModelMeta>) -> minijin
         apps => apps(site, current.map(|m| m.table)),
         app => current.map(|m| app_of(m.table)),
         table => current.map(|m| m.table),
-        name => current.map(|m| m.name.to_lowercase()),
-        plural => current.map(|m| plural(m.name)),
+        name => current.map(|m| verbose(m.name)),
+        plural => current.map(|m| title_plural(m.name)),
     }
 }
 
@@ -491,7 +513,7 @@ async fn index(State(site): S, user: CurrentUser, uri: Uri) -> Page {
                 class => match e.action { ADDITION => "addlink", CHANGE => "changelink", _ => "deletelink" },
                 repr => e.object_repr,
                 url => linkable.then(|| format!("/admin/{}/{}/", e.table_name, e.object_id)),
-                model => meta.map_or(e.table_name.clone(), |m| m.name.to_string()),
+                model => meta.map_or(e.table_name.clone(), |m| capitalize(&verbose(m.name))),
             }
         })
         .collect();
@@ -692,12 +714,12 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
         .filter(|n| *n == 1 || *n == pages || n.abs_diff(page) <= 3)
         .map(|n| context! { n, url => link(&[("p", &n.to_string())]), current => n == page })
         .collect();
-    let what = if count == 1 { meta.name.to_lowercase() } else { plural(meta.name).to_lowercase() };
+    let what = if count == 1 { verbose(meta.name) } else { verbose_plural(meta.name) };
     render(
         &site,
         "list.html",
         context! {
-            title => format!("Select {} to change", meta.name.to_lowercase()),
+            title => format!("Select {} to change", verbose(meta.name)),
             messages => message(&p, u, "list").await, q, keep, count, full_count, filtered, what, page_links,
             columns => headers, rows, filters => filter_blocks, searchable => !searchable.is_empty(), clear_url => base.clone(),
             ..chrome(&site, u, Some(meta))
@@ -738,7 +760,7 @@ async fn bulk(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
         let related = related(&site, meta, &ids).await?;
         let objects: Vec<_> = rows
             .iter()
-            .map(|(id, v)| context! { model => meta.name, repr => repr(meta, *id, v), url => format!("/admin/{table}/{id}/") })
+            .map(|(id, v)| context! { model => capitalize(&verbose(meta.name)), repr => repr(meta, *id, v), url => format!("/admin/{table}/{id}/") })
             .collect();
         return render(
             &site,
@@ -759,7 +781,7 @@ async fn bulk(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
     })
     .await
     .map_err(fail)?;
-    let what = if rows.len() == 1 { meta.name.to_lowercase() } else { plural(meta.name).to_lowercase() };
+    let what = if rows.len() == 1 { verbose(meta.name) } else { verbose_plural(meta.name) };
     let qs = serde_urlencoded::to_string([("deleted", rows.len().to_string()), ("what", what)]).unwrap();
     Ok(Redirect::to(&format!("/admin/{table}/?{qs}")).into_response())
 }
@@ -785,12 +807,12 @@ async fn related(site: &Site, meta: &ModelMeta, ids: &[i64]) -> Result<Related, 
             if rows.is_empty() {
                 continue;
             }
-            let labels: Vec<String> = rows.iter().map(|(id, v)| format!("{}: {}", m.name, repr(m, *id, v))).collect();
+            let labels: Vec<String> = rows.iter().map(|(id, v)| format!("{}: {}", capitalize(&verbose(m.name)), repr(m, *id, v))).collect();
             if !f.cascade {
                 out.protected.extend(labels);
             } else if site.admin.iter().any(|a| a.table == m.table) {
                 // Framework bookkeeping (sessions) cascades silently, as Django's would.
-                out.counts.push((plural(m.name), rows.len()));
+                out.counts.push((title_plural(m.name), rows.len()));
                 out.cascaded.extend(labels.into_iter().map(|l| context! { label => l }));
             }
         }
@@ -799,7 +821,7 @@ async fn related(site: &Site, meta: &ModelMeta, ids: &[i64]) -> Result<Related, 
 }
 
 fn summary(meta: &ModelMeta, n: usize, r: &Related) -> Vec<String> {
-    std::iter::once(format!("{}: {n}", plural(meta.name))).chain(r.counts.iter().map(|(p, c)| format!("{p}: {c}"))).collect()
+    std::iter::once(format!("{}: {n}", title_plural(meta.name))).chain(r.counts.iter().map(|(p, c)| format!("{p}: {c}"))).collect()
 }
 
 // ---------------------------------------------------------------- forms
@@ -1039,7 +1061,7 @@ async fn form_page(
         Some(id) => Some(repr(meta, id, &fetch_row(meta, id).await?)),
         None => None,
     };
-    let title = if is_add { format!("Add {}", meta.name.to_lowercase()) } else { format!("Change {}", meta.name.to_lowercase()) };
+    let title = if is_add { format!("Add {}", verbose(meta.name)) } else { format!("Change {}", verbose(meta.name)) };
     let page = render(
         site,
         "form.html",
@@ -1186,7 +1208,7 @@ async fn delete_page(State(site): S, user: CurrentUser, uri: Uri, Path((table, i
         &site,
         "delete.html",
         context! {
-            title => "Are you sure?", obj, id, objects => vec![context! { model => meta.name, repr => obj.clone(), url => format!("/admin/{table}/{id}/") }],
+            title => "Are you sure?", obj, id, objects => vec![context! { model => capitalize(&verbose(meta.name)), repr => obj.clone(), url => format!("/admin/{table}/{id}/") }],
             protected => related.protected, cascaded => related.cascaded, summary => summary(meta, 1, &related),
             ..chrome(&site, u, Some(meta))
         },
@@ -1252,6 +1274,10 @@ mod tests {
         assert_eq!(app_of("blog_post"), "Blog");
         assert_eq!(app_of("rangoli_user"), "Authentication and Authorization");
         assert_eq!(app_of("things"), "Things");
+        assert_eq!(
+            (verbose("TaskRecord"), title_plural("TaskRecord"), verbose("PostV2")),
+            ("task record".into(), "Task records".into(), "post v2".into())
+        );
     }
 
     /// The designer review as a test: every text/background pair in the stylesheet
@@ -1356,7 +1382,7 @@ mod tests {
         }
         static FIELDS: [FieldMeta; 3] =
             [field("title", FieldType::Text), field("body", FieldType::Text), field("author_id", FieldType::Int)];
-        let meta = ModelMeta { name: "Post", table: "blog_post", display: None, fields: &FIELDS, m2m: &[] };
+        let meta = ModelMeta { name: "Post", table: "blog_post", display: None, fields: &FIELDS, m2m: &[], indexes: &[] };
         let old = [Value::Text("a".into()), Value::Text("b".into()), Value::Int(1)];
         let cols = |t: &str, b: &str, a: i64| {
             vec![

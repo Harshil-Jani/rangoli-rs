@@ -139,6 +139,8 @@ pub struct ModelMeta {
     pub fields: &'static [FieldMeta],
     /// Many-to-many relations declared with `#[model(m2m(name = Target))]`.
     pub m2m: &'static [M2mMeta],
+    /// Composite indexes declared with `#[model(index(a, b))]`.
+    pub indexes: &'static [&'static [&'static str]],
 }
 
 #[derive(Debug)]

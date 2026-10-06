@@ -184,6 +184,26 @@ match ModelForm::<Author>::new().fields([&Author::NAME, &Author::EMAIL]).validat
 
 Fields left out of `fields(...)` ignore whatever is posted, so a form can't change them (`instance(obj)` edits an existing object). If you use htmx with the default CSP, set `<meta name="htmx-config" content='{"includeIndicatorStyles": false}'>` so it doesn't try to inject inline styles.
 
+## Background tasks
+
+Django 6.0 added a tasks interface but no production worker, so it still needs Celery plus Redis or RabbitMQ. Rangoli queues tasks in your database and runs them in the same binary:
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct SendWelcome { user_id: i64 }
+
+impl Task for SendWelcome {
+    const NAME: &'static str = "send_welcome";
+    const MAX_ATTEMPTS: i64 = 5;                      // default 3
+    async fn run(self) -> rangoli::Result<()> { /* ... */ Ok(()) }
+}
+
+App::new().task::<SendWelcome>();
+SendWelcome { user_id: 7 }.enqueue().await?;          // or .enqueue_in(Duration::from_secs(60))
+```
+
+`runserver` runs `RANGOLI_WORKERS` task loops in-process (default 1, `0` turns them off); `cargo run -- worker` runs a dedicated worker. Runs are claimed with a compare-and-set update, so two workers never run the same one. Failures retry with exponential backoff (10s, 20s, 40s, up to an hour), panics are caught and recorded, and runs left `running` by a crashed worker are retried after a ten-minute lease. Every run is visible in the admin under **Task records**, filterable by status.
+
 ## JSON API
 
 What Django needs Django REST framework and drf-spectacular for is one line:
@@ -248,7 +268,7 @@ This is the roadmap, in rough order. Nothing here is implemented yet:
 4. **More admin customization**: inlines, custom actions, fieldsets, per-model permissions, groups
 5. **Form rendering helpers** (widgets from model metadata); template filters for dates and choices
 6. **API tokens** for non-browser API clients, and per-object API permissions
-7. **Background tasks with a real worker** (Django 6.0 ships the task interface but no worker)
+7. **Scheduled (cron-style) tasks** on top of the task queue
 8. **WebSockets** (what Channels does)
 9. Password reset, groups, email, caching, i18n, embedding migrations in the binary, multi-database routing
 10. **WebAssembly**, explored later: the same validation rules running in the browser and on the server, and sandboxed WASM plugins

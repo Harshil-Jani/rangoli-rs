@@ -1,0 +1,25 @@
+{
+  "operations": [
+    {
+      "op": "create_table",
+      "table": "rangoli_task",
+      "columns": [
+        { "name": "name", "type": { "varchar": 100 } },
+        { "name": "payload", "type": "text" },
+        { "name": "status", "type": { "varchar": 16 } },
+        { "name": "attempts", "type": "int" },
+        { "name": "max_attempts", "type": "int" },
+        { "name": "run_at", "type": "date_time" },
+        { "name": "started_at", "type": "date_time", "null": true },
+        { "name": "finished_at", "type": "date_time", "null": true },
+        { "name": "last_error", "type": "text", "null": true },
+        { "name": "created_at", "type": "date_time" }
+      ]
+    },
+    {
+      "op": "add_index",
+      "table": "rangoli_task",
+      "index": { "name": "rangoli_task_status_run_at_idx", "columns": ["status", "run_at"] }
+    }
+  ]
+}

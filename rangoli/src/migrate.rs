@@ -117,10 +117,14 @@ pub fn columns_of(meta: &ModelMeta) -> Vec<Column> {
 }
 
 fn indexes_of(meta: &ModelMeta) -> Vec<Index> {
-    meta.fields
-        .iter()
-        .filter(|f| f.index)
-        .map(|f| Index { name: index_name(meta.table, &[f.name], false), columns: vec![f.name.into()], unique: false })
+    let single = meta.fields.iter().filter(|f| f.index).map(|f| std::slice::from_ref(&f.name));
+    single
+        .chain(meta.indexes.iter().copied())
+        .map(|cols| Index {
+            name: index_name(meta.table, cols, false),
+            columns: cols.iter().map(|c| c.to_string()).collect(),
+            unique: false,
+        })
         .collect()
 }
 
@@ -272,6 +276,7 @@ pub fn builtin() -> Vec<Migration> {
     [
         ("00000000000000_rangoli_builtin", include_str!("migrations/00000000000000_rangoli_builtin.json")),
         ("00000000000001_rangoli_admin_log", include_str!("migrations/00000000000001_rangoli_admin_log.json")),
+        ("00000000000002_rangoli_tasks", include_str!("migrations/00000000000002_rangoli_tasks.json")),
     ]
     .into_iter()
     .map(|(name, json)| Migration { name: name.into(), ..serde_json::from_str(json).expect("built-in migration") })
@@ -630,7 +635,8 @@ mod tests {
     #[test]
     fn builtin_migrations_match_framework_models() {
         use crate::orm::Model;
-        let models = [crate::auth::User::meta(), crate::auth::Session::meta(), crate::admin::LogEntry::meta()];
+        let models =
+            [crate::auth::User::meta(), crate::auth::Session::meta(), crate::admin::LogEntry::meta(), crate::tasks::TaskRecord::meta()];
         assert_eq!(replay(&builtin()).unwrap(), model_state(&models), "add a new built-in migration file for this change");
     }
 
