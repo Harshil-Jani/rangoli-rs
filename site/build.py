@@ -142,6 +142,7 @@ page = f'''<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
 <title>Rangoli: a Django-style web framework for Rust</title>
 <meta name="description" content="Typed ORM, branch-safe migrations, a Django-style admin, a JSON API with OpenAPI, and background tasks in one Rust binary, measured against Django 6.1.2.">
 <style>
@@ -388,7 +389,7 @@ python experiments.py  # the findings above -> results/experiments.json</code></
 
 DIST.mkdir(exist_ok=True)
 (DIST / "index.html").write_text(page)
-for asset in ["rangoli-demo.mp4", "rangoli-demo-poster.jpg"]:
+for asset in ["rangoli-demo.mp4", "rangoli-demo-poster.jpg", "favicon.svg"]:
     shutil.copy(SITE / asset, DIST / asset)
 (DIST / ".nojekyll").write_text("")
 print(f"wrote {DIST / 'index.html'}")
