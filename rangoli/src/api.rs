@@ -232,7 +232,10 @@ const fn link_field(name: &'static str) -> FieldMeta {
 }
 
 /// Many-to-many ids from a request body; `None` for relations the body leaves out.
-fn body_links(meta: &ModelMeta, body: &JsonValue) -> Result<Vec<(&'static str, Option<Vec<i64>>)>, Response> {
+/// Join table -> ids to link (`None` when the body leaves the relation out).
+type BodyLinks = Vec<(&'static str, Option<Vec<i64>>)>;
+
+fn body_links(meta: &ModelMeta, body: &JsonValue) -> Result<BodyLinks, Response> {
     let mut errors = Map::new();
     let out = meta
         .m2m
