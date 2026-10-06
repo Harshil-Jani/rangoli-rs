@@ -8,6 +8,7 @@ use rangoli::admin::ModelAdmin;
 use rangoli::api::{Access, Api};
 use rangoli::orm;
 use rangoli::orm::Choice;
+use rangoli::web::ModelForm;
 use rangoli::{migrate, App, Choices, DateTime, Error, Json, Model};
 use tower::ServiceExt;
 
@@ -73,6 +74,13 @@ struct PostV2 {
     #[field(choices, default = "draft")]
     status: Status,
     meta: Option<Json>,
+}
+
+/// A page rendered from a template; `?partial` renders only the `rows` block.
+async fn tag_page(axum::extract::Query(p): axum::extract::Query<Vec<(String, String)>>) -> rangoli::Result<axum::response::Html<String>> {
+    let names: Vec<String> = Tag::objects().order_by(Tag::NAME.asc()).all().await?.into_iter().map(|t| t.name).collect();
+    let name = if p.iter().any(|(k, _)| k == "partial") { "tags.html#rows" } else { "tags.html" };
+    rangoli::web::render(name, rangoli::web::context! { names, title => "<Tags & more>" })
 }
 
 fn post(title: &str, author: &Author, published: bool, rating: Option<f64>) -> Post {
@@ -164,6 +172,24 @@ async fn full_stack() {
     assert_eq!(authors.len(), 2);
     assert_eq!(authors[&ada.id.unwrap()], ada);
 
+    // ---- model forms
+    let pairs = |kv: &[(&str, &str)]| kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
+    let errs = ModelForm::<Author>::new().validate(&pairs(&[("name", "Form Author"), ("email", "")])).await.unwrap_err();
+    assert_eq!(errs["email"], "This field is required.");
+    let fresh_author = ModelForm::<Author>::new().validate(&pairs(&[("name", "Form Author"), ("email", "f@example.com")])).await.unwrap();
+    assert_eq!((fresh_author.id, fresh_author.name.as_str()), (None, "Form Author"), "a typed, unsaved model");
+    let edited = ModelForm::<Author>::new()
+        .fields([&Author::NAME])
+        .instance(ada.clone())
+        .validate(&pairs(&[("name", "Ada L."), ("email", "attacker@evil.example")]))
+        .await
+        .unwrap();
+    assert_eq!(
+        (edited.id, edited.name.as_str(), edited.email.as_str()),
+        (ada.id, "Ada L.", "ada@example.com"),
+        "fields() limits what a form can change"
+    );
+
     // ---- transactions
     let before = Author::objects().count().await.unwrap();
     let temp = |n: &str| Author { id: None, name: n.into(), email: format!("{n}@example.com") };
@@ -200,6 +226,9 @@ async fn full_stack() {
                 .list_per_page(2),
         )
         .api::<PostV2>(Api::new().read(Access::Public))
+        .templates(dir.join("templates"))
+        .static_files("/static", dir.join("static"))
+        .routes(axum::Router::new().route("/tags", axum::routing::get(tag_page)))
         .api::<Author>(Api::new().read(Access::Authenticated).write(Access::Nobody));
     let file = migrate::make(&migrations, v2.models(), Some("post_views")).unwrap().unwrap();
     let text = std::fs::read_to_string(&file).unwrap();
@@ -268,6 +297,10 @@ async fn full_stack() {
     assert_eq!(first.tags().query().filter(Tag::NAME.eq("web")).count().await.unwrap(), 1, "related rows are a queryset");
     assert_eq!(PostV2::objects().filter(PostV2::TAGS.has(rust.id.unwrap())).count().await.unwrap(), 1, "filter across the relation");
     assert_eq!(PostV2::TAGS.reverse(&web).count().await.unwrap(), 1, "reverse direction");
+    let all_posts = PostV2::objects().all().await.unwrap();
+    let prefetched = PostV2::TAGS.prefetch(&all_posts).await.unwrap();
+    assert_eq!(prefetched.len(), all_posts.len(), "every source gets an entry");
+    assert_eq!(prefetched[&first.id.unwrap()], vec![rust.clone(), web.clone()], "prefetch matches per-object access");
     first.tags().set_ids([web.id.unwrap()]).await.unwrap();
     assert_eq!(first.tags().ids().await.unwrap(), vec![web.id.unwrap()]);
     first.tags().remove_ids([web.id.unwrap()]).await.unwrap();
@@ -279,6 +312,20 @@ async fn full_stack() {
     first.tags().add(&[&doomed]).await.unwrap();
     doomed.delete().await.unwrap();
     assert_eq!(first.tags().count().await.unwrap(), 0, "deleting a tag removes its links");
+
+    std::fs::create_dir_all(dir.join("templates")).unwrap();
+    std::fs::create_dir_all(dir.join("static")).unwrap();
+    std::fs::write(
+        dir.join("templates/base.html"),
+        "<!doctype html><title>{{ title }}</title><main>{% block content %}{% endblock %}</main>",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("templates/tags.html"),
+        r#"{% extends "base.html" %}{% block content %}<ul id="rows">{% block rows %}{% for n in names %}<li>{{ n }}</li>{% endfor %}{% endblock %}</ul>{% endblock %}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("static/app.css"), "body { color: red }").unwrap();
 
     // ---- admin over HTTP
     let app = v2.router();
@@ -433,6 +480,21 @@ async fn full_stack() {
     assert_eq!(PostV2::objects().count().await.unwrap(), 3);
     let (_, headers, _) = send(form("/admin/blog_post/", &cookie, "action=delete_selected")).await;
     assert!(headers[header::LOCATION].to_str().unwrap().ends_with("warn=noitems"));
+
+    // ---- templates and static files
+    let (status, _, body) = send(get("/tags", "")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<title>&lt;Tags &amp; more&gt;</title>"), "templates auto-escape: {body}");
+    assert!(body.contains("<li>rust</li><li>web</li>"));
+    let (_, _, body) = send(get("/tags?partial=1", "")).await;
+    assert_eq!(body, "<li>rust</li><li>web</li>", "page.html#block renders just the partial");
+    let (status, headers, body) = send(get("/static/app.css", "")).await;
+    assert_eq!(
+        (status, headers[header::CONTENT_TYPE].to_str().unwrap(), body.as_str()),
+        (StatusCode::OK, "text/css", "body { color: red }")
+    );
+    assert_eq!(send(get("/static/../templates/base.html", "")).await.0, StatusCode::NOT_FOUND, "no escaping the static dir");
+    assert_eq!(send(get("/static/missing.css", "")).await.0, StatusCode::NOT_FOUND);
 
     // ---- JSON API
     let api = |method: &str, uri: &str, cookie: &str, body: &str| {

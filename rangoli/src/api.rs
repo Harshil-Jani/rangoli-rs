@@ -203,7 +203,7 @@ async fn attach_links(meta: &'static ModelMeta, objs: &mut [JsonValue]) -> Resul
     if meta.m2m.is_empty() || objs.is_empty() {
         return Ok(());
     }
-    static PAIR: [FieldMeta; 2] = [link_field("source_id"), link_field("target_id")];
+    static PAIR: [FieldMeta; 2] = [orm::link_meta("source_id"), orm::link_meta("target_id")];
     let ids: Vec<Value> = objs.iter().filter_map(|o| o["id"].as_i64()).map(Value::Int).collect();
     for rel in meta.m2m {
         let mut q =
@@ -221,23 +221,6 @@ async fn attach_links(meta: &'static ModelMeta, objs: &mut [JsonValue]) -> Resul
         }
     }
     Ok(())
-}
-
-const fn link_field(name: &'static str) -> FieldMeta {
-    FieldMeta {
-        name,
-        ty: FieldType::Int,
-        null: false,
-        unique: false,
-        password: false,
-        fk: None,
-        cascade: false,
-        auto_now: false,
-        auto_now_add: false,
-        index: false,
-        choices: None,
-        default: None,
-    }
 }
 
 /// Many-to-many ids from a request body; `None` for relations the body leaves out.

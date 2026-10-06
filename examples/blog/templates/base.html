@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- htmx's inline indicator styles would be blocked by Rangoli's default CSP -->
+<meta name="htmx-config" content='{"includeIndicatorStyles": false}'>
+<title>{% block title %}Field notes{% endblock %}</title>
+<link rel="stylesheet" href="/static/site.css">
+<script src="/admin/static/htmx.min.js" defer></script>
+</head>
+<body>
+<header class="masthead">
+  <a class="name" href="/">Field notes</a>
+  <span>Essays on the people who built computing</span>
+</header>
+<main>{% block content %}{% endblock %}</main>
+</body>
+</html>

@@ -18,6 +18,7 @@ pub mod auth;
 pub mod datetime;
 pub mod migrate;
 pub mod orm;
+pub mod web;
 
 pub use axum;
 pub use datetime::DateTime;
@@ -29,6 +30,7 @@ pub mod prelude {
     pub use crate::admin::ModelAdmin;
     pub use crate::api::{Access, Api};
     pub use crate::auth::CurrentUser;
+    pub use crate::web::{context, render, ModelForm};
     pub use crate::{atomic, App, Choices, DateTime, Error, Json, Model, Result};
 }
 
@@ -54,6 +56,8 @@ pub enum Error {
     Io(std::io::Error),
     /// Too many failed logins for this username.
     Locked,
+    /// A template failed to load or render.
+    Template(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -69,6 +73,7 @@ impl std::fmt::Display for Error {
             Error::Migration(m) => write!(f, "migration error: {m}"),
             Error::Io(e) => write!(f, "io error: {e}"),
             Error::Locked => f.write_str("too many failed logins, try again in 15 minutes"),
+            Error::Template(m) => write!(f, "template error: {m}"),
         }
     }
 }
@@ -132,6 +137,8 @@ pub struct Settings {
     pub bind: String,
     /// `RANGOLI_MIGRATIONS`, default `migrations`.
     pub migrations: PathBuf,
+    /// `RANGOLI_TEMPLATES`, default `templates`.
+    pub templates: PathBuf,
 }
 
 impl Settings {
@@ -144,6 +151,7 @@ impl Settings {
             debug: var("RANGOLI_DEBUG").is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes")),
             bind: var("RANGOLI_BIND").unwrap_or_else(|| "127.0.0.1:8000".into()),
             migrations: var("RANGOLI_MIGRATIONS").unwrap_or_else(|| "migrations".into()).into(),
+            templates: var("RANGOLI_TEMPLATES").unwrap_or_else(|| "templates".into()).into(),
         }
     }
 }
@@ -249,6 +257,19 @@ impl App {
         self.api.retain(|(m, _)| m.table != M::TABLE);
         self.api.push((M::meta(), settings.opts));
         self.model::<M>()
+    }
+
+    /// Where `rangoli::web::render` finds templates (overrides `RANGOLI_TEMPLATES`).
+    pub fn templates(self, dir: impl Into<PathBuf>) -> Self {
+        web::set_dir(dir.into());
+        self
+    }
+
+    /// Serve the files in `dir` under `prefix`, e.g. `.static_files("/static", "static")`.
+    /// Paths can't escape `dir`; content types come from file extensions.
+    pub fn static_files(mut self, prefix: &str, dir: impl Into<PathBuf>) -> Self {
+        self.routes = self.routes.nest_service(prefix, tower_http::services::ServeDir::new(dir.into()));
+        self
     }
 
     /// Your own axum routes, merged next to `/admin`.

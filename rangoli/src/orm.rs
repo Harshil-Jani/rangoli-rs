@@ -803,6 +803,8 @@ pub trait Model: Sized + Send + Sync + Unpin + 'static {
     fn set_pk(&mut self, id: i64);
     /// Column values in `meta().fields` order.
     fn values(&self) -> Vec<Value>;
+    /// Build an object from column values in `meta().fields` order (forms use this).
+    fn from_values(id: Option<i64>, values: Vec<Value>) -> Result<Self>;
     /// Called by `save()` first; the derive fills `auto_now`/`auto_now_add` fields here.
     fn before_save(&mut self, _adding: bool) {}
 
@@ -920,6 +922,24 @@ impl<M: Model> QuerySet<M> {
 
 // ---------------------------------------------------------------- many-to-many
 
+/// Metadata for a join-table column.
+pub(crate) const fn link_meta(name: &'static str) -> FieldMeta {
+    FieldMeta {
+        name,
+        ty: FieldType::Int,
+        null: false,
+        unique: false,
+        password: false,
+        fk: None,
+        cascade: false,
+        auto_now: false,
+        auto_now_add: false,
+        index: false,
+        choices: None,
+        default: None,
+    }
+}
+
 /// A many-to-many relation from `S` to `T`, generated as `Post::TAGS`.
 pub struct M2m<S, T> {
     through: &'static str,
@@ -959,6 +979,43 @@ impl<S: Model, T: Model> M2m<S, T> {
         })
     }
 
+    /// Related rows for many sources in two queries (Django's `prefetch_related`):
+    /// source id -> its related `T`s, ordered by id. Sources without any map to an empty list.
+    pub fn prefetch(self, sources: &[S]) -> impl Future<Output = Result<HashMap<i64, Vec<T>>>> + Send + 'static {
+        // Take the ids now, so the future borrows nothing (and stays Send for axum handlers).
+        let ids: Vec<i64> = sources.iter().filter_map(Model::pk).collect();
+        self.prefetch_ids(ids)
+    }
+
+    async fn prefetch_ids(self, ids: Vec<i64>) -> Result<HashMap<i64, Vec<T>>> {
+        static PAIR: [FieldMeta; 2] = [link_meta("source_id"), link_meta("target_id")];
+        let mut out: HashMap<i64, Vec<T>> = ids.iter().map(|id| (*id, vec![])).collect();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let mut q =
+            Query { table: self.through, fields: &PAIR, filter: vec![], order: vec![("target_id", false)], limit: None, offset: None };
+        q.filter.push(Node::In("source_id", ids.into_iter().map(Value::Int).collect(), FieldType::Int));
+        // Plain loops: closures here trip rustc's Send inference for the returned future.
+        let mut pairs: Vec<(i64, i64)> = vec![];
+        for (_, v) in q.rows().await? {
+            if let (Value::Int(source), Value::Int(target)) = (&v[0], &v[1]) {
+                pairs.push((*source, *target));
+            }
+        }
+        let mut target_ids: Vec<i64> = vec![];
+        for (_, t) in &pairs {
+            target_ids.push(*t);
+        }
+        let targets = T::in_bulk(target_ids).await?;
+        for (source, target) in pairs {
+            if let (Some(list), Some(t)) = (out.get_mut(&source), targets.get(&target)) {
+                list.push(T::from_values(t.pk(), t.values())?);
+            }
+        }
+        Ok(out)
+    }
+
     /// The `S` rows related to one `T`: the reverse direction.
     pub fn reverse(self, target: &T) -> QuerySet<S> {
         S::objects().filter(self.has(target.pk().unwrap_or(-1)))
@@ -978,20 +1035,7 @@ impl<S, T> Related<S, T> {
     }
 
     fn links(&self, source: i64) -> Query {
-        static LINK: [FieldMeta; 1] = [FieldMeta {
-            name: "target_id",
-            ty: FieldType::Int,
-            null: false,
-            unique: false,
-            password: false,
-            fk: None,
-            cascade: false,
-            auto_now: false,
-            auto_now_add: false,
-            index: false,
-            choices: None,
-            default: None,
-        }];
+        static LINK: [FieldMeta; 1] = [link_meta("target_id")];
         let mut q =
             Query { table: self.through, fields: &LINK, filter: vec![], order: vec![("target_id", false)], limit: None, offset: None };
         q.filter.push(Node::Cmp("source_id", "=", Value::Int(source), FieldType::Int));

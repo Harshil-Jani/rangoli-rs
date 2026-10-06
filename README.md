@@ -155,6 +155,35 @@ App::new().admin_with::<Post>(
 
 Settings that can't work (searching a non-text column, filtering on an unsupported type) stop the app at startup, like Django's admin checks.
 
+## Your own pages
+
+```rust
+App::new()
+    .templates("templates")          // or RANGOLI_TEMPLATES; re-read every request in debug
+    .static_files("/static", "static")
+    .routes(Router::new().route("/", get(home)))
+
+async fn home(Query(p): Query<Vec<(String, String)>>) -> rangoli::Result<Html<String>> {
+    let posts = Post::objects().filter(Post::PUBLISHED.eq(true)).all().await?;
+    let tags = Post::TAGS.prefetch(&posts).await?;          // Django's prefetch_related: 2 queries
+    // `home.html#posts` renders only that block (Django 6.0 template partials): an htmx search
+    // box can swap just the results without a second template.
+    let page = if p.iter().any(|(k, _)| k == "partial") { "home.html#posts" } else { "home.html" };
+    render(page, context! { posts, tags })
+}
+```
+
+Templates are Jinja2 syntax (minijinja), auto-escaped for `.html`. Static files are served with content types and can't escape their directory. `ModelForm` validates submitted data with the admin's rules and hands back a typed, unsaved model:
+
+```rust
+match ModelForm::<Author>::new().fields([&Author::NAME, &Author::EMAIL]).validate(&data).await {
+    Ok(mut author) => author.save().await?,             // typed Author
+    Err(errors) => return render("signup.html", context! { errors }),  // field -> message
+}
+```
+
+Fields left out of `fields(...)` ignore whatever is posted, so a form can't change them (`instance(obj)` edits an existing object). If you use htmx with the default CSP, set `<meta name="htmx-config" content='{"includeIndicatorStyles": false}'>` so it doesn't try to inject inline styles.
+
 ## JSON API
 
 What Django needs Django REST framework and drf-spectacular for is one line:
@@ -217,7 +246,7 @@ This is the roadmap, in rough order. Nothing here is implemented yet:
 2. Savepoints for nested `atomic` blocks (today a nested block joins the outer one)
 3. **Relations**: `select_related`-style joins, reverse foreign key accessors, composite indexes from models
 4. **More admin customization**: inlines, custom actions, fieldsets, per-model permissions, groups
-5. **Forms and templates for your own views** (typed forms, minijinja integration, Django 6.0-style template partials)
+5. **Form rendering helpers** (widgets from model metadata); template filters for dates and choices
 6. **API tokens** for non-browser API clients, and per-object API permissions
 7. **Background tasks with a real worker** (Django 6.0 ships the task interface but no worker)
 8. **WebSockets** (what Channels does)

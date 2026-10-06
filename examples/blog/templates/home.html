@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<form class="search" action="/" role="search">
+  <label for="q">Search essays</label>
+  <input id="q" type="search" name="q" value="{{ q }}" autocomplete="off"
+    hx-get="/?partial=1" hx-trigger="input changed delay:250ms" hx-target="#posts" hx-include="this">
+</form>
+<section id="posts" aria-live="polite">
+{% block posts %}
+  {% for p in posts %}
+  <article>
+    <h2>{{ p.title }}</h2>
+    <p class="byline">{{ p.author }}{% if p.tags %} · {{ p.tags|join(", ") }}{% endif %}</p>
+    <p>{{ p.body }}</p>
+  </article>
+  {% else %}
+  <p class="empty">{% if q %}Nothing matches “{{ q }}”.{% else %}Nothing published yet.{% endif %}</p>
+  {% endfor %}
+{% endblock %}
+</section>
+{% endblock %}

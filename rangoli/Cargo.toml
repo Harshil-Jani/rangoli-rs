@@ -15,13 +15,14 @@ rangoli-macros = { version = "0.1.0", path = "../rangoli-macros" }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "postgres", "mysql", "sqlite"] }
-minijinja = "2"
+minijinja = { version = "2", features = ["loader"] }
 argon2 = "0.5"
 getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_urlencoded = "0.7"
 rpassword = "7"
+tower-http = { version = "0.6", features = ["fs"] }
 
 [dev-dependencies]
 serde_json = { version = "1", features = ["preserve_order"] }

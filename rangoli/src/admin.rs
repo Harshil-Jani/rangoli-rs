@@ -912,7 +912,7 @@ async fn form_fields(
 }
 
 /// Validate a submitted form against the model; password fields come back hashed.
-async fn validate(
+pub(crate) async fn validate(
     meta: &'static ModelMeta,
     form: &HashMap<String, String>,
     is_add: bool,

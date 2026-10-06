@@ -50,6 +50,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
     let mut has_id = false;
     let (mut metas, mut reads, mut values, mut cols, mut touches) = (vec![], vec![], vec![], vec![], vec![]);
     let mut all_checks = vec![];
+    let mut builds = vec![];
     for f in &fields.named {
         let name = f.ident.as_ref().unwrap();
         let name_s = name.to_string();
@@ -183,6 +184,9 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
         reads.push(quote! {
             #name: ::rangoli::orm::FromValue::from_value(::rangoli::orm::read(row, #name_s, ::rangoli::orm::FieldType::#ty)?)?
         });
+        builds.push(quote! {
+            #name: ::rangoli::orm::FromValue::from_value(values.next().ok_or_else(|| ::rangoli::Error::Decode("too few values".into()))?)?
+        });
         values.push(quote!(::rangoli::orm::Value::from(::core::clone::Clone::clone(&self.#name))));
         let col = format_ident!("{}", name_s.to_uppercase());
         cols.push(quote!(pub const #col: ::rangoli::orm::Col<Self, #inner> = ::rangoli::orm::Col::new(#name_s);));
@@ -224,6 +228,11 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     id: ::rangoli::orm::FromValue::from_value(::rangoli::orm::read(row, "id", ::rangoli::orm::FieldType::Int)?)?,
                     #(#reads),*
                 })
+            }
+            fn from_values(id: Option<i64>, values: Vec<::rangoli::orm::Value>) -> ::rangoli::Result<Self> {
+                #[allow(unused_mut, unused_variables)]
+                let mut values = values.into_iter();
+                Ok(Self { id, #(#builds),* })
             }
             fn pk(&self) -> Option<i64> { self.id }
             fn set_pk(&mut self, id: i64) { self.id = Some(id); }
