@@ -6,6 +6,8 @@
 
 ![The Rangoli admin](docs/admin.png)
 
+**[Report and demo video: Rangoli vs Django 6.1.2](https://harshil-jani.github.io/rangoli-rs/)**
+
 **Status: early (0.1).** The core works end to end and is tested on Postgres, MySQL and SQLite. Read [What's not done yet](#whats-not-done-yet) before building anything real on it.
 
 ## Quickstart
