@@ -121,6 +121,24 @@ Modeled on Django's admin, page for page: the blue header, breadcrumbs, the app-
 - user management (password hashes are never shown; leave the field blank to keep the current password), **change password**, login and logout for staff only
 - square edges throughout, light and dark themes, and a mobile layout
 
+### Customizing a model's admin
+
+Django's `ModelAdmin`, with typed columns: a misspelled field, or a field from another model, does not compile.
+
+```rust
+App::new().admin_with::<Post>(
+    ModelAdmin::new()
+        .list_display([&Post::TITLE, &Post::AUTHOR_ID, &Post::PUBLISHED, &Post::CREATED_AT])
+        .search_fields([&Post::TITLE, &Post::BODY])
+        .list_filter([&Post::PUBLISHED, &Post::AUTHOR_ID, &Post::CREATED_AT]) // bool, date and foreign key filters
+        .ordering(Post::CREATED_AT.desc())
+        .readonly_fields([&Post::RATING])
+        .list_per_page(50),
+)
+```
+
+Settings that can't work (searching a non-text column, filtering on an unsupported type) stop the app at startup, like Django's admin checks.
+
 ## Databases
 
 Postgres, MySQL and SQLite share one code path through sqlx's `Any` driver. Only the SQL spelling differs per dialect. CI runs the same end-to-end test on all three.
@@ -146,7 +164,7 @@ This is the roadmap, in rough order. Nothing here is implemented yet:
 1. **More field types**: date, decimal, uuid, json; defaults, indexes, choices
 2. Savepoints for nested `atomic` blocks (today a nested block joins the outer one)
 3. **Relations**: many-to-many, reverse accessors, `select_related`-style joins
-4. **Admin customization**: `list_display`, `search_fields`, read-only fields, inlines, custom actions, per-model permissions, groups
+4. **More admin customization**: inlines, custom actions, fieldsets, per-model permissions, groups
 5. **Forms and templates for your own views** (typed forms, minijinja integration, Django 6.0-style template partials)
 6. **REST API layer** (what DRF does)
 7. **Background tasks with a real worker** (Django 6.0 ships the task interface but no worker)

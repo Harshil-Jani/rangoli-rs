@@ -51,5 +51,16 @@ async fn post(Path(id): Path<i64>) -> rangoli::Result<Json<Post>> {
 
 #[tokio::main]
 async fn main() -> rangoli::Result<()> {
-    App::new().admin::<Author>().admin::<Post>().routes(Router::new().route("/", get(posts)).route("/posts/{id}", get(post))).run().await
+    App::new()
+        .admin::<Author>()
+        .admin_with::<Post>(
+            ModelAdmin::new()
+                .list_display([&Post::TITLE, &Post::AUTHOR_ID, &Post::PUBLISHED, &Post::RATING, &Post::CREATED_AT])
+                .search_fields([&Post::TITLE, &Post::BODY])
+                .list_filter([&Post::PUBLISHED, &Post::AUTHOR_ID, &Post::CREATED_AT])
+                .ordering(Post::CREATED_AT.desc()),
+        )
+        .routes(Router::new().route("/", get(posts)).route("/posts/{id}", get(post)))
+        .run()
+        .await
 }

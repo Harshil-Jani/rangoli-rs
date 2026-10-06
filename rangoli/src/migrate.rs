@@ -151,7 +151,7 @@ pub fn diff(from: &State, to: &State) -> Vec<Op> {
     ops
 }
 
-fn zero(ty: FieldType) -> Value {
+pub(crate) fn zero(ty: FieldType) -> Value {
     match ty {
         FieldType::Int | FieldType::DateTime => Value::Int(0),
         FieldType::Float => Value::Float(0.0),

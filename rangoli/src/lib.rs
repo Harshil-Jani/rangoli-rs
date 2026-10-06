@@ -24,6 +24,7 @@ pub use orm::{atomic, Model};
 pub use rangoli_macros::Model;
 
 pub mod prelude {
+    pub use crate::admin::ModelAdmin;
     pub use crate::auth::CurrentUser;
     pub use crate::{atomic, App, DateTime, Error, Model, Result};
 }
@@ -192,7 +193,7 @@ fn is_cross_origin(req: &Request) -> bool {
 
 pub struct App {
     models: Vec<&'static ModelMeta>,
-    admin: Vec<&'static ModelMeta>,
+    admin: Vec<(&'static ModelMeta, admin::Options)>,
     routes: Router,
 }
 
@@ -208,7 +209,7 @@ impl App {
         use orm::Model;
         App {
             models: vec![auth::User::meta(), auth::Session::meta(), admin::LogEntry::meta()],
-            admin: vec![auth::User::meta()],
+            admin: vec![(auth::User::meta(), admin::Options::default())],
             routes: Router::new(),
         }
     }
@@ -221,11 +222,19 @@ impl App {
         self
     }
 
-    /// Track a model in migrations and show it in the admin.
-    pub fn admin<M: orm::Model>(mut self) -> Self {
-        if !self.admin.iter().any(|m| m.table == M::TABLE) {
-            self.admin.push(M::meta());
+    /// Track a model in migrations and show it in the admin with default settings.
+    pub fn admin<M: orm::Model>(self) -> Self {
+        self.admin_with(admin::ModelAdmin::<M>::new())
+    }
+
+    /// Show a model in the admin with custom settings (Django's `ModelAdmin`).
+    /// Panics at startup on settings that can't work, like Django's admin checks.
+    pub fn admin_with<M: orm::Model>(mut self, settings: admin::ModelAdmin<M>) -> Self {
+        if let Err(e) = settings.check() {
+            panic!("rangoli admin: {e}");
         }
+        self.admin.retain(|(m, _)| m.table != M::TABLE);
+        self.admin.push((M::meta(), settings.opts));
         self.model::<M>()
     }
 

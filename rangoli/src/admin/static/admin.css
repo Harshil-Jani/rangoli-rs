@@ -366,6 +366,7 @@ fieldset { margin: 0; padding: 0; min-width: 0; }
 .field-label { padding-top: 6px; color: var(--text-2); font-size: var(--fs-sm); }
 .field-label.required { color: var(--text); font-weight: 600; }
 .field-label.required::after { content: " *"; color: var(--error-text); }
+.readonly { padding-top: 6px; }
 .checkbox { display: inline-flex; align-items: center; gap: var(--s2); min-height: var(--control-h); font-weight: 600; }
 .help { margin-top: var(--s1); color: var(--text-2); font-size: var(--fs-xs); }
 .field-error { margin-top: var(--s1); color: var(--error-text); font-size: var(--fs-sm); font-weight: 600; }

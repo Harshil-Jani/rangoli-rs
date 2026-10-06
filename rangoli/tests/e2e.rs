@@ -4,6 +4,7 @@
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
+use rangoli::admin::ModelAdmin;
 use rangoli::orm;
 use rangoli::{migrate, App, DateTime, Error, Model};
 use tower::ServiceExt;
@@ -155,7 +156,15 @@ async fn full_stack() {
     assert!(ada.delete().await.unwrap_err().is_foreign_key_violation(), "can't delete an author with posts");
 
     // ---- schema evolution: drop a column, add a NOT NULL one, widen another
-    let v2 = App::new().admin::<Author>().admin::<PostV2>();
+    let v2 = App::new().admin::<Author>().admin_with::<PostV2>(
+        ModelAdmin::new()
+            .list_display([&PostV2::TITLE, &PostV2::AUTHOR_ID, &PostV2::PUBLISHED, &PostV2::VIEWS, &PostV2::CREATED_AT])
+            .search_fields([&PostV2::TITLE])
+            .list_filter([&PostV2::PUBLISHED, &PostV2::AUTHOR_ID, &PostV2::CREATED_AT])
+            .ordering(PostV2::TITLE.asc())
+            .readonly_fields([&PostV2::VIEWS])
+            .list_per_page(2),
+    );
     let file = migrate::make(&migrations, v2.models(), Some("post_views")).unwrap().unwrap();
     let text = std::fs::read_to_string(&file).unwrap();
     for op in ["\"alter_column\"", "\"add_column\"", "\"drop_column\""] {
@@ -283,6 +292,22 @@ async fn full_stack() {
     assert!(body.contains(">Grace Hopper</option>") && body.contains(">Alan</option>"), "foreign keys render as a select");
     assert!(body.contains("type=\"datetime-local\"") && body.contains("value=\"2026-01-02T03:04\""), "datetime input");
     assert!(!body.contains("name=\"created_at\"") && !body.contains("name=\"updated_at\""), "auto fields are not editable");
+    // ModelAdmin settings
+    let (_, _, body) = send(get("/admin/blog_post/", &cookie)).await;
+    assert!(body.contains("class=\"sorted ascending\"") && body.contains(">Title</a>"), "default ordering");
+    assert!(body.contains(">Views</a>") && !body.contains(">Rating</a>"), "list_display picks the columns");
+    assert!(body.contains("class=\"this-page\"") && body.contains("4 postv2s"), "list_per_page paginates");
+    let (_, _, body) = send(get("/admin/blog_post/?q=Body+of", &cookie)).await;
+    assert!(body.contains("0 results of"), "search_fields limits what is searched");
+    let (_, _, body) = send(get(&format!("/admin/blog_post/?f.author_id={}", alan.id.unwrap()), &cookie)).await;
+    assert!(body.contains("By author") && body.contains("2 results of"), "foreign key filter");
+    let post_url = format!("/admin/blog_post/{}/", long.id.unwrap());
+    let (_, _, body) = send(get(&post_url, &cookie)).await;
+    assert!(body.contains("<div class=\"readonly\">7</div>") && !body.contains("name=\"views\""), "read-only field");
+    let edit = format!("title=Long&body=b&published=on&author_id={}&views=999", alan.id.unwrap());
+    assert_eq!(send(form(&post_url, &cookie, &edit)).await.0, StatusCode::SEE_OTHER);
+    assert_eq!(PostV2::get(long.id.unwrap()).await.unwrap().views, 7, "posted values for read-only fields are ignored");
+
     let (_, _, body) = send(get("/admin/blog_post/?f.created_at=today", &cookie)).await;
     assert!(body.contains("By created at") && body.contains("Past 7 days") && body.contains("1 result of"), "date filter");
     assert!(body.contains(" UTC</td>"), "datetimes display in UTC");

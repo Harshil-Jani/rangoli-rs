@@ -15,6 +15,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use minijinja::{context, Environment};
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 const PAGE_SIZE: u64 = 100;
@@ -42,8 +43,119 @@ const ADDITION: i64 = 1;
 const CHANGE: i64 = 2;
 const DELETION: i64 = 3;
 
+// ---------------------------------------------------------------- ModelAdmin
+
+/// A column of model `M` usable in `ModelAdmin` settings: `Post::TITLE`, `Post::ID`, ...
+pub trait Field<M> {
+    fn name(&self) -> &'static str;
+}
+
+impl<M, T> Field<M> for crate::orm::Col<M, T> {
+    fn name(&self) -> &'static str {
+        crate::orm::Col::name(*self)
+    }
+}
+
+/// Per-model admin settings, like Django's `ModelAdmin`. Columns are typed, so a
+/// misspelled field or one from another model does not compile.
+///
+/// ```ignore
+/// App::new().admin_with::<Post>(
+///     ModelAdmin::new()
+///         .list_display([&Post::TITLE, &Post::AUTHOR_ID, &Post::PUBLISHED])
+///         .search_fields([&Post::TITLE, &Post::BODY])
+///         .list_filter([&Post::PUBLISHED, &Post::AUTHOR_ID])
+///         .ordering(Post::ID.desc())
+///         .readonly_fields([&Post::RATING]),
+/// )
+/// ```
+pub struct ModelAdmin<M> {
+    pub(crate) opts: Options,
+    _m: PhantomData<fn() -> M>,
+}
+
+/// The settings `ModelAdmin` collects, with the model type erased.
+#[derive(Clone, Debug, Default)]
+pub struct Options {
+    list_display: Option<Vec<&'static str>>,
+    search_fields: Option<Vec<&'static str>>,
+    list_filter: Option<Vec<&'static str>>,
+    ordering: Option<(&'static str, bool)>,
+    readonly_fields: Vec<&'static str>,
+    list_per_page: Option<u64>,
+}
+
+impl<M: Model> Default for ModelAdmin<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M: Model> ModelAdmin<M> {
+    pub fn new() -> Self {
+        ModelAdmin { opts: Options::default(), _m: PhantomData }
+    }
+
+    fn names<const N: usize>(cols: [&dyn Field<M>; N]) -> Vec<&'static str> {
+        cols.iter().map(|c| c.name()).collect()
+    }
+
+    /// Changelist columns, in order.
+    pub fn list_display<const N: usize>(mut self, cols: [&dyn Field<M>; N]) -> Self {
+        self.opts.list_display = Some(Self::names(cols));
+        self
+    }
+
+    /// Text columns searched by the search box.
+    pub fn search_fields<const N: usize>(mut self, cols: [&dyn Field<M>; N]) -> Self {
+        self.opts.search_fields = Some(Self::names(cols));
+        self
+    }
+
+    /// Sidebar filters: boolean, date and foreign key columns.
+    pub fn list_filter<const N: usize>(mut self, cols: [&dyn Field<M>; N]) -> Self {
+        self.opts.list_filter = Some(Self::names(cols));
+        self
+    }
+
+    /// Default changelist order, e.g. `Post::CREATED_AT.desc()`.
+    pub fn ordering(mut self, order: crate::orm::Order<M>) -> Self {
+        self.opts.ordering = Some((order.0, order.1));
+        self
+    }
+
+    /// Shown on the change form but not editable.
+    pub fn readonly_fields<const N: usize>(mut self, cols: [&dyn Field<M>; N]) -> Self {
+        self.opts.readonly_fields = Self::names(cols);
+        self
+    }
+
+    pub fn list_per_page(mut self, n: u64) -> Self {
+        self.opts.list_per_page = Some(n.max(1));
+        self
+    }
+
+    /// Reject settings that can't work, at startup (Django's admin checks).
+    pub(crate) fn check(&self) -> std::result::Result<(), String> {
+        let meta = M::meta();
+        let field = |n: &str| meta.field(n);
+        for n in self.opts.search_fields.iter().flatten() {
+            if !field(n).is_some_and(|f| matches!(f.ty, FieldType::Varchar(_) | FieldType::Text) && !f.password) {
+                return Err(format!("{}: search_fields can only use text columns, not `{n}`", meta.name));
+            }
+        }
+        for n in self.opts.list_filter.iter().flatten() {
+            if !field(n).is_some_and(|f| matches!(f.ty, FieldType::Bool | FieldType::DateTime) || f.fk.is_some()) {
+                return Err(format!("{}: list_filter supports boolean, date and foreign key columns, not `{n}`", meta.name));
+            }
+        }
+        Ok(())
+    }
+}
+
 struct Site {
     admin: Vec<&'static ModelMeta>,
+    options: HashMap<&'static str, Options>,
     models: Vec<&'static ModelMeta>,
     env: Environment<'static>,
     version: String,
@@ -53,7 +165,9 @@ type S = State<Arc<Site>>;
 type Pairs = Vec<(String, String)>;
 type Page = Result<Response, Response>;
 
-pub fn router(admin: Vec<&'static ModelMeta>, models: Vec<&'static ModelMeta>) -> Router {
+pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static ModelMeta>) -> Router {
+    let options = admin.iter().map(|(m, o)| (m.table, o.clone())).collect();
+    let admin: Vec<_> = admin.into_iter().map(|(m, _)| m).collect();
     let mut env = Environment::new();
     for (name, src) in [
         ("base.html", include_str!("admin/templates/base.html")),
@@ -82,7 +196,7 @@ pub fn router(admin: Vec<&'static ModelMeta>, models: Vec<&'static ModelMeta>) -
         .route("/admin/{table}/{id}/", get(change_page).post(change_submit))
         .route("/admin/{table}/{id}/delete", get(delete_page).post(delete_submit))
         .route("/admin/{table}/{id}/history", get(history))
-        .with_state(Arc::new(Site { admin, models, env, version }))
+        .with_state(Arc::new(Site { admin, options, models, env, version }))
 }
 
 // ---------------------------------------------------------------- helpers
@@ -111,6 +225,11 @@ fn staff<'a>(user: &'a CurrentUser, uri: &Uri) -> Result<&'a User, Response> {
 
 fn model(site: &Site, table: &str) -> Result<&'static ModelMeta, Response> {
     site.admin.iter().copied().find(|m| m.table == table).ok_or_else(|| StatusCode::NOT_FOUND.into_response())
+}
+
+fn options<'a>(site: &'a Site, meta: &ModelMeta) -> &'a Options {
+    static DEFAULT: std::sync::OnceLock<Options> = std::sync::OnceLock::new();
+    site.options.get(meta.table).unwrap_or_else(|| DEFAULT.get_or_init(Options::default))
 }
 
 fn plural(name: &str) -> String {
@@ -378,76 +497,130 @@ async fn index(State(site): S, user: CurrentUser, uri: Uri) -> Page {
 
 // ---------------------------------------------------------------- changelist
 
+/// One changelist column: the primary key or a model field.
+#[derive(Clone, Copy)]
+enum Column {
+    Id,
+    Field(usize, &'static FieldMeta),
+}
+
+impl Column {
+    fn name(self) -> &'static str {
+        match self {
+            Column::Id => "id",
+            Column::Field(_, f) => f.name,
+        }
+    }
+}
+
+fn columns_for(meta: &'static ModelMeta, opts: &Options) -> Vec<Column> {
+    let field = |name: &str| meta.fields.iter().enumerate().find(|(_, f)| f.name == name && !f.password).map(|(i, f)| Column::Field(i, f));
+    if let Some(names) = &opts.list_display {
+        return names.iter().filter_map(|n| if *n == "id" { Some(Column::Id) } else { field(n) }).collect();
+    }
+    // Default: the display field first (Django's `__str__` column), then the rest.
+    let mut cols: Vec<Column> =
+        meta.fields.iter().enumerate().filter(|(_, f)| !f.password && f.ty != FieldType::Text).map(|(i, f)| Column::Field(i, f)).collect();
+    if let Some(pos) = meta.display.and_then(|d| cols.iter().position(|c| c.name() == d)) {
+        let first = cols.remove(pos);
+        cols.insert(0, first);
+    }
+    cols.truncate(6);
+    cols
+}
+
+fn search_fields(meta: &'static ModelMeta, opts: &Options) -> Vec<&'static str> {
+    match &opts.search_fields {
+        Some(names) => names.clone(),
+        None => {
+            meta.fields.iter().filter(|f| !f.password && matches!(f.ty, FieldType::Varchar(_) | FieldType::Text)).map(|f| f.name).collect()
+        }
+    }
+}
+
+fn filter_fields(meta: &'static ModelMeta, opts: &Options) -> Vec<&'static FieldMeta> {
+    match &opts.list_filter {
+        Some(names) => names.iter().filter_map(|n| meta.field(n)).collect(),
+        None => meta.fields.iter().filter(|f| matches!(f.ty, FieldType::Bool | FieldType::DateTime)).collect(),
+    }
+}
+
 async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>, UrlQuery(p): UrlQuery<Pairs>) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
+    let opts = options(&site, meta);
+    let per_page = opts.list_per_page.unwrap_or(PAGE_SIZE);
     let base = format!("/admin/{table}/");
     let q = param(&p, "q").unwrap_or("").trim().to_string();
     let page: u64 = param(&p, "p").and_then(|v| v.parse().ok()).filter(|n| *n >= 1).unwrap_or(1);
 
-    let (desc, oname) = match param(&p, "o").unwrap_or("-id") {
-        o if o.starts_with('-') => (true, &o[1..]),
-        o => (false, o),
+    let (default_field, default_desc) = opts.ordering.unwrap_or(("id", true));
+    let (desc, oname) = match param(&p, "o") {
+        Some(o) if o.starts_with('-') => (true, &o[1..]),
+        Some(o) => (false, o),
+        None => (default_desc, default_field),
     };
     // Only real, visible columns can be sorted on: the name comes from metadata, never from the URL.
     let order_field: &'static str = meta.field(oname).filter(|f| !f.password).map_or("id", |f| f.name);
 
-    // Columns: the display field first (Django's `__str__` column), then the rest.
-    let mut shown: Vec<(usize, &FieldMeta)> =
-        meta.fields.iter().enumerate().filter(|(_, f)| !f.password && f.ty != FieldType::Text).collect();
-    if let Some(pos) = meta.display.and_then(|d| shown.iter().position(|(_, f)| f.name == d)) {
-        let first = shown.remove(pos);
-        shown.insert(0, first);
-    }
-    shown.truncate(6);
-    let searchable: Vec<&'static str> =
-        meta.fields.iter().filter(|f| !f.password && matches!(f.ty, FieldType::Varchar(_) | FieldType::Text)).map(|f| f.name).collect();
-    let bools: Vec<&'static FieldMeta> = meta.fields.iter().filter(|f| f.ty == FieldType::Bool).collect();
-    let dates: Vec<&'static FieldMeta> = meta.fields.iter().filter(|f| f.ty == FieldType::DateTime).collect();
+    let columns = columns_for(meta, opts);
+    let searchable = search_fields(meta, opts);
+    let filters = filter_fields(meta, opts);
 
     let mut query = Query::new(meta);
     if !q.is_empty() && !searchable.is_empty() {
         let pat = format!("%{}%", like_escape(&q));
         query.filter.push(Node::Or(searchable.iter().map(|c| Node::Like(c, pat.clone())).collect()));
     }
-    for f in &bools {
-        if let Some(v @ ("1" | "0")) = param(&p, &format!("f.{}", f.name)) {
-            query.filter.push(Node::Cmp(f.name, "=", Value::Bool(v == "1"), FieldType::Bool));
-        }
-    }
-    for f in &dates {
-        if let Some(since) = param(&p, &format!("f.{}", f.name)).and_then(date_range_start) {
-            query.filter.push(Node::Cmp(f.name, ">=", Value::Int(since.unix()), FieldType::DateTime));
-        }
+    for f in &filters {
+        let Some(v) = param(&p, &format!("f.{}", f.name)) else { continue };
+        let node = match f.ty {
+            FieldType::Bool if v == "1" || v == "0" => Node::Cmp(f.name, "=", Value::Bool(v == "1"), FieldType::Bool),
+            FieldType::DateTime => match date_range_start(v) {
+                Some(since) => Node::Cmp(f.name, ">=", Value::Int(since.unix()), FieldType::DateTime),
+                None => continue,
+            },
+            FieldType::Int if f.fk.is_some() => match v.parse::<i64>() {
+                Ok(id) => Node::Cmp(f.name, "=", Value::Int(id), FieldType::Int),
+                Err(_) => continue,
+            },
+            _ => continue,
+        };
+        query.filter.push(node);
     }
     let filtered = !query.filter.is_empty();
     let count = query.count().await.map_err(fail)?;
     let full_count = if filtered { Query::new(meta).count().await.map_err(fail)? } else { count };
-    let pages = (count as u64).div_ceil(PAGE_SIZE).max(1);
+    let pages = (count as u64).div_ceil(per_page).max(1);
     let page = page.min(pages);
     query.order = vec![(order_field, desc)];
-    query.limit = Some(PAGE_SIZE);
-    query.offset = Some((page - 1) * PAGE_SIZE);
+    query.limit = Some(per_page);
+    query.offset = Some((page - 1) * per_page);
     let raw_rows = query.rows().await.map_err(fail)?;
 
     // Foreign keys show their target's label: one IN query per FK column, not one per row.
     let mut fk_labels: HashMap<usize, HashMap<i64, String>> = HashMap::new();
-    for (i, f) in shown.iter().filter(|(_, f)| f.fk.is_some()) {
-        let ids = raw_rows.iter().filter_map(|(_, v)| match v[*i] {
-            Value::Int(id) => Some(id),
-            _ => None,
-        });
-        fk_labels.insert(*i, labels(&site, f.fk.unwrap(), ids.collect()).await?);
+    for c in &columns {
+        if let Column::Field(i, FieldMeta { fk: Some(target), .. }) = *c {
+            let ids = raw_rows.iter().filter_map(|(_, v)| match v[i] {
+                Value::Int(id) => Some(id),
+                _ => None,
+            });
+            fk_labels.insert(i, labels(&site, target, ids.collect()).await?);
+        }
     }
     let rows: Vec<_> = raw_rows
         .iter()
         .map(|(id, vals)| {
-            let mut cells: Vec<minijinja::Value> = shown
+            let mut cells: Vec<minijinja::Value> = columns
                 .iter()
-                .map(|(i, f)| match (&vals[*i], fk_labels.get(i)) {
-                    (Value::Bool(b), _) => context! { bool => b },
-                    (Value::Int(fid), Some(names)) => context! { text => names.get(fid).cloned().unwrap_or_else(|| fid.to_string()) },
-                    (v, _) => context! { text => display(v, f) },
+                .map(|c| match *c {
+                    Column::Id => context! { text => id.to_string() },
+                    Column::Field(i, f) => match (&vals[i], fk_labels.get(&i)) {
+                        (Value::Bool(b), _) => context! { bool => b },
+                        (Value::Int(fid), Some(names)) => context! { text => names.get(fid).cloned().unwrap_or_else(|| fid.to_string()) },
+                        (v, _) => context! { text => display(v, f) },
+                    },
                 })
                 .collect();
             if cells.is_empty() {
@@ -470,37 +643,36 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
             qs => format!("{base}?{qs}"),
         }
     };
-    let columns: Vec<_> = if shown.is_empty() {
-        vec![context! { label => meta.name.to_uppercase(), url => None::<String>, sorted => None::<&str> }]
+    let headers: Vec<_> = if columns.is_empty() {
+        vec![context! { label => meta.name, url => None::<String>, sorted => None::<&str> }]
     } else {
-        shown
+        columns
             .iter()
-            .map(|(_, f)| {
-                let active = order_field == f.name;
-                let next = if active && !desc { format!("-{}", f.name) } else { f.name.to_string() };
-                context! { label => label(f.name), url => link(&[("o", &next)]), sorted => active.then_some(if desc { "descending" } else { "ascending" }) }
+            .map(|c| {
+                let name = c.name();
+                let active = order_field == name;
+                let next = if active && !desc { format!("-{name}") } else { name.to_string() };
+                let heading = if name == "id" { "ID".to_string() } else { label(name) };
+                context! { label => heading, url => link(&[("o", &next)]), sorted => active.then_some(if desc { "descending" } else { "ascending" }) }
             })
             .collect()
     };
-    let filters: Vec<_> = bools
-        .iter()
-        .map(|f| {
-            let key = format!("f.{}", f.name);
-            let current = param(&p, &key).unwrap_or("");
-            let opts: Vec<_> = [("All", ""), ("Yes", "1"), ("No", "0")]
-                .iter()
-                .map(|(l, v)| context! { label => l, url => link(&[(&key, v)]), active => current == *v })
-                .collect();
-            context! { label => label(f.name).to_lowercase(), options => opts }
-        })
-        .chain(dates.iter().map(|f| {
-            let key = format!("f.{}", f.name);
-            let current = param(&p, &key).unwrap_or("");
-            let opts: Vec<_> =
-                DATE_RANGES.iter().map(|(v, l)| context! { label => l, url => link(&[(&key, v)]), active => current == *v }).collect();
-            context! { label => label(f.name).to_lowercase(), options => opts }
-        }))
-        .collect();
+    let mut filter_blocks = vec![];
+    for f in &filters {
+        let key = format!("f.{}", f.name);
+        let current = param(&p, &key).unwrap_or("");
+        let choices: Vec<(String, String)> = match (f.ty, f.fk) {
+            (FieldType::Bool, _) => [("", "All"), ("1", "Yes"), ("0", "No")].iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
+            (FieldType::DateTime, _) => DATE_RANGES.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
+            (_, Some(target)) => std::iter::once((String::new(), "All".to_string()))
+                .chain(label_rows(&site, target, None).await?.into_iter().map(|(id, l)| (id.to_string(), l)))
+                .collect(),
+            _ => continue,
+        };
+        let options: Vec<_> =
+            choices.iter().map(|(v, l)| context! { label => l, url => link(&[(&key, v)]), active => current == v.as_str() }).collect();
+        filter_blocks.push(context! { label => label(f.name).to_lowercase(), options });
+    }
     let keep: Vec<(String, String)> = p.iter().filter(|(k, _)| k.starts_with("f.") || k == "o").cloned().collect();
     let page_links: Vec<_> = (1..=pages)
         .filter(|n| *n == 1 || *n == pages || n.abs_diff(page) <= 3)
@@ -513,7 +685,7 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
         context! {
             title => format!("Select {} to change", meta.name.to_lowercase()),
             messages => message(&p, u, "list").await, q, keep, count, full_count, filtered, what, page_links,
-            columns, rows, filters, searchable => !searchable.is_empty(), clear_url => base.clone(),
+            columns => headers, rows, filters => filter_blocks, searchable => !searchable.is_empty(), clear_url => base.clone(),
             ..chrome(&site, u, Some(meta))
         },
     )
@@ -679,6 +851,7 @@ async fn form_fields(
     raw: &HashMap<String, String>,
     errors: &HashMap<String, String>,
     is_add: bool,
+    readonly: &[&str],
 ) -> Result<Vec<minijinja::Value>, Response> {
     let mut out = vec![];
     for f in meta.fields.iter().filter(|f| !f.is_auto()) {
@@ -686,6 +859,17 @@ async fn form_fields(
             Some(t) => label_rows(site, t, None).await?.into_iter().map(|(id, l)| (id.to_string(), l)).collect(),
             None => vec![],
         };
+        if readonly.contains(&f.name) {
+            let raw = raw.get(f.name).cloned().unwrap_or_default();
+            let shown = match (f.ty, raw.as_str()) {
+                (_, "") if f.ty != FieldType::Bool => "-".to_string(),
+                (FieldType::Bool, v) => (if v.is_empty() { "No" } else { "Yes" }).to_string(),
+                (FieldType::DateTime, v) => DateTime::parse(v).map_or(v.to_string(), DateTime::human),
+                _ => options.iter().find(|(id, _)| *id == raw).map_or(raw.clone(), |(_, l)| l.clone()),
+            };
+            out.push(context! { name => f.name, label => label(f.name), kind => "readonly", value => shown });
+            continue;
+        }
         let kind = match (f.fk.is_some(), f.password, f.ty) {
             (true, ..) => "select",
             (_, true, _) => "password",
@@ -713,12 +897,20 @@ async fn validate(
     meta: &'static ModelMeta,
     form: &HashMap<String, String>,
     is_add: bool,
+    readonly: &[&str],
 ) -> Result<Vec<(&'static str, Value, FieldType)>, HashMap<String, String>> {
     let (mut cols, mut errors) = (vec![], HashMap::new());
     for f in meta.fields {
         if f.is_auto() {
             if f.auto_now || is_add {
                 cols.push((f.name, Value::Int(DateTime::now().unix()), f.ty));
+            }
+            continue;
+        }
+        // Read-only fields ignore whatever was posted; new rows get NULL or the type's zero value.
+        if readonly.contains(&f.name) {
+            if is_add {
+                cols.push((f.name, if f.null { Value::Null } else { crate::migrate::zero(f.ty) }, f.ty));
             }
             continue;
         }
@@ -803,7 +995,7 @@ async fn form_page(
     messages: Option<minijinja::Value>,
 ) -> Page {
     let is_add = id.is_none();
-    let fields = form_fields(site, meta, raw, &errors, is_add).await?;
+    let fields = form_fields(site, meta, raw, &errors, is_add, &options(site, meta).readonly_fields).await?;
     let obj = match id {
         Some(id) => Some(repr(meta, id, &fetch_row(meta, id).await?)),
         None => None,
@@ -846,7 +1038,7 @@ async fn add_submit(
 ) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
-    let errors = match validate(meta, &form, true).await {
+    let errors = match validate(meta, &form, true, &options(&site, meta).readonly_fields).await {
         Ok(cols) => match crate::atomic(async {
             let id = orm::insert_row(meta.table, &cols).await?;
             let vals = row_values(meta, id).await?;
@@ -886,7 +1078,7 @@ async fn change_submit(
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
     let old = fetch_row(meta, id).await?;
-    let errors = match validate(meta, &form, false).await {
+    let errors = match validate(meta, &form, false, &options(&site, meta).readonly_fields).await {
         Ok(cols) => {
             let mut q = Query::new(meta);
             q.filter.push(by_id(id));
@@ -1049,6 +1241,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn admin_checks_reject_unusable_settings() {
+        assert!(ModelAdmin::<User>::new().search_fields([&User::USERNAME]).list_filter([&User::IS_STAFF]).check().is_ok());
+        let err = ModelAdmin::<User>::new().search_fields([&User::PASSWORD]).check().unwrap_err();
+        assert!(err.contains("search_fields"), "{err}");
+        let err = ModelAdmin::<User>::new().list_filter([&User::USERNAME]).check().unwrap_err();
+        assert!(err.contains("list_filter"), "{err}");
     }
 
     #[test]
