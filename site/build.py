@@ -368,7 +368,7 @@ footer {{ max-width: 1080px; margin: 0 auto; padding: var(--s6) var(--s5) var(--
   <div class="steps">
     <div class="step"><h3>Add the crate</h3>
 <pre><code>[dependencies]
-rangoli = "0.1"
+rangoli = "0.2"
 tokio = {{ version = "1", features = ["full"] }}
 serde = {{ version = "1", features = ["derive"] }}</code></pre></div>
     <div class="step"><h3>Describe your data</h3>

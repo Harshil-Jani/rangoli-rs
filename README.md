@@ -14,7 +14,7 @@
 
 ```toml
 [dependencies]
-rangoli = "0.1"
+rangoli = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -308,7 +308,7 @@ Every part beyond the ORM, migrations, auth and the JSON API is a Cargo feature,
 | `postgres`, `mysql`, `sqlite` | the database drivers |
 
 ```toml
-rangoli = { version = "0.1", default-features = false, features = ["postgres"] }  # an API service
+rangoli = { version = "0.2", default-features = false, features = ["postgres"] }  # an API service
 ```
 
 [`examples/api_only`](examples/api_only/src/main.rs) built that way is a 7.1 MB binary from 196 crates; the full example blog is 13.1 MB from 249. Turning a feature off never changes your schema: the admin log and task tables are always part of it.
