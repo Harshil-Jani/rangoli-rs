@@ -526,7 +526,10 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
             _ => vec![format!("ALTER TABLE {} DROP COLUMN {}", q(table), q(column))],
         },
         Op::AlterColumn { table, column } => {
-            let old = state[table].columns.iter().find(|c| c.name == column.name).unwrap();
+            let old = state
+                .get(table)
+                .and_then(|t| t.columns.iter().find(|c| c.name == column.name))
+                .ok_or_else(|| Error::Migration(format!("column `{table}.{}` does not exist", column.name)))?;
             if d != Dialect::Sqlite && (old.unique != column.unique || old.fk != column.fk || old.cascade != column.cascade) {
                 return Err(Error::Migration(format!(
                     "changing unique/foreign key on `{table}.{}` is not automated yet; add an `sql` operation",

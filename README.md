@@ -14,7 +14,7 @@
 
 ```toml
 [dependencies]
-rangoli = { git = "https://github.com/Harshil-Jani/rangoli-rs" }
+rangoli = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -277,6 +277,16 @@ This is the roadmap, in rough order. Nothing here is implemented yet:
 10. **WebAssembly**, explored later: the same validation rules running in the browser and on the server, and sandboxed WASM plugins
 
 Known limits today: login lockouts are per process, the admin's foreign-key select loads at most 1000 rows, and changing `unique`/`fk` on an existing column needs an `sql` operation on Postgres and MySQL.
+
+## Reliability
+
+The framework must never be the reason a backend goes down. What that means in practice, and what checks it:
+
+- **A panic in your handler costs one 500**, logged, and the server keeps serving (caught at the outermost layer).
+- **Hostile input never produces a server error.** [`tests/robustness.rs`](rangoli/tests/robustness.rs) is a deterministic fuzzer: SQL-injection strings, `%` and `_`, null bytes, `../`, `<script>`, emoji and right-to-left text, 10,000-character values, impossible dates, numbers too big for any column, and random JSON of every shape, thrown at the admin's lists, forms, bulk actions and paths, the JSON API, and login, plus 200 concurrent reads and writes. Any 5xx fails the build. It runs on SQLite, Postgres and MySQL on every push, and for 3,000 rounds (about 20,000 requests) in its own job.
+- **Database outages are outages, not crashes.** Requests that need the database fail within `RANGOLI_DB_TIMEOUT` (5 s) with `503` and `Retry-After`; everything else keeps working; when the database comes back, so does the app, without a restart. [`scripts/outage_check.sh`](scripts/outage_check.sh) proves it against real Postgres in CI: the database hangs (`docker pause`) and restarts under a running app.
+- **No request waits forever:** `RANGOLI_REQUEST_TIMEOUT` (30 s) answers with `503`. Bodies over 2 MB are refused with `413`.
+- **No lock can poison itself:** the login lockout and the task registry recover from a panic elsewhere instead of failing every later request.
 
 ## Performance
 

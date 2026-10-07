@@ -312,7 +312,9 @@ fn display(v: &Value, f: &FieldMeta) -> String {
         Value::Int(i) if f.ty == FieldType::DateTime => DateTime::from_unix(*i).human(),
         Value::Int(i) => i.to_string(),
         Value::Float(x) => x.to_string(),
-        Value::Text(s) if f.choices.is_some() => f.choices.unwrap().iter().find(|(v, _)| v == s).map_or(s.clone(), |(_, l)| l.to_string()),
+        Value::Text(s) if f.choices.is_some() => {
+            f.choices.into_iter().flatten().find(|(v, _)| v == s).map_or(s.clone(), |(_, l)| l.to_string())
+        }
         Value::Text(s) if matches!(f.ty, FieldType::Text | FieldType::Json) && s.chars().count() > 80 => {
             s.chars().take(80).chain("…".chars()).collect()
         }
@@ -457,7 +459,7 @@ async fn password_submit(State(site): S, user: CurrentUser, uri: Uri, Form(f): F
         return Ok((StatusCode::UNPROCESSABLE_ENTITY, page).into_response());
     }
     let mut changed = u.clone();
-    changed.password = auth::hash_password(new1).await;
+    changed.password = auth::hash_password(new1).await.map_err(fail)?;
     changed.save().await.map_err(fail)?;
     render(&site, "password_change.html", context! { title => "Password change successful", done => true, ..chrome(&site, u, None) })
 }
@@ -698,7 +700,7 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
             (FieldType::Bool, _) => [("", "All"), ("1", "Yes"), ("0", "No")].iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
             (FieldType::DateTime, _) => DATE_RANGES.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
             (FieldType::Varchar(_), _) if f.choices.is_some() => std::iter::once((String::new(), "All".to_string()))
-                .chain(f.choices.unwrap().iter().map(|(v, l)| (v.to_string(), l.to_string())))
+                .chain(f.choices.into_iter().flatten().map(|(v, l)| (v.to_string(), l.to_string())))
                 .collect(),
             (_, Some(target)) => std::iter::once((String::new(), "All".to_string()))
                 .chain(label_rows(&site, target, None).await?.into_iter().map(|(id, l)| (id.to_string(), l)))
@@ -983,7 +985,9 @@ pub(crate) async fn validate(
                 FieldType::Varchar(n) if raw.chars().count() > n as usize => {
                     Err(format!("Ensure this value has at most {n} characters (it has {}).", raw.chars().count()))
                 }
-                FieldType::Text | FieldType::Varchar(_) if f.password => Ok(Value::Text(auth::hash_password(raw).await)),
+                FieldType::Text | FieldType::Varchar(_) if f.password => {
+                    auth::hash_password(raw).await.map(Value::Text).map_err(|e| e.to_string())
+                }
                 _ => Ok(Value::Text(raw.to_string())),
             }
         };

@@ -100,7 +100,7 @@ fn handler<T: Task>(payload: String) -> BoxFuture {
 
 /// Make `T` runnable by workers in this process. `App::task::<T>()` calls this.
 pub fn register<T: Task>() {
-    REGISTRY.write().unwrap().insert(T::NAME, handler::<T>);
+    REGISTRY.write().unwrap_or_else(std::sync::PoisonError::into_inner).insert(T::NAME, handler::<T>);
 }
 
 /// Queue a run by name, for code that doesn't have the task type at hand.
@@ -180,7 +180,7 @@ async fn claim(now: DateTime) -> Result<Option<TaskRecord>> {
 
 /// Run a claimed record and store the outcome. Panics are caught by running on a separate task.
 async fn finish(mut record: TaskRecord, now: DateTime) -> Result<()> {
-    let handler = REGISTRY.read().unwrap().get(record.name.as_str()).copied();
+    let handler = REGISTRY.read().unwrap_or_else(std::sync::PoisonError::into_inner).get(record.name.as_str()).copied();
     let outcome = match handler {
         None => Err(format!("no task registered named `{}` in this process", record.name)),
         Some(run) => match tokio::spawn(run(record.payload.clone())).await {

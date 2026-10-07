@@ -11,7 +11,7 @@ pub struct DateTime(i64);
 
 impl DateTime {
     pub fn now() -> Self {
-        DateTime(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64)
+        DateTime(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64))
     }
 
     pub const fn from_unix(secs: i64) -> Self {

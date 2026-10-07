@@ -361,6 +361,8 @@ pub async fn connect(url: &str) -> Result<&'static Db> {
     }
     let pool = AnyPoolOptions::new()
         .max_connections(10)
+        // Fail fast during an outage instead of queueing requests for sqlx's default 30s.
+        .acquire_timeout(std::time::Duration::from_secs(crate::settings().db_timeout))
         .after_connect(move |conn, _| {
             Box::pin(async move {
                 // SQLite ships with foreign key enforcement off; turn it on like Django does.
@@ -773,7 +775,7 @@ impl Query {
         let (mut p, mut sql) = (vec![], format!("SELECT COUNT(*) AS n FROM {}", d.quote(self.table)));
         self.push_where(d, &mut sql, &mut p);
         let rows = fetch_all(&sql, &p).await?;
-        i64::from_value(read(&rows[0], "n", FieldType::Int)?)
+        i64::from_value(read(rows.first().ok_or_else(|| Error::Decode("COUNT returned no row".into()))?, "n", FieldType::Int)?)
     }
 
     pub async fn delete(&self) -> Result<u64> {
@@ -820,7 +822,7 @@ pub(crate) async fn insert_row(table: &str, cols: &[(&str, Value, FieldType)]) -
     }
     sql.push_str(&format!(" RETURNING {}", d.quote("id")));
     let rows = fetch_all(&sql, &params).await?;
-    i64::from_value(read(&rows[0], "id", FieldType::Int)?)
+    i64::from_value(read(rows.first().ok_or_else(|| Error::Decode("INSERT returned no id".into()))?, "id", FieldType::Int)?)
 }
 
 pub(crate) fn by_id(id: i64) -> Node {

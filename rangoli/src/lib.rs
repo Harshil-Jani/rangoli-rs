@@ -114,6 +114,11 @@ impl Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
+        // The database being unreachable is an outage, not a bug: say 503 and when to retry.
+        if let Error::Db(sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Io(_)) = self {
+            eprintln!("rangoli: database unavailable: {self}");
+            return (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "5")], "Service Unavailable").into_response();
+        }
         let status = match self {
             Error::NotFound => StatusCode::NOT_FOUND,
             Error::Locked => StatusCode::TOO_MANY_REQUESTS,
@@ -144,6 +149,10 @@ pub struct Settings {
     pub migrations: PathBuf,
     /// `RANGOLI_TEMPLATES`, default `templates`.
     pub templates: PathBuf,
+    /// `RANGOLI_REQUEST_TIMEOUT` seconds before a request is answered with 503 (default 30).
+    pub request_timeout: u64,
+    /// `RANGOLI_DB_TIMEOUT` seconds to wait for a database connection before failing (default 5).
+    pub db_timeout: u64,
     /// `RANGOLI_WORKERS`: task loops `runserver` runs in-process (default 1, 0 turns them off);
     /// also the concurrency of the `worker` command.
     pub workers: usize,
@@ -161,6 +170,8 @@ impl Settings {
             migrations: var("RANGOLI_MIGRATIONS").unwrap_or_else(|| "migrations".into()).into(),
             templates: var("RANGOLI_TEMPLATES").unwrap_or_else(|| "templates".into()).into(),
             workers: var("RANGOLI_WORKERS").and_then(|v| v.parse().ok()).unwrap_or(1),
+            request_timeout: var("RANGOLI_REQUEST_TIMEOUT").and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(30),
+            db_timeout: var("RANGOLI_DB_TIMEOUT").and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(5),
         }
     }
 }
@@ -322,6 +333,12 @@ impl App {
             .merge(api::router(self.api.clone()))
             .layer(from_fn(auth::session_middleware))
             .layer(from_fn(security_middleware))
+            .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+                StatusCode::SERVICE_UNAVAILABLE,
+                std::time::Duration::from_secs(settings().request_timeout),
+            ))
+            // Outermost: a panic in any handler or middleware becomes one 500, never a dead server.
+            .layer(tower_http::catch_panic::CatchPanicLayer::custom(panic_response))
     }
 
     /// The `manage.py` replacement: dispatches on command-line arguments.
@@ -411,6 +428,12 @@ impl App {
         }
         Ok(())
     }
+}
+
+fn panic_response(panic: Box<dyn std::any::Any + Send + 'static>) -> Response {
+    let msg = panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_default();
+    eprintln!("rangoli: a handler panicked: {msg}");
+    (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
 }
 
 fn prompt(label: &str) -> Result<String> {

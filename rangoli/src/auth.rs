@@ -45,26 +45,27 @@ const MAX_FAILURES: u32 = 5;
 const LOCKOUT_SECS: i64 = 15 * 60;
 
 pub(crate) fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
+    // A clock set before 1970 reads as 0 rather than panicking on every request.
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
-pub(crate) fn random_hex(bytes: usize) -> String {
+pub(crate) fn random_hex(bytes: usize) -> Result<String> {
     let mut buf = vec![0u8; bytes];
-    getrandom::fill(&mut buf).expect("OS random number generator unavailable");
-    buf.iter().map(|b| format!("{b:02x}")).collect()
+    getrandom::fill(&mut buf).map_err(|e| Error::Config(format!("OS random number generator unavailable: {e}")))?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Argon2id hash, computed off the async runtime.
-pub async fn hash_password(raw: &str) -> String {
+pub async fn hash_password(raw: &str) -> Result<String> {
     let raw = raw.to_owned();
     tokio::task::spawn_blocking(move || {
         let mut salt = [0u8; 16];
-        getrandom::fill(&mut salt).expect("OS random number generator unavailable");
-        let salt = SaltString::encode_b64(&salt).unwrap();
-        Argon2::default().hash_password(raw.as_bytes(), &salt).unwrap().to_string()
+        getrandom::fill(&mut salt).map_err(|e| Error::Config(format!("OS random number generator unavailable: {e}")))?;
+        let salt = SaltString::encode_b64(&salt).map_err(|e| Error::Config(e.to_string()))?;
+        Argon2::default().hash_password(raw.as_bytes(), &salt).map(|h| h.to_string()).map_err(|e| Error::Config(e.to_string()))
     })
     .await
-    .unwrap()
+    .map_err(|e| Error::Config(format!("password hashing failed: {e}")))?
 }
 
 pub async fn verify_password(raw: &str, hash: &str) -> bool {
@@ -73,7 +74,12 @@ pub async fn verify_password(raw: &str, hash: &str) -> bool {
         PasswordHash::new(&hash).is_ok_and(|h| Argon2::default().verify_password(raw.as_bytes(), &h).is_ok())
     })
     .await
-    .unwrap()
+    .unwrap_or(false)
+}
+
+/// A poisoned lock (a panic elsewhere while it was held) must not lock everyone out forever.
+fn failures() -> std::sync::MutexGuard<'static, HashMap<String, (u32, i64)>> {
+    FAILURES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 // ponytail: per-process lockout map; move to the database or Redis when running several instances.
@@ -82,7 +88,7 @@ static FAILURES: LazyLock<Mutex<HashMap<String, (u32, i64)>>> = LazyLock::new(De
 /// Check credentials. Locks a username for 15 minutes after 5 failures
 /// (Django has no built-in brute-force protection).
 pub async fn authenticate(username: &str, password: &str) -> Result<Option<User>> {
-    if let Some((n, until)) = FAILURES.lock().unwrap().get(username) {
+    if let Some((n, until)) = failures().get(username) {
         if *n >= MAX_FAILURES && *until > now() {
             return Err(Error::Locked);
         }
@@ -90,9 +96,9 @@ pub async fn authenticate(username: &str, password: &str) -> Result<Option<User>
     let user = User::objects().filter(User::USERNAME.eq(username)).first().await?;
     // Hash even for unknown users so response time doesn't reveal which usernames exist.
     static DUMMY: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
-    let dummy = DUMMY.get_or_init(|| hash_password("rangoli-timing-pad")).await;
+    let dummy = DUMMY.get_or_init(|| async { hash_password("rangoli-timing-pad").await.unwrap_or_default() }).await;
     let ok = verify_password(password, user.as_ref().map_or(dummy, |u| &u.password)).await;
-    let mut failures = FAILURES.lock().unwrap();
+    let mut failures = failures();
     match user {
         Some(u) if ok && u.is_active => {
             failures.remove(username);
@@ -111,7 +117,7 @@ pub async fn create_user(username: &str, password: &str, staff: bool) -> Result<
     let mut u = User {
         id: None,
         username: username.into(),
-        password: hash_password(password).await,
+        password: hash_password(password).await?,
         is_active: true,
         is_staff: staff,
         is_superuser: staff,
@@ -129,7 +135,7 @@ fn cookie(value: &str, max_age: i64) -> String {
 /// A new key every login prevents session fixation.
 pub async fn login(user: &User) -> Result<String> {
     Session::objects().filter(Session::EXPIRES_AT.lt(now())).delete().await?;
-    let mut s = Session { id: None, key: random_hex(32), user_id: user.id, expires_at: now() + SESSION_SECS };
+    let mut s = Session { id: None, key: random_hex(32)?, user_id: user.id, expires_at: now() + SESSION_SECS };
     s.save().await?;
     Ok(cookie(&s.key, SESSION_SECS))
 }

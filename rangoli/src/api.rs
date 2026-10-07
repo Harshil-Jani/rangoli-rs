@@ -268,13 +268,16 @@ async fn columns(
         let value = match obj.get(f.name) {
             Some(j) => from_json(f, j),
             None if partial => continue,
-            None if f.default.is_some() => Ok(f.default.unwrap().value()),
+            None if f.default.is_some() => Ok(f.default.map_or(Value::Null, |d| d.value())),
             None if f.null => Ok(Value::Null),
             None if f.ty == FieldType::Bool => Ok(Value::Bool(false)),
             None => Err("This field is required.".into()),
         };
         match value {
-            Ok(Value::Text(raw)) if f.password => cols.push((f.name, Value::Text(auth::hash_password(&raw).await), f.ty)),
+            Ok(Value::Text(raw)) if f.password => match auth::hash_password(&raw).await {
+                Ok(hash) => cols.push((f.name, Value::Text(hash), f.ty)),
+                Err(e) => return Err(fail(e)),
+            },
             Ok(v) => cols.push((f.name, v, f.ty)),
             Err(e) => {
                 errors.insert(f.name.into(), json!([e]));

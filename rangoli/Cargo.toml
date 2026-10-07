@@ -22,11 +22,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_urlencoded = "0.7"
 rpassword = "7"
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.6", features = ["fs", "catch-panic", "timeout"] }
 # The SQLite sqlx already links; used only to switch off its global memory statistics.
 libsqlite3-sys = "0.30"
 
 [dev-dependencies]
+serde_urlencoded = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tower = { version = "0.5", features = ["util"] }
