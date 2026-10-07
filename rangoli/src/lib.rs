@@ -18,6 +18,7 @@ pub mod auth;
 pub mod datetime;
 pub mod migrate;
 pub mod orm;
+pub mod realtime;
 pub mod tasks;
 pub mod web;
 

@@ -207,6 +207,24 @@ SendWelcome { user_id: 7 }.enqueue().await?;          // or .enqueue_in(Duration
 
 `runserver` runs `RANGOLI_WORKERS` task loops in-process (default 1, `0` turns them off); `cargo run -- worker` runs a dedicated worker. Runs are claimed with a compare-and-set update, so two workers never run the same one. Failures retry with exponential backoff (10s, 20s, 40s, up to an hour), panics are caught and recorded, and runs left `running` by a crashed worker are retried after a ten-minute lease. Every run is visible in the admin under **Task records**, filterable by status.
 
+## Real-time: WebSockets and Server-Sent Events
+
+Django needs Channels, a Redis channel layer and an ASGI server (daphne or uvicorn) for this, and moving a sync codebase onto them is a rewrite of its views. Rangoli is async throughout, so a socket is just another handler:
+
+```rust
+use rangoli::realtime;
+
+async fn chat(ws: WebSocketUpgrade, headers: HeaderMap, Path(room): Path<String>) -> Response {
+    // Each message a client sends goes to everyone in the room; return None to drop it.
+    realtime::serve(ws, &headers, format!("chat:{room}"), |text| async move { Some(text) })
+}
+
+realtime::publish("chat:lobby", "deploy finished");      // from any view or background task
+async fn feed() -> impl IntoResponse { realtime::events("dashboard") }  // the same groups as SSE
+```
+
+A WebSocket handshake is a `GET`, so ordinary CSRF checks don't cover it; `serve` refuses browsers whose `Origin` isn't your host (cross-site WebSocket hijacking). Slow clients skip ahead instead of stalling a room, idle groups are cleaned up, and connections are pinged every 30 seconds. Groups live in one process today; spreading them over several instances (Postgres `LISTEN/NOTIFY`) is on the roadmap.
+
 ## JSON API
 
 What Django needs Django REST framework and drf-spectacular for is one line:
@@ -272,7 +290,7 @@ This is the roadmap, in rough order. Nothing here is implemented yet:
 5. **Form rendering helpers** (widgets from model metadata); template filters for dates and choices
 6. **API tokens** for non-browser API clients, and per-object API permissions
 7. **Scheduled (cron-style) tasks** on top of the task queue
-8. **WebSockets** (what Channels does)
+8. **Real-time across instances** (Postgres `LISTEN/NOTIFY` for `realtime` groups), model signals
 9. Password reset, groups, email, caching, i18n, embedding migrations in the binary, multi-database routing
 10. **WebAssembly**, explored later: the same validation rules running in the browser and on the server, and sandboxed WASM plugins
 
