@@ -21,7 +21,7 @@ ROOT = HERE.parent
 RESULTS = HERE / "results"
 CORES = os.cpu_count()
 DURATION, WARMUP, CONNECTIONS = "15s", "3s", 64
-RANGOLI, DJANGO, BOLT = "http://127.0.0.1:8100", "http://127.0.0.1:8200", "http://127.0.0.1:8300"
+RANGOLI, DJANGO, BOLT, ASGI = "http://127.0.0.1:8100", "http://127.0.0.1:8200", "http://127.0.0.1:8300", "http://127.0.0.1:8400"
 
 
 def wait_until_up(url, started):
@@ -58,6 +58,17 @@ def startup_median(start, runs=5):
         stop(proc)
         times.append(t)
     return sorted(times)[len(times) // 2]
+
+
+def start_django_asgi():
+    """The same Django app and sync views under ASGI (gunicorn + uvicorn workers): the
+    "just switch to uvicorn" path, where every sync view runs through sync_to_async."""
+    env = {**os.environ, "DJANGO_DB": str(RESULTS / "django.sqlite3")}
+    t = time.perf_counter()
+    proc = subprocess.Popen([str(HERE / ".venv/bin/gunicorn"), "site_.asgi", "-k", "uvicorn_worker.UvicornWorker", "-w", str(CORES),
+                             "-b", "127.0.0.1:8400", "--log-level", "error"],
+                            cwd=HERE / "django_blog", env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return proc, wait_until_up(ASGI + "/posts.json", t)
 
 
 def start_bolt():
@@ -103,13 +114,13 @@ def login_rangoli():
     return "; ".join(f"{c.name}={c.value}" for c in jar)
 
 
-def login_django():
+def login_django(base=DJANGO):
     jar = CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-    page = opener.open(DJANGO + "/admin/login/").read().decode()
+    page = opener.open(base + "/admin/login/").read().decode()
     token = re.search(r'name="csrfmiddlewaretoken" value="([^"]+)"', page).group(1)
     data = urllib.parse.urlencode({"username": "admin", "password": "bench-pass-123", "csrfmiddlewaretoken": token, "next": "/admin/"}).encode()
-    opener.open(urllib.request.Request(DJANGO + "/admin/login/", data=data, headers={"Referer": DJANGO + "/admin/login/"}))
+    opener.open(urllib.request.Request(base + "/admin/login/", data=data, headers={"Referer": base + "/admin/login/"}))
     return "; ".join(f"{c.name}={c.value}" for c in jar)
 
 
@@ -138,7 +149,7 @@ def check(url, cookie=None, expect=b""):
 
 
 def main():
-    # (rangoli path, django path, django-bolt path or None, needs login, expected text)
+    # (rangoli path, django path, django-bolt path or None, needs login, expected text); Django ASGI uses the Django path
     scenarios = {
         "hello": ("/hello", "/hello", "/hello", False, b"Hello"),
         "posts_json": ("/posts.json", "/posts.json", "/posts-async.json", False, b"title"),  # bolt: its faster async handler
@@ -148,11 +159,13 @@ def main():
     }
     results = {"machine": {"cpu": subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip(), "cores": CORES},
                "settings": {"duration": DURATION, "connections": CONNECTIONS, "django_workers": CORES, "bolt_processes": CORES, "startup": "median of 5 launches"}, "frameworks": {}}
-    for name, start, base, idx in [("rangoli", start_rangoli, RANGOLI, 0), ("django", start_django, DJANGO, 1), ("django_bolt", start_bolt, BOLT, 2)]:
+    contenders = [("rangoli", start_rangoli, RANGOLI, 0), ("django", start_django, DJANGO, 1),
+                  ("django_asgi", start_django_asgi, ASGI, 1), ("django_bolt", start_bolt, BOLT, 2)]
+    for name, start, base, idx in contenders:
         startup = startup_median(start)
         proc, _ = start()
         try:
-            cookie = {"rangoli": login_rangoli, "django": login_django}.get(name, lambda: None)()
+            cookie = {"rangoli": login_rangoli, "django": login_django, "django_asgi": lambda: login_django(ASGI)}.get(name, lambda: None)()
             fw = {"startup_ms": round(startup * 1000), "idle_rss_mb": rss_mb(proc.pid), "scenarios": {}}
             for key, paths in scenarios.items():
                 path, needs_login, expect = paths[idx], paths[3], paths[4]

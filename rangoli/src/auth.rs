@@ -88,6 +88,10 @@ static FAILURES: LazyLock<Mutex<HashMap<String, (u32, i64)>>> = LazyLock::new(De
 /// Check credentials. Locks a username for 15 minutes after 5 failures
 /// (Django has no built-in brute-force protection).
 pub async fn authenticate(username: &str, password: &str) -> Result<Option<User>> {
+    // No stored username contains NUL (and Postgres can't even compare one): a plain failure.
+    if username.contains('\0') {
+        return Ok(None);
+    }
     if let Some((n, until)) = failures().get(username) {
         if *n >= MAX_FAILURES && *until > now() {
             return Err(Error::Locked);

@@ -559,7 +559,8 @@ impl Node {
             Node::IsNull(c, negate) => sql.push_str(&format!("{} IS {}NULL", d.quote(c), if *negate { "NOT " } else { "" })),
             Node::Like(c, pat) => {
                 sql.push_str(&format!("LOWER({}) LIKE ", d.quote(c)));
-                push(sql, Value::Text(pat.to_lowercase()), FieldType::Text);
+                // Postgres text can't hold NUL, so a NUL in a search term can never match: drop it.
+                push(sql, Value::Text(pat.replace('\0', "").to_lowercase()), FieldType::Text);
                 sql.push_str(" ESCAPE '!'");
             }
             Node::And(ns) | Node::Or(ns) if ns.is_empty() => sql.push_str(if matches!(self, Node::And(_)) { "1=1" } else { "1=0" }),

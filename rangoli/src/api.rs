@@ -167,6 +167,7 @@ fn to_json(meta: &ModelMeta, id: i64, vals: &[Value]) -> JsonValue {
 /// Parse one JSON value for a field, with the admin's validation rules.
 fn from_json(f: &FieldMeta, j: &JsonValue) -> Result<Value, String> {
     if f.ty == FieldType::Json {
+        // JSON escapes NUL as \u0000 when serialized, so any document is storable.
         // Any JSON document is valid content; `null` means SQL NULL only on nullable fields.
         return Ok(if j.is_null() && f.null { Value::Null } else { Value::Text(j.to_string()) });
     }
@@ -184,6 +185,7 @@ fn from_json(f: &FieldMeta, j: &JsonValue) -> Result<Value, String> {
             .ok_or_else(|| "Datetime has wrong format. Use ISO 8601, e.g. 2026-10-07T02:15:00Z.".into()),
         FieldType::Varchar(n) => match j.as_str() {
             Some(s) if s.chars().count() > n as usize => Err(format!("Ensure this field has no more than {n} characters.")),
+            Some(s) if s.contains('\0') => Err("Null characters are not allowed.".into()),
             Some(s) if s.is_empty() && !f.null => Err("This field may not be blank.".into()),
             Some(s) if f.choices.is_some_and(|c| !c.iter().any(|(v, _)| *v == s)) => Err(format!("\"{s}\" is not a valid choice.")),
             Some(s) => Ok(Value::Text(s.into())),
@@ -191,6 +193,7 @@ fn from_json(f: &FieldMeta, j: &JsonValue) -> Result<Value, String> {
         },
         FieldType::Json => unreachable!("handled above"),
         FieldType::Text => match j.as_str() {
+            Some(s) if s.contains('\0') => Err("Null characters are not allowed.".into()),
             Some(s) if s.is_empty() && !f.null => Err("This field may not be blank.".into()),
             Some(s) => Ok(Value::Text(s.into())),
             None => Err("Not a valid string.".into()),

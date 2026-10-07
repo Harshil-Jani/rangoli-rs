@@ -435,6 +435,13 @@ async fn full_stack() {
     let (status, _, body) = send(form("/admin/blog_author/add", &cookie, "name=&email=x%40example.com")).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body.contains("Please correct the error below.") && body.contains("This field is required."));
+    let (status, _, body) = send(form("/admin/blog_author/add", &cookie, "name=Nul%00Byte&email=n%40example.com")).await;
+    assert!(
+        status == StatusCode::UNPROCESSABLE_ENTITY && body.contains("Null characters are not allowed."),
+        "NUL is refused (Postgres can't store it)"
+    );
+    let (status, _, _) = send(get("/admin/blog_author/?q=a%00b", &cookie)).await;
+    assert_eq!(status, StatusCode::OK, "a NUL in a search term is ignored, not a 500");
     let (status, _, body) = send(form("/admin/blog_author/add", &cookie, "name=Grace&email=ada%40example.com")).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body.contains("already exists"));
@@ -615,6 +622,10 @@ async fn full_stack() {
         StatusCode::BAD_REQUEST,
         "PUT needs every field"
     );
+    let (status, _, body) =
+        send(api("POST", "/api/blog_post/", &cookie, r#"{"title": "a\u0000b", "body": "b", "author_id": 1, "views": 0}"#)).await;
+    assert_eq!((status, json(&body)["title"][0].as_str()), (StatusCode::BAD_REQUEST, Some("Null characters are not allowed.")));
+    assert_eq!(send(get("/api/blog_post/?title=a%00b", "")).await.0, StatusCode::BAD_REQUEST, "NUL in an exact filter is a 400");
     let orphan = r#"{"title": "x", "body": "b", "author_id": 424242, "views": 0}"#;
     let (status, _, body) = send(api("POST", "/api/blog_post/", &cookie, orphan)).await;
     assert!(status == StatusCode::BAD_REQUEST && body.contains("non_field_errors"), "foreign key errors are 400s: {body}");

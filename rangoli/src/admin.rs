@@ -982,6 +982,8 @@ pub(crate) async fn validate(
                 FieldType::Float => {
                     raw.parse::<f64>().ok().filter(|x| x.is_finite()).map(Value::Float).ok_or("Enter a number.".to_string())
                 }
+                // Postgres rejects NUL in text; refuse it everywhere, like Django's validator.
+                FieldType::Varchar(_) | FieldType::Text if raw.contains('\0') => Err("Null characters are not allowed.".to_string()),
                 FieldType::Varchar(n) if raw.chars().count() > n as usize => {
                     Err(format!("Ensure this value has at most {n} characters (it has {}).", raw.chars().count()))
                 }

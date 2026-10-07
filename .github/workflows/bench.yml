@@ -18,7 +18,7 @@ jobs:
         working-directory: bench
         run: |
           uv venv --python 3.12 .venv
-          uv pip install --python .venv/bin/python "django==6.1.2" djangorestframework gunicorn "django-bolt==0.11.1"
+          uv pip install --python .venv/bin/python "django==6.1.2" djangorestframework gunicorn "django-bolt==0.11.1" uvicorn uvicorn-worker
       - name: oha
         run: cargo install oha --locked
       - name: Run
