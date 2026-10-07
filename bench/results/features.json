@@ -1,0 +1,12 @@
+{
+  "api_only": {
+    "features": "default-features = false, features = [\"postgres\"]",
+    "binary_mb": 7.1,
+    "crates": 196
+  },
+  "full": {
+    "features": "default (admin, web, realtime, postgres, mysql, sqlite)",
+    "binary_mb": 13.1,
+    "crates": 249
+  }
+}
