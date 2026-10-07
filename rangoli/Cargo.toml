@@ -12,20 +12,31 @@ rust-version.workspace = true
 
 [dependencies]
 rangoli-macros = { version = "0.1.0", path = "../rangoli-macros" }
-axum = { version = "0.8", features = ["ws"] }
+axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "postgres", "mysql", "sqlite"] }
-minijinja = { version = "2", features = ["loader"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "any"] }
+minijinja = { version = "2", features = ["loader"], optional = true }
 argon2 = "0.5"
 getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_urlencoded = "0.7"
 rpassword = "7"
-futures-util = { version = "0.3", default-features = false }
-tower-http = { version = "0.6", features = ["fs", "catch-panic", "timeout"] }
+futures-util = { version = "0.3", default-features = false, optional = true }
+tower-http = { version = "0.6", features = ["catch-panic", "timeout"] }
 # The SQLite sqlx already links; used only to switch off its global memory statistics.
-libsqlite3-sys = "0.30"
+libsqlite3-sys = { version = "0.30", optional = true }
+
+[features]
+# Everything on by default; an API-only Postgres service can use
+# `default-features = false, features = ["postgres"]` and compile none of the rest.
+default = ["admin", "web", "realtime", "postgres", "mysql", "sqlite"]
+admin = ["dep:minijinja"]
+web = ["dep:minijinja", "tower-http/fs"]
+realtime = ["axum/ws", "dep:futures-util"]
+postgres = ["sqlx/postgres"]
+mysql = ["sqlx/mysql"]
+sqlite = ["sqlx/sqlite", "dep:libsqlite3-sys"]
 
 [dev-dependencies]
 serde_urlencoded = "0.7"

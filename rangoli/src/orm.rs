@@ -312,9 +312,17 @@ pub enum Dialect {
 impl Dialect {
     pub fn from_url(url: &str) -> Result<Self> {
         match url.split(':').next().unwrap_or("") {
-            "postgres" | "postgresql" => Ok(Dialect::Postgres),
-            "mysql" | "mariadb" => Ok(Dialect::Mysql),
-            "sqlite" => Ok(Dialect::Sqlite),
+            "postgres" | "postgresql" if cfg!(feature = "postgres") => Ok(Dialect::Postgres),
+            "mysql" | "mariadb" if cfg!(feature = "mysql") => Ok(Dialect::Mysql),
+            "sqlite" if cfg!(feature = "sqlite") => Ok(Dialect::Sqlite),
+            scheme @ ("postgres" | "postgresql" | "mysql" | "mariadb" | "sqlite") => {
+                let feature = match scheme {
+                    "postgresql" => "postgres",
+                    "mariadb" => "mysql",
+                    s => s,
+                };
+                Err(Error::Config(format!("this build of rangoli has no `{feature}` support; enable the `{feature}` feature")))
+            }
             _ => Err(Error::Config(format!("unsupported database URL `{url}` (use postgres://, mysql:// or sqlite://)"))),
         }
     }
@@ -349,6 +357,7 @@ pub async fn connect(url: &str) -> Result<&'static Db> {
     }
     sqlx::any::install_default_drivers();
     let dialect = Dialect::from_url(url)?;
+    #[cfg(feature = "sqlite")]
     if dialect == Dialect::Sqlite {
         // SQLite's memory statistics take one process-wide mutex on every malloc, so pooled
         // connections in one process serialize on it (measured: throughput fell from 680 to
@@ -1150,6 +1159,7 @@ pub(crate) async fn set_links(through: &'static str, source: i64, ids: &[i64]) -
     Related::<(), ()> { through, source: Some(source), _p: PhantomData }.set_ids(ids.iter().copied()).await
 }
 
+#[cfg(feature = "admin")]
 pub(crate) async fn link_ids(through: &'static str, source: i64) -> Result<Vec<i64>> {
     Related::<(), ()> { through, source: Some(source), _p: PhantomData }.ids().await
 }

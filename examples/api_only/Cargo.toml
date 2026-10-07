@@ -1,0 +1,10 @@
+[package]
+name = "api_only"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+# Only what this service uses: the ORM, the JSON API and Postgres.
+[dependencies]
+rangoli = { path = "../../rangoli", default-features = false, features = ["postgres"] }
+tokio = { version = "1", features = ["full"] }

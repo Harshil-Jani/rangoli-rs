@@ -1,4 +1,4 @@
-//! The admin, modeled on Django's: generated from model metadata, server-rendered,
+//! The admin's pages, modeled on Django's: generated from model metadata, server-rendered,
 //! HTMX-enhanced. Works without JavaScript; with it, `hx-boost` turns navigation
 //! into partial swaps and search filters live.
 
@@ -15,143 +15,16 @@ use axum::routing::{get, post};
 use axum::Router;
 use minijinja::{context, Environment};
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
-const PAGE_SIZE: u64 = 100;
-
-/// One admin action, like Django's `LogEntry`. Powers "Recent actions" and History.
-#[derive(rangoli_macros::Model, Clone, Debug)]
-#[model(table = "rangoli_admin_log")]
-pub struct LogEntry {
-    pub id: Option<i64>,
-    /// Plain id, not a foreign key: history outlives deleted users.
-    pub user_id: i64,
-    #[field(max_length = 100)]
-    pub table_name: String,
-    pub object_id: i64,
-    #[field(max_length = 200)]
-    pub object_repr: String,
-    /// 1 added, 2 changed, 3 deleted.
-    pub action: i64,
-    #[field(text)]
-    pub message: String,
-    pub at: i64,
-}
+use super::{LogEntry, Options};
 
 const ADDITION: i64 = 1;
 const CHANGE: i64 = 2;
 const DELETION: i64 = 3;
+use crate::forms::validate;
 
-// ---------------------------------------------------------------- ModelAdmin
-
-/// A column of model `M` usable in `ModelAdmin` settings: `Post::TITLE`, `Post::ID`, ...
-pub trait Field<M> {
-    fn name(&self) -> &'static str;
-}
-
-impl<M, T> Field<M> for crate::orm::Col<M, T> {
-    fn name(&self) -> &'static str {
-        crate::orm::Col::name(*self)
-    }
-}
-
-/// Per-model admin settings, like Django's `ModelAdmin`. Columns are typed, so a
-/// misspelled field or one from another model does not compile.
-///
-/// ```ignore
-/// App::new().admin_with::<Post>(
-///     ModelAdmin::new()
-///         .list_display([&Post::TITLE, &Post::AUTHOR_ID, &Post::PUBLISHED])
-///         .search_fields([&Post::TITLE, &Post::BODY])
-///         .list_filter([&Post::PUBLISHED, &Post::AUTHOR_ID])
-///         .ordering(Post::ID.desc())
-///         .readonly_fields([&Post::RATING]),
-/// )
-/// ```
-pub struct ModelAdmin<M> {
-    pub(crate) opts: Options,
-    _m: PhantomData<fn() -> M>,
-}
-
-/// The settings `ModelAdmin` collects, with the model type erased.
-#[derive(Clone, Debug, Default)]
-pub struct Options {
-    list_display: Option<Vec<&'static str>>,
-    search_fields: Option<Vec<&'static str>>,
-    list_filter: Option<Vec<&'static str>>,
-    ordering: Option<(&'static str, bool)>,
-    readonly_fields: Vec<&'static str>,
-    list_per_page: Option<u64>,
-}
-
-impl<M: Model> Default for ModelAdmin<M> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<M: Model> ModelAdmin<M> {
-    pub fn new() -> Self {
-        ModelAdmin { opts: Options::default(), _m: PhantomData }
-    }
-
-    fn names<const N: usize>(cols: [&dyn Field<M>; N]) -> Vec<&'static str> {
-        cols.iter().map(|c| c.name()).collect()
-    }
-
-    /// Changelist columns, in order.
-    pub fn list_display<const N: usize>(mut self, cols: [&dyn Field<M>; N]) -> Self {
-        self.opts.list_display = Some(Self::names(cols));
-        self
-    }
-
-    /// Text columns searched by the search box.
-    pub fn search_fields<const N: usize>(mut self, cols: [&dyn Field<M>; N]) -> Self {
-        self.opts.search_fields = Some(Self::names(cols));
-        self
-    }
-
-    /// Sidebar filters: boolean, date and foreign key columns.
-    pub fn list_filter<const N: usize>(mut self, cols: [&dyn Field<M>; N]) -> Self {
-        self.opts.list_filter = Some(Self::names(cols));
-        self
-    }
-
-    /// Default changelist order, e.g. `Post::CREATED_AT.desc()`.
-    pub fn ordering(mut self, order: crate::orm::Order<M>) -> Self {
-        self.opts.ordering = Some((order.0, order.1));
-        self
-    }
-
-    /// Shown on the change form but not editable.
-    pub fn readonly_fields<const N: usize>(mut self, cols: [&dyn Field<M>; N]) -> Self {
-        self.opts.readonly_fields = Self::names(cols);
-        self
-    }
-
-    pub fn list_per_page(mut self, n: u64) -> Self {
-        self.opts.list_per_page = Some(n.max(1));
-        self
-    }
-
-    /// Reject settings that can't work, at startup (Django's admin checks).
-    pub(crate) fn check(&self) -> std::result::Result<(), String> {
-        let meta = M::meta();
-        let field = |n: &str| meta.field(n);
-        for n in self.opts.search_fields.iter().flatten() {
-            if !field(n).is_some_and(|f| matches!(f.ty, FieldType::Varchar(_) | FieldType::Text) && !f.password) {
-                return Err(format!("{}: search_fields can only use text columns, not `{n}`", meta.name));
-            }
-        }
-        for n in self.opts.list_filter.iter().flatten() {
-            if !field(n).is_some_and(|f| matches!(f.ty, FieldType::Bool | FieldType::DateTime) || f.fk.is_some() || f.choices.is_some()) {
-                return Err(format!("{}: list_filter supports boolean, date, choice and foreign key columns, not `{n}`", meta.name));
-            }
-        }
-        Ok(())
-    }
-}
+const PAGE_SIZE: u64 = 100;
 
 struct Site {
     admin: Vec<&'static ModelMeta>,
@@ -170,15 +43,15 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
     let admin: Vec<_> = admin.into_iter().map(|(m, _)| m).collect();
     let mut env = Environment::new();
     for (name, src) in [
-        ("base.html", include_str!("admin/templates/base.html")),
-        ("login.html", include_str!("admin/templates/login.html")),
-        ("logged_out.html", include_str!("admin/templates/logged_out.html")),
-        ("index.html", include_str!("admin/templates/index.html")),
-        ("list.html", include_str!("admin/templates/list.html")),
-        ("form.html", include_str!("admin/templates/form.html")),
-        ("delete.html", include_str!("admin/templates/delete.html")),
-        ("history.html", include_str!("admin/templates/history.html")),
-        ("password_change.html", include_str!("admin/templates/password_change.html")),
+        ("base.html", include_str!("templates/base.html")),
+        ("login.html", include_str!("templates/login.html")),
+        ("logged_out.html", include_str!("templates/logged_out.html")),
+        ("index.html", include_str!("templates/index.html")),
+        ("list.html", include_str!("templates/list.html")),
+        ("form.html", include_str!("templates/form.html")),
+        ("delete.html", include_str!("templates/delete.html")),
+        ("history.html", include_str!("templates/history.html")),
+        ("password_change.html", include_str!("templates/password_change.html")),
     ] {
         env.add_template(name, src).expect("admin template");
     }
@@ -466,15 +339,15 @@ async fn password_submit(State(site): S, user: CurrentUser, uri: Uri, Form(f): F
 
 /// Admin assets, compiled into the binary.
 const ASSETS: &[(&str, &[u8], &str)] = &[
-    ("admin.css", include_bytes!("admin/static/admin.css"), "text/css; charset=utf-8"),
-    ("admin.js", include_bytes!("admin/static/admin.js"), "text/javascript; charset=utf-8"),
-    ("htmx.min.js", include_bytes!("admin/static/htmx.min.js"), "text/javascript; charset=utf-8"),
-    ("icon-yes.svg", include_bytes!("admin/static/icon-yes.svg"), "image/svg+xml"),
-    ("icon-no.svg", include_bytes!("admin/static/icon-no.svg"), "image/svg+xml"),
-    ("icon-addlink.svg", include_bytes!("admin/static/icon-addlink.svg"), "image/svg+xml"),
-    ("icon-changelink.svg", include_bytes!("admin/static/icon-changelink.svg"), "image/svg+xml"),
-    ("icon-deletelink.svg", include_bytes!("admin/static/icon-deletelink.svg"), "image/svg+xml"),
-    ("search.svg", include_bytes!("admin/static/search.svg"), "image/svg+xml"),
+    ("admin.css", include_bytes!("static/admin.css"), "text/css; charset=utf-8"),
+    ("admin.js", include_bytes!("static/admin.js"), "text/javascript; charset=utf-8"),
+    ("htmx.min.js", include_bytes!("static/htmx.min.js"), "text/javascript; charset=utf-8"),
+    ("icon-yes.svg", include_bytes!("static/icon-yes.svg"), "image/svg+xml"),
+    ("icon-no.svg", include_bytes!("static/icon-no.svg"), "image/svg+xml"),
+    ("icon-addlink.svg", include_bytes!("static/icon-addlink.svg"), "image/svg+xml"),
+    ("icon-changelink.svg", include_bytes!("static/icon-changelink.svg"), "image/svg+xml"),
+    ("icon-deletelink.svg", include_bytes!("static/icon-deletelink.svg"), "image/svg+xml"),
+    ("search.svg", include_bytes!("static/search.svg"), "image/svg+xml"),
 ];
 
 /// Content hash of every asset. Pages link `?v=<hash>`, so a new build can never be
@@ -935,78 +808,6 @@ async fn form_fields(
     Ok(out)
 }
 
-/// Validate a submitted form against the model; password fields come back hashed.
-pub(crate) async fn validate(
-    meta: &'static ModelMeta,
-    form: &HashMap<String, String>,
-    is_add: bool,
-    readonly: &[&str],
-) -> Result<Vec<(&'static str, Value, FieldType)>, HashMap<String, String>> {
-    let (mut cols, mut errors) = (vec![], HashMap::new());
-    for f in meta.fields {
-        if f.is_auto() {
-            if f.auto_now || is_add {
-                cols.push((f.name, Value::Int(DateTime::now().unix()), f.ty));
-            }
-            continue;
-        }
-        // Read-only fields ignore whatever was posted; new rows get NULL or the type's zero value.
-        if readonly.contains(&f.name) {
-            if is_add {
-                cols.push((f.name, if f.null { Value::Null } else { crate::migrate::zero(f.ty) }, f.ty));
-            }
-            continue;
-        }
-        let raw = form.get(f.name).map(|s| s.trim()).unwrap_or("");
-        let v = if f.ty == FieldType::Bool {
-            Ok(Value::Bool(!raw.is_empty()))
-        } else if raw.is_empty() {
-            if f.password && !is_add {
-                continue; // keep the existing hash
-            }
-            if f.null {
-                Ok(Value::Null)
-            } else {
-                Err("This field is required.".to_string())
-            }
-        } else {
-            match f.ty {
-                FieldType::Int => raw.parse().map(Value::Int).map_err(|_| "Enter a whole number.".to_string()),
-                FieldType::DateTime => DateTime::parse(raw).map(Value::from).ok_or("Enter a valid date and time.".to_string()),
-                FieldType::Json => serde_json::from_str::<serde_json::Value>(raw)
-                    .map(|j| Value::Text(j.to_string()))
-                    .map_err(|e| format!("Enter valid JSON ({e}).")),
-                FieldType::Varchar(_) if f.choices.is_some_and(|c| !c.iter().any(|(v, _)| *v == raw)) => {
-                    Err(format!("Select a valid choice. {raw} is not one of the available choices."))
-                }
-                FieldType::Float => {
-                    raw.parse::<f64>().ok().filter(|x| x.is_finite()).map(Value::Float).ok_or("Enter a number.".to_string())
-                }
-                // Postgres rejects NUL in text; refuse it everywhere, like Django's validator.
-                FieldType::Varchar(_) | FieldType::Text if raw.contains('\0') => Err("Null characters are not allowed.".to_string()),
-                FieldType::Varchar(n) if raw.chars().count() > n as usize => {
-                    Err(format!("Ensure this value has at most {n} characters (it has {}).", raw.chars().count()))
-                }
-                FieldType::Text | FieldType::Varchar(_) if f.password => {
-                    auth::hash_password(raw).await.map(Value::Text).map_err(|e| e.to_string())
-                }
-                _ => Ok(Value::Text(raw.to_string())),
-            }
-        };
-        match v {
-            Ok(v) => cols.push((f.name, v, f.ty)),
-            Err(e) => {
-                errors.insert(f.name.to_string(), e);
-            }
-        }
-    }
-    if errors.is_empty() {
-        Ok(cols)
-    } else {
-        Err(errors)
-    }
-}
-
 fn db_error_message(e: &Error) -> Option<&'static str> {
     if e.is_unique_violation() {
         Some("A record with one of these unique values already exists.")
@@ -1349,15 +1150,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn admin_checks_reject_unusable_settings() {
-        assert!(ModelAdmin::<User>::new().search_fields([&User::USERNAME]).list_filter([&User::IS_STAFF]).check().is_ok());
-        let err = ModelAdmin::<User>::new().search_fields([&User::PASSWORD]).check().unwrap_err();
-        assert!(err.contains("search_fields"), "{err}");
-        let err = ModelAdmin::<User>::new().list_filter([&User::USERNAME]).check().unwrap_err();
-        assert!(err.contains("list_filter"), "{err}");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! End to end: migrations, ORM, schema evolution and the admin over HTTP.
 //! Runs against SQLite by default; CI also points `RANGOLI_TEST_DATABASE_URL`
 //! at Postgres and MySQL. One test function because the pool is process-global.
+#![cfg(all(feature = "admin", feature = "web", feature = "sqlite"))]
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};

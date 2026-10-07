@@ -5,6 +5,7 @@
 //! with a server error. Then: a panicking handler must cost one 500, not the server; a
 //! slow request must time out; a closed database must give 503s while everything that
 //! doesn't need it keeps working. Set ROBUSTNESS_ITERS for a longer run (default 250).
+#![cfg(all(feature = "admin", feature = "sqlite"))]
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};

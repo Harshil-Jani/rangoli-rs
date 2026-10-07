@@ -1,4 +1,5 @@
 //! WebSockets and Server-Sent Events against a real running server.
+#![cfg(feature = "realtime")]
 
 use axum::extract::{ws::WebSocketUpgrade, Path};
 use axum::http::HeaderMap;

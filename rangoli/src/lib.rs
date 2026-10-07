@@ -16,10 +16,13 @@ pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod datetime;
+pub mod forms;
 pub mod migrate;
 pub mod orm;
+#[cfg(feature = "realtime")]
 pub mod realtime;
 pub mod tasks;
+#[cfg(feature = "web")]
 pub mod web;
 
 pub use axum;
@@ -32,8 +35,10 @@ pub mod prelude {
     pub use crate::admin::ModelAdmin;
     pub use crate::api::{Access, Api};
     pub use crate::auth::CurrentUser;
+    pub use crate::forms::ModelForm;
     pub use crate::tasks::Task;
-    pub use crate::web::{context, render, ModelForm};
+    #[cfg(feature = "web")]
+    pub use crate::web::{context, render};
     pub use crate::{atomic, App, Choices, DateTime, Error, Json, Model, Result};
 }
 
@@ -311,12 +316,14 @@ impl App {
         self
     }
 
+    #[cfg(feature = "web")]
     /// Where `rangoli::web::render` finds templates (overrides `RANGOLI_TEMPLATES`).
     pub fn templates(self, dir: impl Into<PathBuf>) -> Self {
         web::set_dir(dir.into());
         self
     }
 
+    #[cfg(feature = "web")]
     /// Serve the files in `dir` under `prefix`, e.g. `.static_files("/static", "static")`.
     /// Paths can't escape `dir`; content types come from file extensions.
     pub fn static_files(mut self, prefix: &str, dir: impl Into<PathBuf>) -> Self {
@@ -336,9 +343,10 @@ impl App {
 
     /// The complete application as an axum `Router` (useful in tests).
     pub fn router(&self) -> Router {
-        self.routes
-            .clone()
-            .merge(admin::router(self.admin.clone(), self.models.clone()))
+        let routes = self.routes.clone();
+        #[cfg(feature = "admin")]
+        let routes = routes.merge(admin::router(self.admin.clone(), self.models.clone()));
+        routes
             .merge(api::router(self.api.clone()))
             .layer(from_fn(auth::session_middleware))
             .layer(from_fn(security_middleware))

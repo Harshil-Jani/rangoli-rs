@@ -9,14 +9,10 @@
 //! }
 //! ```
 
-use crate::admin::Field;
-use crate::orm::{Model, Value};
 use crate::{Error, Result};
 use axum::response::Html;
 use minijinja::Environment;
 use serde::Serialize;
-use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -63,78 +59,4 @@ pub fn render(name: &str, ctx: impl Serialize) -> Result<Html<String>> {
     Ok(Html(html))
 }
 
-/// Field name -> message, ready to show next to each input.
-pub type FormErrors = HashMap<String, String>;
-
-/// Django's `ModelForm`: validate submitted form data with the same rules as the admin
-/// and get a typed model back.
-///
-/// ```ignore
-/// async fn signup(Form(data): Form<Vec<(String, String)>>) -> rangoli::Result<Response> {
-///     match ModelForm::<Author>::new().fields([&Author::NAME, &Author::EMAIL]).validate(&data).await {
-///         Ok(mut author) => { author.save().await?; Ok(Redirect::to("/thanks").into_response()) }
-///         Err(errors) => Ok(render("signup.html", context! { errors, data })?.into_response()),
-///     }
-/// }
-/// ```
-pub struct ModelForm<M> {
-    only: Option<Vec<&'static str>>,
-    instance: Option<M>,
-    _m: PhantomData<fn() -> M>,
-}
-
-impl<M: Model> Default for ModelForm<M> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<M: Model> ModelForm<M> {
-    pub fn new() -> Self {
-        ModelForm { only: None, instance: None, _m: PhantomData }
-    }
-
-    /// Accept only these fields from the form; the rest keep their current or default values.
-    pub fn fields<const N: usize>(mut self, cols: [&dyn Field<M>; N]) -> Self {
-        self.only = Some(cols.iter().map(|c| c.name()).collect());
-        self
-    }
-
-    /// Edit an existing object instead of creating a new one.
-    pub fn instance(mut self, m: M) -> Self {
-        self.instance = Some(m);
-        self
-    }
-
-    /// Validate `data` (form pairs, as from `Form<Vec<(String, String)>>`). Nothing is saved.
-    pub async fn validate(&self, data: &[(String, String)]) -> std::result::Result<M, FormErrors> {
-        let meta = M::meta();
-        let form: HashMap<String, String> = data.iter().cloned().collect();
-        let adding = self.instance.is_none();
-        // Fields outside `fields(...)` are treated as read-only: whatever was posted is ignored.
-        let readonly: Vec<&str> = match &self.only {
-            Some(only) => meta.fields.iter().map(|f| f.name).filter(|n| !only.contains(n)).collect(),
-            None => vec![],
-        };
-        let cols = crate::admin::validate(meta, &form, adding, &readonly).await?;
-        let mut values = match &self.instance {
-            Some(m) => m.values(),
-            None => meta
-                .fields
-                .iter()
-                .map(|f| match f.default {
-                    Some(d) => d.value(),
-                    None if f.null => Value::Null,
-                    None => crate::migrate::zero(f.ty),
-                })
-                .collect(),
-        };
-        for (name, v, _) in cols.into_iter().filter(|(n, ..)| !readonly.contains(n)) {
-            if let Some(i) = meta.fields.iter().position(|f| f.name == name) {
-                values[i] = v;
-            }
-        }
-        let id = self.instance.as_ref().and_then(Model::pk);
-        M::from_values(id, values).map_err(|e| [("__all__".to_string(), e.to_string())].into())
-    }
-}
+pub use crate::forms::{FormErrors, ModelForm};

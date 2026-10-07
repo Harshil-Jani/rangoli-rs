@@ -95,3 +95,21 @@ jobs:
       - run: cargo test --test robustness
         env:
           ROBUSTNESS_ITERS: "3000"
+
+  features:
+    name: minimal builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: every database alone, and each optional part alone
+        run: |
+          for f in postgres mysql sqlite sqlite,admin sqlite,web postgres,realtime; do
+            echo "== $f"
+            cargo clippy -p rangoli --no-default-features --features "$f" --all-targets -- -D warnings
+          done
+      - run: cargo test -p rangoli --no-default-features --features sqlite
+      - run: cargo build -p api_only

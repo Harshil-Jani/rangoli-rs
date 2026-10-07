@@ -296,6 +296,23 @@ This is the roadmap, in rough order. Nothing here is implemented yet:
 
 Known limits today: login lockouts are per process, the admin's foreign-key select loads at most 1000 rows, and changing `unique`/`fk` on an existing column needs an `sql` operation on Postgres and MySQL.
 
+## Only what you use
+
+Every part beyond the ORM, migrations, auth and the JSON API is a Cargo feature, all on by default:
+
+| Feature | Adds |
+|---|---|
+| `admin` | the admin pages |
+| `web` | templates, partials, static files |
+| `realtime` | WebSockets and Server-Sent Events |
+| `postgres`, `mysql`, `sqlite` | the database drivers |
+
+```toml
+rangoli = { version = "0.1", default-features = false, features = ["postgres"] }  # an API service
+```
+
+[`examples/api_only`](examples/api_only/src/main.rs) built that way is a 7.1 MB binary from 196 crates; the full example blog is 13.1 MB from 249. Turning a feature off never changes your schema: the admin log and task tables are always part of it.
+
 ## Reliability
 
 The framework must never be the reason a backend goes down. What that means in practice, and what checks it:
