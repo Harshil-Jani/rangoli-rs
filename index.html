@@ -11,7 +11,7 @@
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px; --s8: 72px;
   --bg: #fbfaf8; --surface: #ffffff; --ink: #1c2430; --ink-2: #4a5565; --line: #dde1e7;
   --brand: #1f4e66; --brand-ink: #ffffff; --mark: #f5dd5d; --link: #1d5a7a; --code-bg: #f0f2f5;
-  --series-1: #2a78d6; --series-2: #eb6834; --win: #1e5b2c;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100; --win: #1e5b2c;
   --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: ui-monospace, Menlo, Consolas, monospace;
   color-scheme: light;
@@ -19,13 +19,13 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #12161b; --surface: #1a1f26; --ink: #e6e9ee; --ink-2: #b4bcc8; --line: #2e3540;
-    --brand: #16323f; --link: #7cc4e8; --code-bg: #222831; --series-1: #3987e5; --series-2: #d95926; --win: #a6e3b5;
+    --brand: #16323f; --link: #7cc4e8; --code-bg: #222831; --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --win: #a6e3b5;
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --bg: #12161b; --surface: #1a1f26; --ink: #e6e9ee; --ink-2: #b4bcc8; --line: #2e3540;
-  --brand: #16323f; --link: #7cc4e8; --code-bg: #222831; --series-1: #3987e5; --series-2: #d95926; --win: #a6e3b5;
+  --brand: #16323f; --link: #7cc4e8; --code-bg: #222831; --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --win: #a6e3b5;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -73,11 +73,18 @@ video { display: block; width: 100%; max-width: 1080px; aspect-ratio: 16 / 9; ba
 .chart figcaption { font-weight: 700; margin-bottom: var(--s2); }
 .legend { display: flex; gap: var(--s5); font-size: 14px; color: var(--ink-2); margin-bottom: var(--s4); }
 .swatch { display: inline-block; width: 12px; height: 12px; margin-right: var(--s2); vertical-align: -1px; }
-.s1 { background: var(--series-1); } .s2 { background: var(--series-2); }
+.s1 { background: var(--series-1); } .s2 { background: var(--series-2); } .s3 { background: var(--series-3); } .s4 { background: var(--series-4); }
+.na { font-size: 13px; color: var(--ink-2); }
+.compare.one { grid-template-columns: minmax(0, 1fr); max-width: 760px; }
+.why { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: var(--s4); margin: 0; }
+.why div { padding: var(--s4); background: var(--surface); border: 1px solid var(--line); }
+.why dt { font-weight: 700; margin-bottom: var(--s1); }
+.why dd { margin: 0; color: var(--ink-2); font-size: 15px; }
+.legend { flex-wrap: wrap; row-gap: var(--s2); }
 .bar-row { display: grid; grid-template-columns: 220px 1fr; gap: var(--s4); align-items: center; padding: var(--s3) 0; border-top: 1px solid var(--line); }
 .bar-label { display: flex; flex-direction: column; font-size: 15px; }
 .bar-label span { font-size: 13px; color: var(--ink-2); line-height: 1.35; }
-.bar-line { display: flex; align-items: center; gap: var(--s2); height: 22px; margin: 2px 0; }
+.bar-line { display: flex; align-items: center; gap: var(--s2); height: 20px; margin: 2px 0; }
 .bar { position: relative; display: block; width: var(--w); min-width: 2px; height: 16px; }
 .bar-value { font-size: 14px; font-variant-numeric: tabular-nums; color: var(--ink); }
 .tip { display: none; position: absolute; left: 0; bottom: 22px; padding: var(--s1) var(--s2); background: var(--ink); color: var(--bg); font-size: 13px; white-space: nowrap; z-index: 2; }
@@ -126,12 +133,12 @@ footer { max-width: 1080px; margin: 0 auto; padding: var(--s6) var(--s5) var(--s
 <body>
 <header class="top"><div class="in">
   <a class="word" href="#">Rangoli</a>
-  <nav aria-label="Sections"><a href="#start">Get started</a><a href="#results">Results</a><a href="#findings">Findings</a><a href="#gaps">Not done yet</a><a href="https://github.com/Harshil-Jani/rangoli-rs">GitHub</a></nav>
+  <nav aria-label="Sections"><a href="#why">Why</a><a href="#start">Get started</a><a href="#results">Results</a><a href="#findings">Findings</a><a href="#gaps">Not done yet</a><a href="https://github.com/Harshil-Jani/rangoli-rs">GitHub</a></nav>
 </div></header>
 <main>
 <section class="hero">
   <h1>A Django-style web framework for Rust</h1>
-  <p class="lede">Rangoli gives you what Django gives you: models, migrations, an admin, auth, forms, templates, a JSON API and background tasks. It adds what Django can't: queries the compiler checks, migrations that don't conflict across branches, safe defaults, and one fast binary to deploy.</p>
+  <p class="lede">Rangoli gives you what Django gives you: models, migrations, an admin, auth, forms, templates, a JSON API, background tasks and WebSockets. It adds what Django can't: queries the compiler checks, migrations that don't conflict across branches, async all the way down, safe defaults, and one fast binary to deploy. <code>cargo add rangoli</code>.</p>
   <div class="actions"><a class="btn" href="#start">Get started</a><a class="btn ghost" href="https://github.com/Harshil-Jani/rangoli-rs">Source on GitHub</a><a class="btn ghost" href="#results">See the benchmarks</a></div>
   <video controls preload="metadata" poster="rangoli-demo-poster.jpg" aria-describedby="video-caption">
     <source src="rangoli-demo.mp4" type="video/mp4">
@@ -140,12 +147,23 @@ footer { max-width: 1080px; margin: 0 auto; padding: var(--s6) var(--s5) var(--s
   <p class="caption" id="video-caption">49 seconds, no sound: define models, run the commands, then the public pages, the admin, the JSON API and the task list of the example blog. Recorded from the real app.</p>
 </section>
 
+<section id="why">
+  <h2>Why it exists</h2>
+  <p class="method">Rust used to be hard to adopt because engineers who knew it were hard to find. Picking up a language is much faster now; what teams lack is a framework as complete as Django. Rangoli is that framework, with Django's shape and Rust's cost profile.</p>
+  <dl class="why">
+    <div><dt>Async from the ground up</dt><dd>No sync views to convert, no ASGI migration, no <code>sync_to_async</code> tax. WebSockets are a handler.</dd></div>
+    <div><dt>Light</dt><dd>One binary. Admin, templates, real-time and each database driver are features you can leave out.</dd></div>
+    <div><dt>Never the reason you're down</dt><dd>Fuzzed on every push on three databases; outages give fast 503s and recover on their own.</dd></div>
+    <div><dt>Cheaper to run</dt><dd>On the same 4 cores: 5.3× Django's throughput on a database page, in 62 MB instead of 317 MB.</dd></div>
+  </dl>
+</section>
+
 <section id="start">
   <h2>Get started</h2>
   <div class="steps">
     <div class="step"><h3>Add the crate</h3>
 <pre><code>[dependencies]
-rangoli = { git = "https://github.com/Harshil-Jani/rangoli-rs" }
+rangoli = "0.1"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }</code></pre></div>
     <div class="step"><h3>Describe your data</h3>
@@ -190,26 +208,37 @@ RANGOLI_DEBUG=1 cargo run</code></pre>
 
 <section id="results">
   <h2>Measured against Django 6.1.2</h2>
-  <p class="method">The same blog (authors, posts, tags) written in both, loaded with identical data: 1,000 posts, 722 published, 2,000 tag links. Apple M1 Pro, 8 cores, SQLite, 64 concurrent connections for 15s after a warm-up, measured with oha. Django 6.1.2 runs under gunicorn with 8 sync workers and DEBUG off; Rangoli runs its release build. Startup is the median of five launches.</p>
-  <figure class="chart" aria-labelledby="chart-title">
-  <figcaption id="chart-title">Requests per second, higher is better</figcaption>
-  <div class="legend"><span><i class="swatch s1"></i>Rangoli</span><span><i class="swatch s2"></i>Django 6.1.2</span></div>
-  <div class="bar-row"><div class="bar-label"><strong>/posts.json</strong><span>50 posts with their author, as JSON</span></div><div class="bar-pair"><div class="bar-line"><span class="bar s1" style="--w:88.24%" tabindex="0" aria-label="Rangoli: 14,119 requests per second"><span class="tip">Rangoli: 14,119 req/s</span></span><span class="bar-value">14,119</span></div><div class="bar-line"><span class="bar s2" style="--w:18.18%" tabindex="0" aria-label="Django 6.1.2: 2,909 requests per second"><span class="tip">Django 6.1.2: 2,909 req/s</span></span><span class="bar-value">2,909</span></div></div></div><div class="bar-row"><div class="bar-label"><strong>Homepage</strong><span>a template with 50 posts and their tags</span></div><div class="bar-pair"><div class="bar-line"><span class="bar s1" style="--w:24.74%" tabindex="0" aria-label="Rangoli: 3,958 requests per second"><span class="tip">Rangoli: 3,958 req/s</span></span><span class="bar-value">3,958</span></div><div class="bar-line"><span class="bar s2" style="--w:8.65%" tabindex="0" aria-label="Django 6.1.2: 1,384 requests per second"><span class="tip">Django 6.1.2: 1,384 req/s</span></span><span class="bar-value">1,384</span></div></div></div><div class="bar-row"><div class="bar-label"><strong>JSON API list</strong><span>Rangoli&#x27;s built-in API vs Django REST framework</span></div><div class="bar-pair"><div class="bar-line"><span class="bar s1" style="--w:54.08%" tabindex="0" aria-label="Rangoli: 8,653 requests per second"><span class="tip">Rangoli: 8,653 req/s</span></span><span class="bar-value">8,653</span></div><div class="bar-line"><span class="bar s2" style="--w:6.99%" tabindex="0" aria-label="Django 6.1.2: 1,119 requests per second"><span class="tip">Django 6.1.2: 1,119 req/s</span></span><span class="bar-value">1,119</span></div></div></div><div class="bar-row"><div class="bar-label"><strong>Admin changelist</strong><span>logged in, 100 rows</span></div><div class="bar-pair"><div class="bar-line"><span class="bar s1" style="--w:17.23%" tabindex="0" aria-label="Rangoli: 2,756 requests per second"><span class="tip">Rangoli: 2,756 req/s</span></span><span class="bar-value">2,756</span></div><div class="bar-line"><span class="bar s2" style="--w:1.32%" tabindex="0" aria-label="Django 6.1.2: 211 requests per second"><span class="tip">Django 6.1.2: 211 req/s</span></span><span class="bar-value">211</span></div></div></div>
-  <div class="axis"><div class="ticks"><span style="left:0.00%">0</span><span style="left:25.00%">4,000</span><span style="left:50.00%">8,000</span><span style="left:75.00%">12,000</span><span style="left:100.00%">16,000</span></div></div>
+  <p class="method">The same blog (authors, posts, tags) written for each, loaded with identical data: 1,000 posts, 722 published, 2,000 tag links, on SQLite. Run on a 4-core Linux GitHub Actions runner, 64 concurrent connections for 15s after a warm-up, measured with oha; Django runs 4 gunicorn workers, django-bolt 4 processes, DEBUG off. Linux matters for django-bolt: on macOS its processes can't share the port's load. Shared runners are noisy, so compare frameworks within this run rather than across runs.</p>
+  <figure class="chart" aria-labelledby="chart-db">
+  <figcaption id="chart-db">Pages that use the database: requests per second, higher is better</figcaption>
+  <div class="legend"><span><i class="swatch s1"></i>Rangoli</span><span><i class="swatch s2"></i>Django 6.1.2 (WSGI)</span><span><i class="swatch s3"></i>Django 6.1.2 (ASGI, sync views)</span><span><i class="swatch s4"></i>django-bolt 0.11.1</span></div>
+  <div class="bar-row"><div class="bar-label"><strong>/posts.json</strong><span>50 posts with their author, as JSON</span></div><div class="bar-pair"><div class="bar-line"><span class="bar s1" style="--w:85.89%" tabindex="0" aria-label="Rangoli: 5,153 requests per second"><span class="tip">Rangoli: 5,153 req/s</span></span><span class="bar-value">5,153</span></div><div class="bar-line"><span class="bar s2" style="--w:16.22%" tabindex="0" aria-label="Django 6.1.2 (WSGI): 973 requests per second"><span class="tip">Django 6.1.2 (WSGI): 973 req/s</span></span><span class="bar-value">973</span></div><div class="bar-line"><span class="bar s3" style="--w:7.46%" tabindex="0" aria-label="Django 6.1.2 (ASGI, sync views): 447 requests per second"><span class="tip">Django 6.1.2 (ASGI, sync views): 447 req/s</span></span><span class="bar-value">447</span></div><div class="bar-line"><span class="bar s4" style="--w:14.64%" tabindex="0" aria-label="django-bolt 0.11.1: 878 requests per second"><span class="tip">django-bolt 0.11.1: 878 req/s</span></span><span class="bar-value">878</span></div></div></div><div class="bar-row"><div class="bar-label"><strong>Homepage</strong><span>a template with 50 posts and their tags</span></div><div class="bar-pair"><div class="bar-line"><span class="bar s1" style="--w:17.95%" tabindex="0" aria-label="Rangoli: 1,077 requests per second"><span class="tip">Rangoli: 1,077 req/s</span></span><span class="bar-value">1,077</span></div><div class="bar-line"><span class="bar s2" style="--w:3.79%" tabindex="0" aria-label="Django 6.1.2 (WSGI): 227 requests per second"><span class="tip">Django 6.1.2 (WSGI): 227 req/s</span></span><span class="bar-value">227</span></div><div class="bar-line"><span class="bar s3" style="--w:2.24%" tabindex="0" aria-label="Django 6.1.2 (ASGI, sync views): 135 requests per second"><span class="tip">Django 6.1.2 (ASGI, sync views): 135 req/s</span></span><span class="bar-value">135</span></div><div class="bar-line"><span class="na">django-bolt 0.11.1: not offered</span></div></div></div><div class="bar-row"><div class="bar-label"><strong>JSON API list</strong><span>Rangoli&#x27;s built-in API vs Django REST framework</span></div><div class="bar-pair"><div class="bar-line"><span class="bar s1" style="--w:40.92%" tabindex="0" aria-label="Rangoli: 2,456 requests per second"><span class="tip">Rangoli: 2,456 req/s</span></span><span class="bar-value">2,456</span></div><div class="bar-line"><span class="bar s2" style="--w:4.54%" tabindex="0" aria-label="Django 6.1.2 (WSGI): 273 requests per second"><span class="tip">Django 6.1.2 (WSGI): 273 req/s</span></span><span class="bar-value">273</span></div><div class="bar-line"><span class="bar s3" style="--w:2.02%" tabindex="0" aria-label="Django 6.1.2 (ASGI, sync views): 121 requests per second"><span class="tip">Django 6.1.2 (ASGI, sync views): 121 req/s</span></span><span class="bar-value">121</span></div><div class="bar-line"><span class="na">django-bolt 0.11.1: not offered</span></div></div></div><div class="bar-row"><div class="bar-label"><strong>Admin changelist</strong><span>logged in, 100 rows</span></div><div class="bar-pair"><div class="bar-line"><span class="bar s1" style="--w:11.62%" tabindex="0" aria-label="Rangoli: 698 requests per second"><span class="tip">Rangoli: 698 req/s</span></span><span class="bar-value">698</span></div><div class="bar-line"><span class="bar s2" style="--w:0.75%" tabindex="0" aria-label="Django 6.1.2 (WSGI): 45 requests per second"><span class="tip">Django 6.1.2 (WSGI): 45 req/s</span></span><span class="bar-value">45</span></div><div class="bar-line"><span class="bar s3" style="--w:0.57%" tabindex="0" aria-label="Django 6.1.2 (ASGI, sync views): 34 requests per second"><span class="tip">Django 6.1.2 (ASGI, sync views): 34 req/s</span></span><span class="bar-value">34</span></div><div class="bar-line"><span class="na">django-bolt 0.11.1: not offered</span></div></div></div>
+  <div class="axis"><div class="ticks"><span style="left:0.00%">0</span><span style="left:16.67%">1,000</span><span style="left:33.33%">2,000</span><span style="left:50.00%">3,000</span><span style="left:66.67%">4,000</span><span style="left:83.33%">5,000</span><span style="left:100.00%">6,000</span></div></div>
+</figure>
+  <figure class="chart" aria-labelledby="chart-hello">
+  <figcaption id="chart-hello">Framework overhead alone (/hello, no database): requests per second</figcaption>
+  <div class="legend"><span><i class="swatch s1"></i>Rangoli</span><span><i class="swatch s2"></i>Django 6.1.2 (WSGI)</span><span><i class="swatch s3"></i>Django 6.1.2 (ASGI, sync views)</span><span><i class="swatch s4"></i>django-bolt 0.11.1</span></div>
+  <div class="bar-row"><div class="bar-label"><strong>/hello</strong><span>a fixed JSON reply</span></div><div class="bar-pair"><div class="bar-line"><span class="bar s1" style="--w:98.67%" tabindex="0" aria-label="Rangoli: 69,071 requests per second"><span class="tip">Rangoli: 69,071 req/s</span></span><span class="bar-value">69,071</span></div><div class="bar-line"><span class="bar s2" style="--w:6.51%" tabindex="0" aria-label="Django 6.1.2 (WSGI): 4,555 requests per second"><span class="tip">Django 6.1.2 (WSGI): 4,555 req/s</span></span><span class="bar-value">4,555</span></div><div class="bar-line"><span class="bar s3" style="--w:1.13%" tabindex="0" aria-label="Django 6.1.2 (ASGI, sync views): 793 requests per second"><span class="tip">Django 6.1.2 (ASGI, sync views): 793 req/s</span></span><span class="bar-value">793</span></div><div class="bar-line"><span class="bar s4" style="--w:43.98%" tabindex="0" aria-label="django-bolt 0.11.1: 30,789 requests per second"><span class="tip">django-bolt 0.11.1: 30,789 req/s</span></span><span class="bar-value">30,789</span></div></div></div>
+  <div class="axis"><div class="ticks"><span style="left:0.00%">0</span><span style="left:14.29%">10,000</span><span style="left:28.57%">20,000</span><span style="left:42.86%">30,000</span><span style="left:57.14%">40,000</span><span style="left:71.43%">50,000</span><span style="left:85.71%">60,000</span><span style="left:100.00%">70,000</span></div></div>
 </figure>
   <div class="table-wrap"><table>
-    <caption class="sr">Benchmark results</caption>
-    <thead><tr><th scope="col">Page</th><th scope="col">Rangoli req/s</th><th scope="col">Django req/s</th><th scope="col">Rangoli p99</th><th scope="col">Django p99</th><th scope="col">Rangoli is</th></tr></thead>
-    <tbody><tr><th scope='row'>/posts.json</th><td>14,119</td><td>2,909</td><td>8 ms</td><td>40 ms</td><td class='win'>4.9×</td></tr><tr><th scope='row'>Homepage</th><td>3,958</td><td>1,384</td><td>25 ms</td><td>1324 ms</td><td class='win'>2.9×</td></tr><tr><th scope='row'>JSON API list</th><td>8,653</td><td>1,119</td><td>12 ms</td><td>88 ms</td><td class='win'>7.7×</td></tr><tr><th scope='row'>Admin changelist</th><td>2,756</td><td>211</td><td>33 ms</td><td>376 ms</td><td class='win'>13.1×</td></tr></tbody>
+    <caption class="sr">Requests per second by framework</caption>
+    <thead><tr><th scope="col">Page</th><th scope="col">Rangoli</th><th scope="col">Django 6.1.2 (WSGI)</th><th scope="col">Django 6.1.2 (ASGI, sync views)</th><th scope="col">django-bolt 0.11.1</th><th scope="col">Rangoli vs Django</th></tr></thead>
+    <tbody><tr><th scope='row'>/hello</th><td>69,071</td><td>4,555</td><td>793</td><td>30,789</td><td class='win'>15.2×</td></tr><tr><th scope='row'>/posts.json</th><td>5,153</td><td>973</td><td>447</td><td>878</td><td class='win'>5.3×</td></tr><tr><th scope='row'>Homepage</th><td>1,077</td><td>227</td><td>135</td><td>n/a</td><td class='win'>4.7×</td></tr><tr><th scope='row'>JSON API list</th><td>2,456</td><td>273</td><td>121</td><td>n/a</td><td class='win'>9.0×</td></tr><tr><th scope='row'>Admin changelist</th><td>698</td><td>45</td><td>34</td><td>n/a</td><td class='win'>15.4×</td></tr></tbody>
   </table></div>
-  <div class="tiles">
-    <div class="tile"><div class="label">Startup to first response</div><div class="value">15 ms</div><div class="vs">Django: 232 ms</div></div>
-    <div class="tile"><div class="label">Memory under load</div><div class="value">61 MB</div><div class="vs">Django, 8 workers: 511 MB</div></div>
-    <div class="tile"><div class="label">Memory at rest</div><div class="value">32 MB</div><div class="vs">Django: 278 MB</div></div>
-  </div>
+  <div class="table-wrap" style="margin-top: var(--s4)"><table>
+    <caption class="sr">Startup and memory</caption>
+    <thead><tr><th scope="col">Server</th><th scope="col">Startup</th><th scope="col">Memory at rest</th><th scope="col">Memory after the load</th></tr></thead>
+    <tbody><tr><th scope='row'>Rangoli</th><td>12 ms</td><td>30 MB</td><td>62 MB</td></tr><tr><th scope='row'>Django 6.1.2 (WSGI)</th><td>525 ms</td><td>280 MB</td><td>317 MB</td></tr><tr><th scope='row'>Django 6.1.2 (ASGI, sync views)</th><td>536 ms</td><td>305 MB</td><td>494 MB</td></tr><tr><th scope='row'>django-bolt 0.11.1</th><td>410 ms</td><td>331 MB</td><td>7,844 MB</td></tr></tbody>
+  </table></div>
+  <p class="method" style="margin-top: var(--s4)">On an Apple M1 Pro (8 cores, Django on 8 workers) the same pages ran faster for both, with Rangoli ahead by a similar margin:</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th scope="col">Page (M1 Pro)</th><th scope="col">Rangoli req/s</th><th scope="col">Django req/s</th><th scope="col">Rangoli is</th></tr></thead>
+    <tbody><tr><th scope='row'>/posts.json</th><td>14,416</td><td>1,961</td><td class='win'>7.4×</td></tr><tr><th scope='row'>Homepage</th><td>3,985</td><td>950</td><td class='win'>4.2×</td></tr><tr><th scope='row'>JSON API list</th><td>8,641</td><td>1,111</td><td class='win'>7.8×</td></tr><tr><th scope='row'>Admin changelist</th><td>2,777</td><td>169</td><td class='win'>16.5×</td></tr></tbody>
+  </table></div>
   <div class="story">
     <p><strong>The first run went the other way.</strong> Rangoli was slower than Django on three of the four pages, and got slower as concurrency rose. Profiling showed every SQLite connection in the process waiting on SQLite's global mutexes for memory statistics and its shared page cache. Django never hits them, because each gunicorn worker is a separate process.</p>
-    <p>Rangoli now turns memory statistics off at runtime, and SQLite apps build SQLite without the shared page cache (<a href="https://github.com/Harshil-Jani/rangoli-rs/blob/main/.cargo/config.toml">.cargo/config.toml</a>). The homepage went from 249 to 3,958 req/s. With Postgres or MySQL, neither applies.</p>
+    <p>Rangoli now turns memory statistics off at runtime, and SQLite apps build SQLite without the shared page cache (<a href="https://github.com/Harshil-Jani/rangoli-rs/blob/main/.cargo/config.toml">.cargo/config.toml</a>). The homepage went from 249 to 3,985 req/s. With Postgres or MySQL, neither applies.</p>
   </div>
 </section>
 
@@ -219,74 +248,89 @@ RANGOLI_DEBUG=1 cargo run</code></pre>
   <article class="finding" id="typo">
   <h3>A typo in a query</h3>
   <p class="setup">Both projects run a query on a field spelled <code>titel</code> instead of <code>title</code>.</p>
-  <div class="compare">
-    <div class="side"><h4>Django 6.1.2</h4><code>manage.py check</code> reports <em>System check identified no issues (0 silenced).</em>, so the code ships. It fails when the line runs:<pre class='output'>django.core.exceptions.FieldError: Cannot resolve keyword &#x27;titel&#x27; into field. Choices are: author, author_id, body, created_at, id, published, rating, tags, title, updated_at</pre></div>
-    <div class="side"><h4>Rangoli</h4>The program does not compile, so it never ships:<pre class='output'>error[E0599]: no associated item named `TITEL` found for struct `Post` in the current scope
+  <div class="compare"><div class="side"><h4>Django 6.1.2</h4><code>manage.py check</code> reports <em>System check identified no issues (0 silenced).</em>, so the code ships. It fails when the line runs:<pre class='output'>django.core.exceptions.FieldError: Cannot resolve keyword &#x27;titel&#x27; into field. Choices are: author, author_id, body, created_at, id, published, rating, tags, title, updated_at</pre></div><div class="side"><h4>Rangoli</h4>The program does not compile, so it never ships:<pre class='output'>error[E0599]: no associated item named `TITEL` found for struct `Post` in the current scope
   --&gt; src/main.rs:13:42
    |
  5 | pub struct Post {
    | --------------- associated item `TITEL` not found for this struct
 ...
 13 |     let n = Post::objects().filter(Post::TITEL.eq(&quot;Hello&quot;)).count().await?;
-   |                                          ^^^^^ associated item not found in `Post`</pre></div>
-  </div>
+   |                                          ^^^^^ associated item not found in `Post`</pre></div></div>
   <p class="meaning">Every field lookup in Rangoli is a typed constant, so misspelled fields, comparing a text column with a number, and columns from another model are caught before deploy.</p>
 </article>
 <article class="finding" id="branches">
   <h3>Two branches each add a migration</h3>
   <p class="setup">Two feature branches each add a column to a different table; both are merged and <code>migrate</code> runs.</p>
-  <div class="compare">
-    <div class="side"><h4>Django 6.1.2</h4>Exit code 1:<pre class='output'>CommandError: Conflicting migrations detected; multiple leaf nodes in the migration graph: (0002_author_bio, 0002_tag_color in blog).
-To fix them run &#x27;python manage.py makemigrations --merge&#x27;</pre></div>
-    <div class="side"><h4>Rangoli</h4>Exit code 0, both applied:<pre class='output'>Applied 20261007120000_add_blog_author_bio
-Applied 20261007120500_add_blog_tag_color</pre>When two branches really do collide (both add the same column), Rangoli refuses and names both files:<pre class='output'>Error: migration error: `20261007121000_add_blog_author_bio`: column `blog_author.bio` already exists (last changed by `20261007120000_add_blog_author_bio`; branches probably diverged)</pre></div>
-  </div>
+  <div class="compare"><div class="side"><h4>Django 6.1.2</h4>Exit code 1:<pre class='output'>CommandError: Conflicting migrations detected; multiple leaf nodes in the migration graph: (0002_author_bio, 0002_tag_color in blog).
+To fix them run &#x27;python manage.py makemigrations --merge&#x27;</pre></div><div class="side"><h4>Rangoli</h4>Exit code 0, both applied:<pre class='output'>Applied 20261007120000_add_blog_author_bio
+Applied 20261007120500_add_blog_tag_color</pre>When two branches really do collide (both add the same column), Rangoli refuses and names both files:<pre class='output'>Error: migration error: `20261007121000_add_blog_author_bio`: column `blog_author.bio` already exists (last changed by `20261007120000_add_blog_author_bio`; branches probably diverged)</pre></div></div>
   <p class="meaning">Rangoli records the set of applied migrations instead of a chain, so unrelated work never needs a merge migration, while real conflicts are still caught.</p>
 </article>
 <article class="finding" id="n1">
   <h3>N+1 queries</h3>
   <p class="setup">Both load the latest 50 published posts with each post's author and tags.</p>
-  <div class="compare">
-    <div class="side"><h4>Django 6.1.2</h4>Written the obvious way (<code>post.author.name</code> in a loop): <strong>101 queries</strong>. With <code>select_related</code> and <code>prefetch_related</code>: <strong>2 queries</strong>. Nothing warns you about the first version.</div>
-    <div class="side"><h4>Rangoli</h4><strong>4 queries</strong>, measured with <code>count_queries</code>. A foreign key is an id, so there is no lazy <code>post.author</code> to call in a loop; related rows are fetched explicitly with <code>in_bulk</code> and <code>prefetch</code>.</div>
-  </div>
+  <div class="compare"><div class="side"><h4>Django 6.1.2</h4>Written the obvious way (<code>post.author.name</code> in a loop): <strong>101 queries</strong>. With <code>select_related</code> and <code>prefetch_related</code>: <strong>2 queries</strong>. Nothing warns you about the first version.</div><div class="side"><h4>Rangoli</h4><strong>4 queries</strong>, measured with <code>count_queries</code>. A foreign key is an id, so there is no lazy <code>post.author</code> to call in a loop; related rows are fetched explicitly with <code>in_bulk</code> and <code>prefetch</code>.</div></div>
   <p class="meaning">Rangoli can't fall into the 101-query trap by accident, but tuned Django is better here: it joins authors in, and Rangoli has no join (<code>select_related</code>) yet. That is on the roadmap.</p>
 </article>
 <article class="finding" id="defaults">
   <h3>A new project's defaults</h3>
   <p class="setup">What <code>django-admin startproject</code> generates in Django 6.1.2, compared with Rangoli's defaults.</p>
-  <div class="compare">
-    <div class="side"><h4>Django 6.1.2</h4><code>DEBUG = True</code>; a <code>SECRET_KEY</code> written into <code>settings.py</code> (yes); Content Security Policy middleware enabled: no (Django 6.0 added it as opt-in).</div>
-    <div class="side"><h4>Rangoli</h4>Debug is off unless <code>RANGOLI_DEBUG=1</code>; there is no secret key at all (sessions are random keys in the database and CSRF protection needs no token); a strict CSP is sent on every response.</div>
-  </div>
+  <div class="compare"><div class="side"><h4>Django 6.1.2</h4><code>DEBUG = True</code>; a <code>SECRET_KEY</code> written into <code>settings.py</code> (yes); Content Security Policy middleware enabled: no (Django 6.0 added it as opt-in).</div><div class="side"><h4>Rangoli</h4>Debug is off unless <code>RANGOLI_DEBUG=1</code>; there is no secret key at all (sessions are random keys in the database and CSRF protection needs no token); a strict CSP is sent on every response.</div></div>
   <p class="meaning">Production-safe settings shouldn't be something you have to remember to change.</p>
 </article>
 <article class="finding" id="guessing">
   <h3>Guessing the admin password</h3>
   <p class="setup">Eight wrong passwords for <code>admin</code>, then the right one.</p>
-  <div class="compare">
-    <div class="side"><h4>Django 6.1.2</h4>Status codes: 200, 200, 200, 200, 200, 200, 200, 200. The correct password then logs in: guessing is unlimited without an extra package.</div>
-    <div class="side"><h4>Rangoli</h4>Status codes: 401, 401, 401, 401, 401, 401, 401, 401. The correct password then is refused: after five failures the username is locked for 15 minutes.</div>
-  </div>
+  <div class="compare"><div class="side"><h4>Django 6.1.2</h4>Status codes: 200, 200, 200, 200, 200, 200, 200, 200. The correct password then logs in: guessing is unlimited without an extra package.</div><div class="side"><h4>Rangoli</h4>Status codes: 401, 401, 401, 401, 401, 401, 401, 401. The correct password then is refused: after five failures the username is locked for 15 minutes.</div></div>
   <p class="meaning">Cross-site login POSTs are rejected by both (Rangoli 403, Django 403). Rangoli's lockout is per process today; across several servers it needs a shared store.</p>
 </article>
 <article class="finding" id="tasks">
   <h3>Background tasks</h3>
   <p class="setup">Can the framework run a task in the background, out of the box?</p>
-  <div class="compare">
-    <div class="side"><h4>Django 6.1.2</h4>Django 6.x ships a tasks interface; its default backend is <code>{&#x27;default&#x27;: {&#x27;BACKEND&#x27;: &#x27;django.tasks.backends.immediate.ImmediateBackend&#x27;}}</code>, which runs tasks immediately in the request. Worker commands in <code>manage.py</code>: none. Production use still means Celery plus Redis or RabbitMQ.</div>
-    <div class="side"><h4>Rangoli</h4>Tasks are queued in your database and run in the same binary: in-process by <code>runserver</code>, or by <code>cargo run -- worker</code>. Retries with backoff, caught panics, and recovery from crashed workers are built in.</div>
-  </div>
+  <div class="compare"><div class="side"><h4>Django 6.1.2</h4>Django 6.x ships a tasks interface; its default backend is <code>{&#x27;default&#x27;: {&#x27;BACKEND&#x27;: &#x27;django.tasks.backends.immediate.ImmediateBackend&#x27;}}</code>, which runs tasks immediately in the request. Worker commands in <code>manage.py</code>: none. Production use still means Celery plus Redis or RabbitMQ.</div><div class="side"><h4>Rangoli</h4>Tasks are queued in your database and run in the same binary: in-process by <code>runserver</code>, or by <code>cargo run -- worker</code>. Retries with backoff, caught panics, and recovery from crashed workers are built in.</div></div>
   <p class="meaning">One binary and your database instead of three moving parts.</p>
 </article>
 <article class="finding" id="footprint">
   <h3>What you deploy</h3>
   <p class="setup">The example blog app and everything it needs to run.</p>
-  <div class="compare">
-    <div class="side"><h4>Django 6.1.2</h4>42.8 MB of Python packages (5 of them) plus a Python runtime and gunicorn; 158 lines of app code across models, admin, views, URLs and settings.</div>
-    <div class="side"><h4>Rangoli</h4>One 13.0 MB binary with the admin's templates, CSS and JavaScript compiled in, plus your own templates; 87 lines of app code.</div>
-  </div>
+  <div class="compare"><div class="side"><h4>Django 6.1.2</h4>42.8 MB of Python packages (5 of them) plus a Python runtime and gunicorn; 158 lines of app code across models, admin, views, URLs and settings.</div><div class="side"><h4>Rangoli</h4>One 13.0 MB binary with the admin's templates, CSS and JavaScript compiled in, plus your own templates; 87 lines of app code.</div></div>
   <p class="meaning">Both counts skip blank lines and comments.</p>
+</article>
+<article class="finding" id="asgi">
+  <h3>Switching Django to an async server</h3>
+  <p class="setup">The same Django app and views, served by gunicorn (WSGI) and by gunicorn with uvicorn workers (ASGI), on the Linux run.</p>
+  <div class="compare"><div class="side"><h4>Django 6.1.2</h4>Under ASGI every sync view goes through <code>sync_to_async</code>. <code>/hello</code>: 4,555 → 793 req/s (83% slower). <code>/posts.json</code>: 973 → 447. Homepage: 227 → 135.</div><div class="side"><h4>Rangoli</h4>There is no sync mode to convert from: every handler, query and middleware is async, so WebSockets and long-lived connections need no change of server.</div></div>
+  <p class="meaning">Moving an existing Django codebase to an async server makes it slower until every view is rewritten as async. That is the cost teams pay to add WebSockets to a sync Django app.</p>
+</article>
+<article class="finding" id="bolt">
+  <h3>django-bolt</h3>
+  <p class="setup">django-bolt puts a Rust (Actix) HTTP server in front of Django; handlers and the ORM stay in Python. It ran its async handler (the faster of its two modes) with as many processes as Django had workers.</p>
+  <div class="compare"><div class="side"><h4>django-bolt</h4><code>/hello</code>: 30,789 req/s, 6.8× plain Django. <code>/posts.json</code>: 878 req/s (plain Django: 973). Memory: 331 MB at rest, 7,844 MB after the load; in a local run one worker grew from about 40 MB to over 3 GB.</div><div class="side"><h4>Rangoli</h4><code>/hello</code>: 69,071 req/s. <code>/posts.json</code>: 5,153 req/s. Memory after the same load: 62 MB.</div></div>
+  <p class="meaning">django-bolt makes Django's HTTP layer fast; once a request reaches Python and the ORM it runs at Django's speed. The memory growth is what we measured, reproducible with bench/run.py; we have not looked for its cause.</p>
+</article>
+<article class="finding" id="fuzz">
+  <h3>Hostile input</h3>
+  <p class="setup">SQL fragments, NUL bytes, 10,000-character values, impossible dates, numbers too big for any column and random JSON, thrown at every admin page and form, the JSON API and the login, on SQLite, Postgres and MySQL.</p>
+  <div class="compare"><div class="side"><h4>What the fuzzer caught</h4>On Postgres, a NUL byte in a search term or a field was a 500: Postgres can't store NUL, while SQLite and MySQL accept it. Fixed: searches drop NUL; forms and the API refuse it with Django's own message, <em>Null characters are not allowed.</em></div><div class="side"><h4>Now</h4>Zero server errors in 3,000 rounds (about 20,000 requests) on every push, on all three databases. A bug planted on purpose was caught within seconds.</div></div>
+  <p class="meaning">Django has had this class of bug too; it is why its <code>ProhibitNullCharactersValidator</code> exists. A fuzzer that runs on every database finds the next one before users do.</p>
+</article>
+<article class="finding" id="outage">
+  <h3>The database goes away</h3>
+  <p class="setup">Postgres is frozen (<code>docker pause</code>) and then restarted under a running app, in CI on every push.</p>
+  <div class="compare one"><div class="side single"><h4>Rangoli</h4>Requests that need the database answer <code>503</code> with <code>Retry-After</code> within the database timeout instead of hanging; pages that don't need it keep working; when Postgres is back, so is the app, without a restart. A panicking handler costs one 500, and a stuck request is cut off after 30 seconds.</div></div>
+  <p class="meaning">The framework is never the reason the backend goes down.</p>
+</article>
+<article class="finding" id="realtime">
+  <h3>WebSockets</h3>
+  <p class="setup">A chat room where every message reaches everyone in it.</p>
+  <div class="compare"><div class="side"><h4>Django 6.1.2</h4>Channels, a Redis channel layer and an ASGI server (daphne or uvicorn): three more moving parts, plus the async-server slowdown above for the existing views.</div><div class="side"><h4>Rangoli</h4>One handler: <code>realtime::serve(ws, &amp;headers, "chat:lobby", |text| async move { Some(text) })</code>, <code>publish()</code> from any view or task, and the same groups as Server-Sent Events. Cross-site handshakes are refused by default.</div></div>
+  <p class="meaning">Real-time features don't require re-platforming the app.</p>
+</article>
+<article class="finding" id="light">
+  <h3>Only what you use</h3>
+  <p class="setup">An API-only service on Postgres.</p>
+  <div class="compare"><div class="side"><h4>Django 6.1.2</h4><code>pip install django</code> brings the whole framework: admin, templates, forms, sessions, i18n, whether the service uses them or not.</div><div class="side"><h4>Rangoli</h4><code>default-features = false, features = [&quot;postgres&quot;]</code>: a 7.1 MB binary from 196 crates, against 13.1 MB and 249 crates with everything on.</div></div>
+  <p class="meaning">Small services stay small, and switching a feature off never changes the database schema.</p>
 </article>
 
   <article class="finding" id="headers">
@@ -301,10 +345,10 @@ Applied 20261007120500_add_blog_tag_color</pre>When two branches really do colli
 <section id="gaps">
   <h2>Where Django is still ahead</h2>
   <ul class="gaps">
-    <li><strong>Twenty years of ecosystem.</strong> Thousands of packages, books, hosting guides and people who know it. Rangoli is brand new and not yet published on crates.io.</li>
+    <li><strong>Twenty years of ecosystem.</strong> Thousands of packages, books, hosting guides and people who know it. Rangoli is brand new.</li>
     <li><strong>Joins.</strong> No <code>select_related</code> yet, so the example homepage takes 4 queries where tuned Django takes 2.</li>
     <li><strong>Admin depth.</strong> No inlines, custom actions, fieldsets, per-model permissions or groups.</li>
-    <li><strong>The rest of the batteries.</strong> Internationalization, email, caching, password reset, savepoints in nested transactions, WebSockets and API tokens are on the roadmap.</li>
+    <li><strong>The rest of the batteries.</strong> Internationalization, email, caching, password reset, savepoints in nested transactions, API tokens, and real-time groups across several servers are on the roadmap.</li>
     <li><strong>SQLite tuning.</strong> Getting full SQLite throughput needs one config file in your project. Postgres and MySQL need nothing.</li>
   </ul>
   <p>The full list is in the <a href="https://github.com/Harshil-Jani/rangoli-rs#whats-not-done-yet">README</a>.</p>
@@ -314,8 +358,8 @@ Applied 20261007120500_add_blog_tag_color</pre>When two branches really do colli
   <h2>Reproduce it</h2>
 <pre><code>git clone https://github.com/Harshil-Jani/rangoli-rs && cd rangoli-rs
 cargo build --release -p blog
-cd bench && uv venv .venv && uv pip install --python .venv/bin/python "django==6.1.2" djangorestframework gunicorn
-python seed.py results/rangoli.sqlite3 results/django.sqlite3   # after migrating both, see bench/README
+cd bench && uv venv .venv && uv pip install --python .venv/bin/python "django==6.1.2" djangorestframework gunicorn "django-bolt==0.11.1" uvicorn uvicorn-worker
+./setup.sh             # both databases, identical data
 python run.py          # throughput, latency, memory, startup -> results/bench.json
 python experiments.py  # the findings above -> results/experiments.json</code></pre>
 </section>
