@@ -1,0 +1,33 @@
+name: Benchmark (Linux)
+# Rangoli vs Django 6.1.2 vs django-bolt on a Linux runner. Manual, since shared runners are noisy:
+# compare frameworks within one run, not numbers across runs.
+on:
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      - name: Build
+        run: cargo build --release -p blog --bins --examples
+      - name: Python side
+        working-directory: bench
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python "django==6.1.2" djangorestframework gunicorn "django-bolt==0.11.1"
+      - name: oha
+        run: cargo install oha --locked
+      - name: Run
+        working-directory: bench
+        run: |
+          ./setup.sh
+          python3 run.py
+          mv results/bench.json results/bench-linux.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-linux
+          path: bench/results/bench-linux.json

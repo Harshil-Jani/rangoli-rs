@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'django_bolt',
     'blog',
 ]
 
@@ -132,3 +133,6 @@ MAILERS = {
 
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# django-bolt: access logs off for benchmarks, like gunicorn's --log-level error
+DJANGO_BOLT_LOG_LEVEL = os.environ.get('DJANGO_BOLT_LOG_LEVEL', 'ERROR')

@@ -6,6 +6,10 @@ from rest_framework.pagination import LimitOffsetPagination
 from .models import Post
 
 
+def hello(request):
+    return JsonResponse({"message": "Hello, World!"})
+
+
 def posts_json(request):
     """Published posts with their author's name: same shape as the Rangoli example."""
     posts = Post.objects.filter(published=True).select_related("author").order_by("-id")[:50]

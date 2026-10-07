@@ -169,8 +169,6 @@ fn percent(s: &str) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_framework_never_takes_the_server_down() {
-    // Settings are read once per process; set them before anything touches them.
-    std::env::set_var("RANGOLI_REQUEST_TIMEOUT", "1");
     let iters: usize = std::env::var("ROBUSTNESS_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(250);
     let dir = std::env::temp_dir().join(format!("rangoli-fuzz-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -189,13 +187,6 @@ async fn the_framework_never_takes_the_server_down() {
         .routes(
             axum::Router::new()
                 .route("/panic", axum::routing::get(|| async { panic!("handler bug") as &'static str }))
-                .route(
-                    "/slow",
-                    axum::routing::get(|| async {
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        "too late"
-                    }),
-                )
                 .route("/health", axum::routing::get(|| async { "ok" })),
         );
     let migrations = dir.join("migrations");
@@ -399,9 +390,19 @@ async fn the_framework_never_takes_the_server_down() {
     assert_eq!(send(get("/panic".into(), "")).await.0, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(send(get("/health".into(), "")).await, (StatusCode::OK, "ok".to_string()));
 
-    // A stuck request is cut off by the request timeout (1s here).
+    // A stuck request is cut off by the request timeout (1s for this app).
+    let slow = App::new()
+        .request_timeout(Duration::from_secs(1))
+        .routes(axum::Router::new().route(
+            "/slow",
+            axum::routing::get(|| async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                "too late"
+            }),
+        ))
+        .router();
     let started = std::time::Instant::now();
-    assert_eq!(send(get("/slow".into(), "")).await.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(slow.oneshot(get("/slow".into(), "")).await.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(started.elapsed() < Duration::from_secs(3), "timed out after {:?}", started.elapsed());
 
     // An oversized body is refused, not buffered without limit.

@@ -11,5 +11,6 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("", views.home),
     path("posts.json", views.posts_json),
+    path("hello", views.hello),
     path("api/", include(router.urls)),
 ]

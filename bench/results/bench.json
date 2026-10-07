@@ -7,110 +7,162 @@
     "duration": "15s",
     "connections": 64,
     "django_workers": 8,
+    "bolt_processes": 8,
     "startup": "median of 5 launches"
   },
   "frameworks": {
     "rangoli": {
-      "startup_ms": 15,
-      "idle_rss_mb": 32.5,
+      "startup_ms": 16,
+      "idle_rss_mb": 32.4,
       "scenarios": {
+        "hello": {
+          "path": "/hello",
+          "bytes": 27,
+          "rps": 124921.8,
+          "p50_ms": 0.42,
+          "p99_ms": 2.16,
+          "success_rate": 1.0,
+          "status_codes": {
+            "200": 1873954
+          }
+        },
         "posts_json": {
           "path": "/posts.json",
           "bytes": 28354,
-          "rps": 14119.0,
-          "p50_ms": 4.33,
-          "p99_ms": 7.64,
+          "rps": 14337.1,
+          "p50_ms": 4.35,
+          "p99_ms": 6.33,
           "success_rate": 1.0,
           "status_codes": {
-            "200": 211764
+            "200": 215042
           }
         },
         "home_html": {
           "path": "/",
           "bytes": 26311,
-          "rps": 3958.2,
-          "p50_ms": 15.56,
-          "p99_ms": 24.71,
+          "rps": 3930.1,
+          "p50_ms": 15.75,
+          "p99_ms": 25.83,
           "success_rate": 1.0,
           "status_codes": {
-            "200": 59322
+            "200": 58899
           }
         },
         "api_list": {
           "path": "/api/blog_post/?limit=50",
           "bytes": 28298,
-          "rps": 8653.1,
-          "p50_ms": 7.17,
-          "p99_ms": 11.5,
+          "rps": 8560.9,
+          "p50_ms": 7.21,
+          "p99_ms": 11.2,
           "success_rate": 1.0,
           "status_codes": {
-            "200": 129755
+            "200": 128366
           }
         },
         "admin_changelist": {
           "path": "/admin/blog_post/",
           "bytes": 72496,
-          "rps": 2756.5,
-          "p50_ms": 22.64,
-          "p99_ms": 33.37,
+          "rps": 2547.8,
+          "p50_ms": 23.71,
+          "p99_ms": 44.31,
           "success_rate": 1.0,
           "status_codes": {
-            "200": 41298
+            "200": 38164
           }
         }
       },
-      "loaded_rss_mb": 61.3
+      "loaded_rss_mb": 55.7
     },
     "django": {
-      "startup_ms": 232,
-      "idle_rss_mb": 277.8,
+      "startup_ms": 298,
+      "idle_rss_mb": 454.4,
       "scenarios": {
+        "hello": {
+          "path": "/hello",
+          "bytes": 28,
+          "rps": 1900.0,
+          "p50_ms": 3785.89,
+          "p99_ms": 4015.29,
+          "success_rate": 0.006187379152750923,
+          "status_codes": {
+            "200": 176
+          }
+        },
         "posts_json": {
           "path": "/posts.json",
           "bytes": 25453,
-          "rps": 2908.9,
-          "p50_ms": 21.0,
-          "p99_ms": 40.4,
-          "success_rate": 1.0,
+          "rps": 1991.8,
+          "p50_ms": 16.11,
+          "p99_ms": 36.91,
+          "success_rate": 0.5202052382709011,
           "status_codes": {
-            "200": 43581
+            "200": 15512
           }
         },
         "home_html": {
           "path": "/",
           "bytes": 25629,
-          "rps": 1384.4,
-          "p50_ms": 66.35,
-          "p99_ms": 1323.67,
-          "success_rate": 0.32108541354835596,
+          "rps": 932.5,
+          "p50_ms": 67.11,
+          "p99_ms": 98.14,
+          "success_rate": 1.0,
           "status_codes": {
-            "200": 6650
+            "200": 13927
           }
         },
         "api_list": {
           "path": "/api/posts/?limit=50",
           "bytes": 28165,
-          "rps": 1119.1,
-          "p50_ms": 55.22,
-          "p99_ms": 88.26,
+          "rps": 1132.1,
+          "p50_ms": 55.32,
+          "p99_ms": 78.78,
           "success_rate": 1.0,
           "status_codes": {
-            "200": 16743
+            "200": 16920
           }
         },
         "admin_changelist": {
           "path": "/admin/blog/post/",
           "bytes": 68988,
-          "rps": 211.0,
-          "p50_ms": 303.11,
-          "p99_ms": 375.58,
+          "rps": 209.2,
+          "p50_ms": 303.32,
+          "p99_ms": 413.23,
           "success_rate": 1.0,
           "status_codes": {
-            "200": 3106
+            "200": 3077
           }
         }
       },
-      "loaded_rss_mb": 510.7
+      "loaded_rss_mb": 636.1
+    },
+    "django_bolt": {
+      "startup_ms": 313,
+      "idle_rss_mb": 311.3,
+      "scenarios": {
+        "hello": {
+          "path": "/hello",
+          "bytes": 27,
+          "rps": 9018.6,
+          "p50_ms": 7.01,
+          "p99_ms": 8.37,
+          "success_rate": 1.0,
+          "status_codes": {
+            "200": 135242
+          }
+        },
+        "posts_json": {
+          "path": "/posts.json",
+          "bytes": 24754,
+          "rps": 250.1,
+          "p50_ms": 261.27,
+          "p99_ms": 312.66,
+          "success_rate": 1.0,
+          "status_codes": {
+            "200": 3688
+          }
+        }
+      },
+      "loaded_rss_mb": 944.9
     }
   }
 }

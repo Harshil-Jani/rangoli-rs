@@ -49,7 +49,13 @@ async fn main() -> rangoli::Result<()> {
         )
         .api::<Post>(Api::new().read(Access::Public)) // /api/blog_post/ and /api/schema.json
         .static_files("/static", "static")
-        .routes(Router::new().route("/", get(home)).route("/posts.json", get(posts)).route("/posts/{id}", get(post)))
+        .routes(
+            Router::new()
+                .route("/", get(home))
+                .route("/posts.json", get(posts))
+                .route("/hello", get(|| async { Json(serde_json::json!({ "message": "Hello, World!" })) }))
+                .route("/posts/{id}", get(post)),
+        )
         .run()
         .await
 }

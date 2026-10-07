@@ -138,6 +138,7 @@ version = "0.0.0"
 dependencies = [
  "rangoli",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

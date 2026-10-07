@@ -228,6 +228,7 @@ pub struct App {
     admin: Vec<(&'static ModelMeta, admin::Options)>,
     api: Vec<(&'static ModelMeta, api::Options)>,
     routes: Router,
+    request_timeout: Option<std::time::Duration>,
 }
 
 impl Default for App {
@@ -260,6 +261,7 @@ impl App {
                 ),
             ],
             api: vec![],
+            request_timeout: None,
             routes: Router::new(),
         }
     }
@@ -294,6 +296,12 @@ impl App {
         self.api.retain(|(m, _)| m.table != M::TABLE);
         self.api.push((M::meta(), settings.opts));
         self.model::<M>()
+    }
+
+    /// How long a request may take before it is answered with 503 (default `RANGOLI_REQUEST_TIMEOUT`).
+    pub fn request_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.request_timeout = Some(timeout);
+        self
     }
 
     /// Register a background task so workers in this process can run it.
@@ -335,7 +343,7 @@ impl App {
             .layer(from_fn(security_middleware))
             .layer(tower_http::timeout::TimeoutLayer::with_status_code(
                 StatusCode::SERVICE_UNAVAILABLE,
-                std::time::Duration::from_secs(settings().request_timeout),
+                self.request_timeout.unwrap_or(std::time::Duration::from_secs(settings().request_timeout)),
             ))
             // Outermost: a panic in any handler or middleware becomes one 500, never a dead server.
             .layer(tower_http::catch_panic::CatchPanicLayer::custom(panic_response))

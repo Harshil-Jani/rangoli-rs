@@ -148,8 +148,7 @@ for name, start, base, login in [("rangoli", run.start_rangoli, run.RANGOLI, "/a
             "cross_site_login_post": cross_site_post(base + login),
         }
     finally:
-        proc.terminate()
-        proc.wait()
+        run.stop(proc)
 out["security"] = sec
 
 # 5. Background tasks ------------------------------------------------------------------------
