@@ -24,7 +24,8 @@
       <span class="field-label">What it may do</span>
       <div class="field-control">
         <label class="check"><input type="checkbox" name="allow_writes"> Allow changes (add, edit and delete)</label>
-        <p class="help">Off by default: the agent can look things up but not change anything.</p>
+        <label class="check"><input type="checkbox" name="ask_first" checked> Ask me before each change</label>
+        <p class="help">Off by default: the agent can look things up but not change anything. With changes allowed and "ask me" on, each change waits for you under Pending changes.</p>
       </div>
     </div>
     {% if choices %}

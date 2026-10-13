@@ -1,0 +1,29 @@
+{
+  "operations": [
+    { "op": "add_column", "table": "rangoli_api_token", "column": { "name": "needs_approval", "type": "bool" }, "default": false },
+    {
+      "op": "create_table",
+      "table": "rangoli_pending_change",
+      "columns": [
+        { "name": "user_id", "type": "int", "fk": "rangoli_user", "cascade": true },
+        { "name": "token", "type": { "varchar": 100 } },
+        { "name": "summary", "type": { "varchar": 200 } },
+        { "name": "table_name", "type": { "varchar": 100 } },
+        { "name": "action", "type": { "varchar": 10 } },
+        { "name": "object_id", "type": "int", "null": true },
+        { "name": "payload", "type": "text" },
+        { "name": "via", "type": { "varchar": 20 } },
+        { "name": "status", "type": { "varchar": 16 } },
+        { "name": "created_at", "type": "date_time" },
+        { "name": "decided_by", "type": "int", "null": true },
+        { "name": "decided_at", "type": "date_time", "null": true },
+        { "name": "result", "type": "text", "null": true }
+      ]
+    },
+    {
+      "op": "add_index",
+      "table": "rangoli_pending_change",
+      "index": { "name": "rangoli_pending_change_status_created_at_idx", "columns": ["status", "created_at"] }
+    }
+  ]
+}

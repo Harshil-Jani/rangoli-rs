@@ -152,6 +152,7 @@ async fn reset(db: &orm::Db) {
         "blog_tag",
         "blog_post",
         "e2e_note",
+        "rangoli_pending_change",
         "rangoli_api_token",
         "rangoli_login_failure",
         "rangoli_session",
@@ -1081,7 +1082,7 @@ async fn scenario() {
     let (_, _, body) = send(bearer("POST", "/mcp", &careful, &call("blog_post_create", serde_json::from_str(&blocked).unwrap()))).await;
     assert_eq!(json(&body)["result"]["structuredContent"]["status"], 403, "and over MCP even when the agent calls a tool it wasn't shown");
     let root_user = auth::User::objects().filter(auth::User::USERNAME.eq("root")).get().await.unwrap();
-    let notes_only = auth::TokenScope { read_only: false, tables: Some(vec!["e2e_note".into()]) };
+    let notes_only = auth::TokenScope { tables: Some(vec!["e2e_note".into()]), ..Default::default() };
     let (_, narrow) = auth::create_scoped_token(&root_user, "notes bot", None, &notes_only).await.unwrap();
     assert_eq!(
         send(bearer("GET", "/api/blog_post/", &narrow, "")).await.0,
@@ -1124,6 +1125,53 @@ async fn scenario() {
     assert!(!body.contains("\"secret\""), "or know it exists");
     let (_, _, schema) = send(get("/api/schema.json", "")).await;
     assert!(!schema.contains("\"secret\""), "nor does the OpenAPI document");
+
+    // ---- approvals: an "ask me first" agent's writes wait for a person
+    let (_, _, page4) = send(form("/admin/agents/", &cookie, "name=Cautious+writer&days=7&allow_writes=on&ask_first=on")).await;
+    let asker = token_on(&page4);
+    assert!(page4.contains("waits for your approval"), "the page explains it");
+    let wanted = serde_json::json!({ "title": "Needs a human", "body": "b", "author_id": alan.id.unwrap(), "views": 0, "price": "1" });
+    let (_, _, body) = send(bearer("POST", "/mcp", &asker, &call("blog_post_create", wanted.clone()))).await;
+    let held = &json(&body)["result"]["structuredContent"];
+    assert_eq!(held["pending"], true, "{body}");
+    let approval = held["approval_id"].as_i64().unwrap();
+    let titled = |t: &'static str| PostV2::objects().filter(PostV2::TITLE.eq(t)).count();
+    assert_eq!(titled("Needs a human").await.unwrap(), 0, "nothing is written yet");
+    let (_, _, body) = send(bearer("POST", "/mcp", &asker, &call("approval_status", serde_json::json!({ "approval_id": approval })))).await;
+    assert_eq!(json(&body)["result"]["structuredContent"]["status"], "pending");
+    let (_, _, body) = send(bearer("POST", "/mcp", &at, &call("approval_status", serde_json::json!({ "approval_id": approval })))).await;
+    assert_eq!(json(&body)["result"]["structuredContent"]["error"], "No such approval for you.", "other users can't see it");
+    let (status, _, body) = send(bearer("POST", "/api/blog_post/", &asker, r#"{"title": ""}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "invalid requests fail at once, they aren't queued: {body}");
+    let (_, _, queue_page) = send(get("/admin/rangoli_pending_change/", &cookie)).await;
+    assert!(
+        queue_page.contains("Add a blog post") && queue_page.contains("Cautious writer") && queue_page.contains("Approve selected changes")
+    );
+    let (_, headers, _) =
+        send(form("/admin/rangoli_pending_change/", &cookie, &format!("action=approve&_selected_action={approval}"))).await;
+    let (_, _, done) = send(get(headers[header::LOCATION].to_str().unwrap(), &cookie)).await;
+    assert!(done.contains("Applied “Approve selected changes” to 1 pending change."), "the admin confirms");
+    assert_eq!(titled("Needs a human").await.unwrap(), 1, "approved: now it's written");
+    let made = PostV2::objects().filter(PostV2::TITLE.eq("Needs a human")).get().await.unwrap().id.unwrap();
+    let (_, _, history) = send(get(&format!("/admin/blog_post/{made}/history"), &cookie)).await;
+    assert!(history.contains("Added via MCP, approved by root."), "History names who approved it");
+    let (_, _, body) = send(bearer("POST", "/mcp", &asker, &call("approval_status", serde_json::json!({ "approval_id": approval })))).await;
+    let st = &json(&body)["result"]["structuredContent"];
+    assert!(st["status"] == "approved" && st["result"]["title"] == "Needs a human", "the agent can see the outcome: {st}");
+    let (status, _, body) = send(bearer("DELETE", &format!("/api/blog_post/{made}"), &asker, "")).await;
+    assert_eq!((status, json(&body)["pending"].as_bool()), (StatusCode::ACCEPTED, Some(true)), "deletes wait too, over the API as well");
+    let delete_id = json(&body)["approval_id"].as_i64().unwrap();
+    assert_eq!(
+        send(bearer("DELETE", "/api/blog_post/999999", &asker, "")).await.0,
+        StatusCode::NOT_FOUND,
+        "a delete of nothing isn't queued"
+    );
+    send(form("/admin/rangoli_pending_change/", &cookie, &format!("action=reject&_selected_action={delete_id}"))).await;
+    assert_eq!(titled("Needs a human").await.unwrap(), 1, "rejected: the post survives");
+    let decided = rangoli::approvals::PendingChange::get(delete_id).await.unwrap();
+    assert_eq!(decided.status, rangoli::approvals::ApprovalStatus::Rejected);
+    send(form("/admin/rangoli_pending_change/", &cookie, &format!("action=approve&_selected_action={delete_id}"))).await;
+    assert_eq!(titled("Needs a human").await.unwrap(), 1, "a decided change can't be approved later");
 
     // ---- rate limits: a runaway client or agent gets 429s, not the database
     // The limit is per calendar minute: don't straddle a minute boundary, or the count resets mid-test.

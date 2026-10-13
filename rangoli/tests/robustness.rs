@@ -211,6 +211,7 @@ async fn the_framework_never_takes_the_server_down() {
         "fz_post",
         "fz_tag",
         "fz_author",
+        "rangoli_pending_change",
         "rangoli_api_token",
         "rangoli_login_failure",
         "rangoli_session",
@@ -341,7 +342,7 @@ async fn the_framework_never_takes_the_server_down() {
         let qs: Vec<(String, String)> = (0..rng.below(5)).map(|_| (rng.pick(PARAMS).to_string(), rng.string())).collect();
         let uri = format!(
             "/admin/{}/?{}",
-            rng.pick(&["fz_post", "fz_author", "fz_tag", "rangoli_user", "rangoli_task", "rangoli_api_token"]),
+            rng.pick(&["fz_post", "fz_author", "fz_tag", "rangoli_user", "rangoli_task", "rangoli_api_token", "rangoli_pending_change"]),
             serde_urlencoded::to_string(&qs).unwrap()
         );
         let (s, b) = send(get(uri.clone(), &cookie)).await;

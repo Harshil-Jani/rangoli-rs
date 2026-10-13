@@ -483,8 +483,8 @@ async fn detail(State(site): S, user: CurrentUser, scope: ScopeExt, Path((table,
 
 /// How a write arrived, for the admin History. Set by the MCP server on its internal requests
 /// (a request extension, so no client can claim it); plain API calls have none.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Via(pub(crate) &'static str);
+#[derive(Clone, Debug)]
+pub(crate) struct Via(pub(crate) String);
 
 type ViaExt = Option<axum::Extension<Via>>;
 
@@ -511,10 +511,32 @@ async fn audit(user: &CurrentUser, meta: &'static ModelMeta, id: i64, action: i6
         object_id: id,
         object_repr: repr_of(meta, id).await?.chars().take(200).collect(),
         action,
-        message: format!("{verb} via {}.", via.map_or("the API", |v| v.0)),
+        message: format!("{verb} via {}.", via.as_ref().map_or("the API", |v| v.0.as_str())),
         at: auth::now(),
     };
     entry.save().await
+}
+
+/// For a token that needs approval, store this (already validated) write as a pending change
+/// and answer 202; `None` means go ahead and write.
+#[allow(clippy::too_many_arguments)]
+async fn hold(
+    scope: &ScopeExt,
+    user: &CurrentUser,
+    via: &Option<Via>,
+    table: &str,
+    action: &str,
+    id: Option<i64>,
+    body: Option<&JsonValue>,
+) -> Result<Option<Response>, Response> {
+    let (Some(axum::Extension(scope)), Some(u)) = (scope, &user.0) else { return Ok(None) };
+    if !scope.needs_approval {
+        return Ok(None);
+    }
+    let via = via.as_ref().map(|v| v.0.as_str());
+    let pending = crate::approvals::queue(u, scope, via, table, action, id, body).await.map_err(fail)?;
+    let detail = "Waiting for a person to approve this in the admin (Pending changes).";
+    Ok(Some((StatusCode::ACCEPTED, Json(json!({ "pending": true, "approval_id": pending, "detail": detail }))).into_response()))
 }
 
 async fn create(
@@ -534,6 +556,9 @@ async fn create(
     let body = claim(opts, &user, &body, true);
     let cols = columns(meta, &body, true, false).await?;
     let links = body_links(meta, &body)?;
+    if let Some(held) = hold(&scope, &user, &via, &table, "create", None, Some(&body)).await? {
+        return Ok(held);
+    }
     let id = crate::atomic(async {
         let id = orm::insert_row(meta.table, &cols).await?;
         for (through, ids) in &links {
@@ -563,6 +588,9 @@ async fn update(
     let body = &claim(opts, user, body, false);
     let cols = columns(meta, body, false, partial).await?;
     let links = body_links(meta, body)?;
+    if let Some(held) = hold(scope, user, &via, table, if partial { "update" } else { "replace" }, Some(id), Some(body)).await? {
+        return Ok(held);
+    }
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
     crate::atomic(async {
@@ -606,12 +634,19 @@ async fn patch(
 
 async fn remove(State(site): S, user: CurrentUser, scope: ScopeExt, via: ViaExt, Path((table, id)): Path<(String, i64)>) -> Reply {
     let (meta, opts) = endpoint(&site, &table, &user, &scope, true)?;
+    let via = via.map(|v| v.0);
+    if scope.as_ref().is_some_and(|s| s.needs_approval) {
+        fetch(meta, id, ownership(opts, &user)).await?; // only queue a delete of a row the caller can see
+    }
+    if let Some(held) = hold(&scope, &user, &via, &table, "delete", Some(id), None).await? {
+        return Ok(held);
+    }
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
     q.filter.extend(owned(ownership(opts, &user)));
     // Logged first (it needs the row's name); a delete that finds nothing rolls the entry back.
     crate::atomic(async {
-        audit(&user, meta, id, 3, "Deleted", via.map(|v| v.0)).await?;
+        audit(&user, meta, id, 3, "Deleted", via).await?;
         match q.delete().await? {
             0 => Err(Error::NotFound),
             _ => Ok(()),

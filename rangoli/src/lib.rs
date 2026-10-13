@@ -14,6 +14,7 @@ extern crate self as rangoli;
 
 pub mod admin;
 pub mod api;
+pub mod approvals;
 pub mod auth;
 pub mod datetime;
 pub mod decimal;
@@ -276,11 +277,52 @@ impl App {
                 auth::Session::meta(),
                 auth::ApiToken::meta(),
                 auth::LoginFailure::meta(),
+                approvals::PendingChange::meta(),
                 admin::LogEntry::meta(),
                 tasks::TaskRecord::meta(),
             ],
             admin: vec![
                 (auth::User::meta(), admin::Options::default()),
+                (
+                    approvals::PendingChange::meta(),
+                    // What agents asked to change, waiting for a person. Approve or reject in bulk.
+                    admin::ModelAdmin::<approvals::PendingChange>::new()
+                        .list_display([
+                            &approvals::PendingChange::SUMMARY,
+                            &approvals::PendingChange::TOKEN,
+                            &approvals::PendingChange::USER_ID,
+                            &approvals::PendingChange::STATUS,
+                            &approvals::PendingChange::CREATED_AT,
+                        ])
+                        .list_filter([&approvals::PendingChange::STATUS, &approvals::PendingChange::CREATED_AT])
+                        .readonly_fields([
+                            &approvals::PendingChange::USER_ID,
+                            &approvals::PendingChange::TOKEN,
+                            &approvals::PendingChange::SUMMARY,
+                            &approvals::PendingChange::TABLE_NAME,
+                            &approvals::PendingChange::ACTION,
+                            &approvals::PendingChange::OBJECT_ID,
+                            &approvals::PendingChange::PAYLOAD,
+                            &approvals::PendingChange::VIA,
+                            &approvals::PendingChange::STATUS,
+                            &approvals::PendingChange::DECIDED_BY,
+                            &approvals::PendingChange::DECIDED_AT,
+                            &approvals::PendingChange::RESULT,
+                        ])
+                        .ordering(approvals::PendingChange::ID.desc())
+                        .no_add()
+                        .action(
+                            "approve",
+                            "Approve selected changes",
+                            |selected| async move { approvals::approve(selected.all().await?).await },
+                        )
+                        .action(
+                            "reject",
+                            "Reject selected changes",
+                            |selected| async move { approvals::reject(selected.all().await?).await },
+                        )
+                        .opts,
+                ),
                 (
                     auth::ApiToken::meta(),
                     // Made with `createtoken` or `auth::create_token`, which show the token once.
@@ -433,7 +475,11 @@ impl App {
         #[cfg(feature = "admin")]
         let routes = routes.merge(admin::router(self.admin.clone(), self.models.clone()));
         routes
-            .merge(limited(api::router(self.api.clone()), self.api_rate))
+            .merge({
+                // Approved changes replay through an un-limited copy of the API.
+                approvals::set_api(api::router(self.api.clone()));
+                limited(api::router(self.api.clone()), self.api_rate)
+            })
             .merge(limited(mcp::router(self.api.clone()), self.mcp_rate))
             .layer(from_fn(auth::session_middleware))
             .layer(from_fn(security_middleware))
@@ -470,7 +516,7 @@ impl App {
         }
         if matches!(cmd, "help" | "--help" | "-h") {
             println!(
-                "commands:\n  runserver [addr]            serve the app (default {})\n  migrate [--check]           apply pending migrations\n  makemigrations [name] [--check]\n  createsuperuser [username]  password from RANGOLI_PASSWORD or a prompt\n  createtoken <username> [name] [--days N] [--read-only] [--tables a,b]  print a new API token (shown once)\n  worker                      run background tasks (RANGOLI_WORKERS loops)",
+                "commands:\n  runserver [addr]            serve the app (default {})\n  migrate [--check]           apply pending migrations\n  makemigrations [name] [--check]\n  createsuperuser [username]  password from RANGOLI_PASSWORD or a prompt\n  createtoken <username> [name] [--days N] [--read-only] [--needs-approval] [--tables a,b]  print a new API token (shown once)\n  worker                      run background tasks (RANGOLI_WORKERS loops)",
                 s.bind
             );
             return Ok(());
@@ -518,8 +564,9 @@ impl App {
                 println!("Superuser `{username}` created.");
             }
             "createtoken" => {
-                let username = positional
-                    .ok_or_else(|| Error::Config("usage: createtoken <username> [name] [--days N] [--read-only] [--tables a,b]".into()))?;
+                let username = positional.ok_or_else(|| {
+                    Error::Config("usage: createtoken <username> [name] [--days N] [--read-only] [--needs-approval] [--tables a,b]".into())
+                })?;
                 let user = auth::User::objects().filter(auth::User::USERNAME.eq(username)).get().await?;
                 let args: Vec<String> = std::env::args().collect();
                 let after = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).cloned();
@@ -529,7 +576,12 @@ impl App {
                     args.iter().skip_while(|a| *a != username).nth(1).filter(|a| !a.starts_with("--")).cloned().unwrap_or("cli".into());
                 let tables =
                     after("--tables").map(|t| t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>());
-                let scope = auth::TokenScope { read_only: flag("--read-only"), tables: tables.filter(|t| !t.is_empty()) };
+                let scope = auth::TokenScope {
+                    read_only: flag("--read-only"),
+                    tables: tables.filter(|t| !t.is_empty()),
+                    needs_approval: flag("--needs-approval"),
+                    ..Default::default()
+                };
                 let ttl = days.map(|d| std::time::Duration::from_secs(d * 86_400));
                 let (_, token) = auth::create_scoped_token(&user, &name, ttl, &scope).await?;
                 println!("{token}");

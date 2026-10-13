@@ -173,12 +173,23 @@ fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonV
             out.push(tool);
         }
     }
+    if scope.is_some_and(|s| s.needs_approval) {
+        out.push(json!({
+            "name": "approval_status",
+            "description": "Your changes wait for a person to approve them. Check one by the approval_id a write returned: pending, approved (with the saved row), rejected or failed.",
+            "inputSchema": { "type": "object", "properties": { "approval_id": { "type": "integer" } }, "required": ["approval_id"] },
+            "annotations": { "readOnlyHint": true },
+        }));
+    }
     out
 }
 
 /// Run a tool by sending the matching request through the JSON API as this user.
 /// `None` for an unknown tool name.
 async fn call(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>, name: &str, args: &JsonValue) -> Option<JsonValue> {
+    if name == "approval_status" {
+        return Some(approval_status(user, args).await);
+    }
     let (table, op) = name.rsplit_once('_')?;
     mcp.models.iter().find(|(m, _)| m.table == table)?;
     let id = || args["id"].as_i64();
@@ -210,7 +221,7 @@ async fn call(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>, name: &
     let mut req = Request::builder().method(method).uri(path).header(header::CONTENT_TYPE, "application/json");
     let ext = req.extensions_mut()?;
     ext.insert(user.clone());
-    ext.insert(Via("MCP"));
+    ext.insert(Via("MCP".into()));
     if let Some(scope) = scope {
         ext.insert(scope.clone()); // the API enforces it on every tool call, not just the tool list
     }
@@ -230,4 +241,27 @@ async fn call(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>, name: &
         "structuredContent": structured,
         "isError": !status.is_success(),
     }))
+}
+
+/// The caller's own pending change, by id: its status and, once decided, what happened.
+async fn approval_status(user: &CurrentUser, args: &JsonValue) -> JsonValue {
+    use crate::approvals::PendingChange;
+    use crate::orm::Model;
+    let mine = match (args["approval_id"].as_i64(), user.0.as_ref().and_then(|u| u.id)) {
+        (Some(id), Some(uid)) => {
+            PendingChange::objects().filter(PendingChange::ID.eq(id) & PendingChange::USER_ID.eq(uid)).first().await.ok().flatten()
+        }
+        _ => None,
+    };
+    let structured = match mine {
+        Some(c) => json!({
+            "approval_id": c.id,
+            "summary": c.summary,
+            "status": crate::orm::Choice::as_str(c.status),
+            "result": c.result.as_deref().map(|r| serde_json::from_str::<JsonValue>(r).unwrap_or(json!(r))),
+        }),
+        None => json!({ "error": "No such approval for you." }),
+    };
+    let is_error = structured.get("error").is_some();
+    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&structured).unwrap_or_default() }], "structuredContent": structured, "isError": is_error })
 }

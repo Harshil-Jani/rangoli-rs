@@ -13,6 +13,16 @@ mod views;
 #[cfg(feature = "admin")]
 pub use views::router;
 
+tokio::task_local! {
+    /// The staff user running the current admin action.
+    pub(crate) static ACTING: crate::auth::User;
+}
+
+/// Who is running the admin action in progress, for actions that record a decision.
+pub fn acting_user() -> Option<crate::auth::User> {
+    ACTING.try_with(Clone::clone).ok()
+}
+
 /// One admin action, like Django's `LogEntry`. Powers "Recent actions" and History.
 #[derive(rangoli_macros::Model, Clone, Debug)]
 #[model(table = "rangoli_admin_log")]

@@ -152,12 +152,21 @@ async fn agents_submit(State(site): S, user: CurrentUser, uri: Uri, headers: axu
     let known = agent_tables(&site);
     let picked: Vec<String> =
         f.iter().filter(|(k, _)| k == "tables").filter(|(_, v)| known.iter().any(|(t, _)| t == v)).map(|(_, v)| v.clone()).collect();
-    let scope = auth::TokenScope { read_only: param(&f, "allow_writes") != Some("on"), tables: (!picked.is_empty()).then_some(picked) };
+    let writes = param(&f, "allow_writes") == Some("on");
+    let scope = auth::TokenScope {
+        read_only: !writes,
+        tables: (!picked.is_empty()).then_some(picked),
+        needs_approval: writes && param(&f, "ask_first") == Some("on"),
+        ..Default::default()
+    };
     let (_, token) = auth::create_scoped_token(u, &name, ttl, &scope).await.map_err(fail)?;
     let url = mcp_url(&headers);
     let tokens = agent_rows(u).await?;
     let can = match (&scope.read_only, &scope.tables) {
         (true, None) => "It can read everything you can, and change nothing.".to_string(),
+        (false, None) if scope.needs_approval => {
+            "It can read everything you can; each change it asks for waits for your approval under Pending changes.".to_string()
+        }
         (false, None) => "It can read and change everything you can.".to_string(),
         (ro, Some(ts)) => format!("It can {} only these tables: {}.", if *ro { "read" } else { "read and change" }, ts.join(", ")),
     };
@@ -783,7 +792,7 @@ async fn bulk(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
         // Only rows that still exist count; the action and its History entries commit together.
         let found: Vec<i64> = rows.iter().map(|(id, _)| *id).collect();
         let outcome = crate::atomic(async {
-            (action.run)(found.clone()).await?;
+            super::ACTING.scope(u.clone(), (action.run)(found.clone())).await?;
             for (id, vals) in &rows {
                 log(u, meta, *id, &repr(meta, *id, vals), CHANGE, format!("Ran the “{}” action.", action.label)).await?;
             }

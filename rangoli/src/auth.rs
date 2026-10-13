@@ -62,6 +62,8 @@ pub struct ApiToken {
     /// all its user can reach. Others look like they don't exist (404, and no MCP tools).
     #[field(text)]
     pub tables: Option<String>,
+    /// Writes wait in the admin's Pending changes until a person approves them.
+    pub needs_approval: bool,
 }
 
 /// What a token may do beyond its user's own rights. Set on bearer requests only; sessions
@@ -70,6 +72,10 @@ pub struct ApiToken {
 pub struct TokenScope {
     pub read_only: bool,
     pub tables: Option<Vec<String>>,
+    /// Writes become pending changes for a person to approve in the admin.
+    pub needs_approval: bool,
+    /// The token's name, shown to reviewers ("Claude on my laptop").
+    pub token: String,
 }
 
 impl TokenScope {
@@ -79,7 +85,7 @@ impl TokenScope {
             .as_deref()
             .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect::<Vec<_>>())
             .filter(|v| !v.is_empty());
-        TokenScope { read_only: t.read_only, tables }
+        TokenScope { read_only: t.read_only, tables, needs_approval: t.needs_approval, token: t.name.clone() }
     }
 
     /// May this token see `table` at all?
@@ -123,6 +129,7 @@ pub async fn create_scoped_token(
         expires_at: valid_for.map(|d| DateTime::from_unix(now() + d.as_secs() as i64)),
         read_only: scope.read_only,
         tables: scope.tables.as_ref().map(|t| t.join(",")),
+        needs_approval: scope.needs_approval,
     };
     row.save().await?;
     Ok((row, token))
