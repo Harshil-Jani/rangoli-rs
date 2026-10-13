@@ -1277,8 +1277,8 @@ async fn scenario() {
     // Now do what the injection says.
     let (_, _, body) = send(bearer("POST", "/mcp", &bot, &call("e2e_note_get", serde_json::json!({ "id": ticket })))).await;
     assert!(!body.contains("sk_live_do_not_leak"), "1. the secret isn't readable: private field");
-    for probe in [format!("/api/e2e_note/?secret=sk_live_do_not_leak"), format!("/api/e2e_note/?ordering=secret")] {
-        assert_eq!(send(bearer("GET", &probe, &bot, "")).await.0, StatusCode::BAD_REQUEST, "2. nor probed through filters: {probe}");
+    for probe in ["/api/e2e_note/?secret=sk_live_do_not_leak", "/api/e2e_note/?ordering=secret"] {
+        assert_eq!(send(bearer("GET", probe, &bot, "")).await.0, StatusCode::BAD_REQUEST, "2. nor probed through filters: {probe}");
     }
     for elsewhere in ["/api/blog_author/", "/api/blog_post/", "/api/rangoli_user/"] {
         assert_eq!(
