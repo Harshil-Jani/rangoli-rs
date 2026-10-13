@@ -71,6 +71,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         .route("/admin/{table}/{id}/", get(change_page).post(change_submit))
         .route("/admin/{table}/{id}/delete", get(delete_page).post(delete_submit))
         .route("/admin/{table}/{id}/history", get(history))
+        .route("/admin/{table}/{id}/undo/{entry}", post(undo))
         .with_state(Arc::new(Site { admin, options, models, env, version }))
 }
 
@@ -354,6 +355,7 @@ async fn log(u: &User, meta: &ModelMeta, object_id: i64, object_repr: &str, acti
         action,
         message,
         at: auth::now(),
+        snapshot: None,
     };
     e.save().await?;
     Ok(e.id.unwrap())
@@ -1229,13 +1231,19 @@ async fn delete_submit(State(site): S, user: CurrentUser, uri: Uri, Path((table,
 async fn history(State(site): S, user: CurrentUser, uri: Uri, Path((table, id)): Path<(String, i64)>) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
-    let obj = repr(meta, id, &fetch_row(meta, id).await?);
     let entries = LogEntry::objects()
         .filter(LogEntry::TABLE_NAME.eq(table.as_str()) & LogEntry::OBJECT_ID.eq(id))
         .order_by(LogEntry::ID.asc())
         .all()
         .await
         .map_err(fail)?;
+    // A deleted row still has a history (and an undo): name it as the log last did.
+    let obj = match row_values(meta, id).await {
+        Ok(vals) => repr(meta, id, &vals),
+        Err(Error::NotFound) => entries.last().map(|e| e.object_repr.clone()).ok_or_else(|| StatusCode::NOT_FOUND.into_response())?,
+        Err(e) => return Err(fail(e)),
+    };
+    let newest_undoable = entries.iter().rev().find(|e| undoable(e)).and_then(|e| e.id);
     let users = User::in_bulk(entries.iter().map(|e| e.user_id)).await.map_err(fail)?;
     let rows: Vec<_> = entries
         .iter()
@@ -1244,10 +1252,80 @@ async fn history(State(site): S, user: CurrentUser, uri: Uri, Path((table, id)):
                 at => DateTime::from_unix(e.at).human(),
                 user => users.get(&e.user_id).map_or("(deleted user)".to_string(), |u| u.username.clone()),
                 message => e.message,
+                undo => (e.id == newest_undoable).then(|| format!("/admin/{}/{}/undo/{}", e.table_name, e.object_id, e.id.unwrap_or(0))),
             }
         })
         .collect();
     render(&site, "history.html", context! { title => format!("Change history: {obj}"), obj, id, rows, ..chrome(&site, u, Some(meta)) })
+}
+
+/// API and MCP writes can be undone from History (the newest one at a time, so undos never
+/// skip over a later change).
+fn undoable(e: &LogEntry) -> bool {
+    e.message.contains(" via ") && !e.message.starts_with("Undid") && (e.action == ADDITION || e.snapshot.is_some())
+}
+
+/// Reverse one API or MCP write: remove what was added, restore what was changed, bring back
+/// what was deleted (with its id). Runs in one transaction with its own History entry.
+async fn undo(State(site): S, user: CurrentUser, uri: Uri, Path((table, id, entry)): Path<(String, i64, i64)>) -> Page {
+    let u = staff(&user, &uri)?;
+    let meta = model(&site, &table)?;
+    let e = LogEntry::get(entry).await.map_err(fail)?;
+    let newest = LogEntry::objects()
+        .filter(LogEntry::TABLE_NAME.eq(table.as_str()) & LogEntry::OBJECT_ID.eq(id))
+        .order_by(LogEntry::ID.desc())
+        .all()
+        .await
+        .map_err(fail)?
+        .into_iter()
+        .find(undoable);
+    if e.table_name != table || e.object_id != id || newest.and_then(|n| n.id) != Some(entry) {
+        return Err(StatusCode::CONFLICT.into_response()); // not this row's newest undoable change
+    }
+    let restore = |snap: &str| -> crate::Result<Vec<(&'static str, Value, FieldType)>> {
+        let obj: serde_json::Map<String, serde_json::Value> = serde_json::from_str(snap).map_err(|e| Error::Decode(e.to_string()))?;
+        meta.fields
+            .iter()
+            .filter_map(|f| obj.get(f.name).map(|j| (f, j)))
+            .map(|(f, j)| {
+                let v: Value = serde_json::from_value(j.clone()).map_err(|e| Error::Decode(e.to_string()))?;
+                let v = match (f.ty, v) {
+                    (FieldType::Encrypted, Value::Text(s)) => Value::Text(crate::crypt::decrypt(&s)?),
+                    (_, v) => v,
+                };
+                Ok((f.name, v, f.ty))
+            })
+            .collect()
+    };
+    let what = e.message.trim_end_matches('.').to_string();
+    let log_id = crate::atomic(async {
+        let mut q = Query::new(meta);
+        q.filter.push(by_id(id));
+        let (action, verb) = match e.action {
+            ADDITION => {
+                q.delete().await?;
+                (DELETION, "deleted")
+            }
+            CHANGE => {
+                q.update(&restore(e.snapshot.as_deref().unwrap_or("{}"))?).await?;
+                (CHANGE, "restored")
+            }
+            _ => {
+                orm::insert_row_with_id(meta.table, id, &restore(e.snapshot.as_deref().unwrap_or("{}"))?).await?;
+                (ADDITION, "restored")
+            }
+        };
+        let name = match row_values(meta, id).await {
+            Ok(vals) => repr(meta, id, &vals),
+            Err(_) => e.object_repr.clone(),
+        };
+        log(u, meta, id, &name, action, format!("Undid “{what}”: {verb}.")).await
+    })
+    .await;
+    match log_id {
+        Ok(log_id) => Ok(Redirect::to(&format!("/admin/{table}/{id}/history?undone={log_id}")).into_response()),
+        Err(err) => Err(fail(err)),
+    }
 }
 
 #[cfg(test)]

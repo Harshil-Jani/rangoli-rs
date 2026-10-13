@@ -40,6 +40,10 @@ pub struct LogEntry {
     #[field(text)]
     pub message: String,
     pub at: i64,
+    /// The row before an API or MCP change or delete, as JSON (`{field: value}`), so History can
+    /// undo it. Encrypted fields stay encrypted in here.
+    #[field(text)]
+    pub snapshot: Option<String>,
 }
 
 // ---------------------------------------------------------------- ModelAdmin

@@ -1,0 +1,5 @@
+{
+  "operations": [
+    { "op": "add_column", "table": "rangoli_admin_log", "column": { "name": "snapshot", "type": "text", "null": true } }
+  ]
+}

@@ -1071,6 +1071,18 @@ fn ids_by_key(found: &[(i64, Vec<Value>)], meta: &ModelMeta, col: &str, keys: &[
         .collect()
 }
 
+/// INSERT with a given id: how an undone delete comes back as the same row.
+#[cfg(feature = "admin")]
+pub(crate) async fn insert_row_with_id(table: &str, id: i64, cols: &[(&str, Value, FieldType)]) -> Result<()> {
+    let mut all = vec![("id", Value::Int(id), FieldType::Int)];
+    all.extend(cols.iter().cloned());
+    let d = db().dialect;
+    let names: Vec<String> = all.iter().map(|(c, ..)| d.quote(c)).collect();
+    let phs: Vec<String> = (1..=all.len()).map(|i| d.ph(i)).collect();
+    let sql = format!("INSERT INTO {} ({}) VALUES ({})", d.quote(table), names.join(", "), phs.join(", "));
+    execute(&sql, &all.into_iter().map(|(_, v, t)| (v, t)).collect()).await.map(drop)
+}
+
 pub(crate) fn by_id(id: i64) -> Node {
     Node::Cmp("id", "=", Value::Int(id), FieldType::Int)
 }

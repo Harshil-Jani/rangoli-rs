@@ -532,7 +532,31 @@ async fn repr_of(meta: &'static ModelMeta, id: i64) -> crate::Result<String> {
 
 /// Record a write in the admin History, in the write's own transaction, so an app's or an AI
 /// agent's changes are reviewable next to the admin's. Anonymous writes have no user to name.
-async fn audit(user: &CurrentUser, meta: &'static ModelMeta, id: i64, action: i64, verb: &str, via: Option<Via>) -> crate::Result<()> {
+/// The row as it is now, as JSON for undo: `{field: value}`, encrypted fields still encrypted.
+async fn snapshot(meta: &'static ModelMeta, id: i64) -> crate::Result<String> {
+    let mut q = Query::new(meta);
+    q.filter.push(by_id(id));
+    let (_, vals) = q.rows().await?.pop().ok_or(Error::NotFound)?;
+    let mut obj = Map::new();
+    for (f, v) in meta.fields.iter().zip(vals) {
+        let v = match (f.ty, v) {
+            (FieldType::Encrypted, Value::Text(s)) => Value::Text(crate::crypt::encrypt(&s)),
+            (_, v) => v,
+        };
+        obj.insert(f.name.into(), serde_json::to_value(v).unwrap_or(JsonValue::Null));
+    }
+    Ok(JsonValue::Object(obj).to_string())
+}
+
+async fn audit(
+    user: &CurrentUser,
+    meta: &'static ModelMeta,
+    id: i64,
+    action: i64,
+    verb: &str,
+    via: Option<Via>,
+    before: Option<String>,
+) -> crate::Result<()> {
     let Some(user_id) = user.0.as_ref().and_then(|u| u.id) else { return Ok(()) };
     let mut entry = crate::admin::LogEntry {
         id: None,
@@ -543,6 +567,7 @@ async fn audit(user: &CurrentUser, meta: &'static ModelMeta, id: i64, action: i6
         action,
         message: format!("{verb} via {}.", via.as_ref().map_or("the API", |v| v.0.as_str())),
         at: auth::now(),
+        snapshot: before,
     };
     entry.save().await
 }
@@ -594,7 +619,7 @@ async fn create(
         for (through, ids) in &links {
             orm::set_links(through, id, ids.as_deref().unwrap_or_default()).await?;
         }
-        audit(&user, meta, id, 1, "Added", via).await?;
+        audit(&user, meta, id, 1, "Added", via, None).await?;
         Ok(id)
     })
     .await
@@ -624,6 +649,7 @@ async fn update(
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
     crate::atomic(async {
+        let before = snapshot(meta, id).await?;
         q.update(&cols).await?;
         for (through, ids) in &links {
             match ids {
@@ -632,7 +658,7 @@ async fn update(
                 None => {}
             }
         }
-        audit(user, meta, id, 2, "Changed", via).await?;
+        audit(user, meta, id, 2, "Changed", via, Some(before)).await?;
         Ok(())
     })
     .await
@@ -676,7 +702,8 @@ async fn remove(State(site): S, user: CurrentUser, scope: ScopeExt, via: ViaExt,
     q.filter.extend(owned(ownership(opts, &user)));
     // Logged first (it needs the row's name); a delete that finds nothing rolls the entry back.
     crate::atomic(async {
-        audit(&user, meta, id, 3, "Deleted", via).await?;
+        let before = snapshot(meta, id).await?;
+        audit(&user, meta, id, 3, "Deleted", via, Some(before)).await?;
         match q.delete().await? {
             0 => Err(Error::NotFound),
             _ => Ok(()),

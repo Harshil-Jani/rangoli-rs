@@ -4,8 +4,8 @@
 {% if rows %}
 <div class="table-wrap">
   <table class="results" id="change-history">
-    <thead><tr><th scope="col">Date and time</th><th scope="col">User</th><th scope="col">Action</th></tr></thead>
-    <tbody>{% for r in rows %}<tr><td class="nowrap">{{ r.at }}</td><td>{{ r.user }}</td><td>{{ r.message }}</td></tr>{% endfor %}</tbody>
+    <thead><tr><th scope="col">Date and time</th><th scope="col">User</th><th scope="col">Action</th><th scope="col"><span class="sr">Undo</span></th></tr></thead>
+    <tbody>{% for r in rows %}<tr><td class="nowrap">{{ r.at }}</td><td>{{ r.user }}</td><td>{{ r.message }}</td><td class="shrink">{% if r.undo %}<form method="post" action="{{ r.undo }}"><button type="submit" class="btn">Undo</button></form>{% endif %}</td></tr>{% endfor %}</tbody>
   </table>
 </div>
 {% else %}

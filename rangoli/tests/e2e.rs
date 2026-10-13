@@ -401,6 +401,7 @@ async fn scenario() {
         .task::<Flaky>()
         .task::<Explodes>()
         .api::<Note>(Api::new().read(Access::Authenticated).write(Access::Public).owned_by(&Note::OWNER_ID))
+        .admin::<Note>()
         .api::<PostV2>(Api::new().read(Access::Public))
         .templates(dir.join("templates"))
         .static_files("/static", dir.join("static"))
@@ -1263,6 +1264,82 @@ async fn scenario() {
     assert_eq!(decided.status, rangoli::approvals::ApprovalStatus::Rejected);
     send(form("/admin/rangoli_pending_change/", &cookie, &format!("action=approve&_selected_action={delete_id}"))).await;
     assert_eq!(titled("Needs a human").await.unwrap(), 1, "a decided change can't be approved later");
+
+    // ---- undo from History: reverse what an agent did
+    // Attributes are HTML-escaped (`/` is `&#x2f;`), as a browser would decode them.
+    let undo_url = |page: &str| {
+        let page = page.replace("&#x2f;", "/");
+        page.split("action=\"").filter_map(|r| r.split('"').next()).find(|u| u.contains("/undo/")).map(str::to_owned)
+    };
+    let (_, _, body) = send(bearer(
+        "POST",
+        "/mcp",
+        &token,
+        &call(
+            "blog_post_create",
+            serde_json::json!({ "title": "Undo me", "body": "original", "author_id": alan.id.unwrap(), "views": 1, "price": "3" }),
+        ),
+    ))
+    .await;
+    let victim = json(&body)["result"]["structuredContent"]["id"].as_i64().unwrap();
+    send(bearer(
+        "POST",
+        "/mcp",
+        &token,
+        &call("blog_post_update", serde_json::json!({ "id": victim, "body": "vandalised", "views": 999 })),
+    ))
+    .await;
+    let (_, _, hist) = send(get(&format!("/admin/blog_post/{victim}/history"), &cookie)).await;
+    assert_eq!(hist.matches("class=\"btn\">Undo<").count(), 1, "only the newest agent change offers Undo");
+    let (status, _, _) = send(form(&format!("/admin/blog_post/{victim}/undo/1"), &cookie, "")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "not an entry for this row, or not the newest");
+    let (status, _, _) = send(form(&undo_url(&hist).unwrap(), &cookie, "")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let back = PostV2::get(victim).await.unwrap();
+    assert_eq!((back.body.as_str(), back.views), ("original", 1), "a change is undone: old values back");
+    send(bearer("POST", "/mcp", &token, &call("blog_post_delete", serde_json::json!({ "id": victim })))).await;
+    assert!(PostV2::get(victim).await.is_err(), "gone");
+    let (status, _, hist) = send(get(&format!("/admin/blog_post/{victim}/history"), &cookie)).await;
+    assert!(status == StatusCode::OK && hist.contains("Deleted via MCP."), "a deleted row keeps its History page");
+    send(form(&undo_url(&hist).unwrap(), &cookie, "")).await;
+    let revived = PostV2::get(victim).await.unwrap();
+    assert_eq!(
+        (revived.title.as_str(), revived.body.as_str(), revived.price.to_string().as_str()),
+        ("Undo me", "original", "3.00"),
+        "a delete is undone, same id"
+    );
+    let (_, _, hist) = send(get(&format!("/admin/blog_post/{victim}/history"), &cookie)).await;
+    assert!(hist.contains("Undid “Deleted via MCP”: restored."), "and the undo is in History too");
+    let (_, _, body) = send(bearer(
+        "POST",
+        "/mcp",
+        &token,
+        &call(
+            "blog_post_create",
+            serde_json::json!({ "title": "Spam", "body": "b", "author_id": alan.id.unwrap(), "views": 0, "price": "0" }),
+        ),
+    ))
+    .await;
+    let spam = json(&body)["result"]["structuredContent"]["id"].as_i64().unwrap();
+    let (_, _, hist) = send(get(&format!("/admin/blog_post/{spam}/history"), &cookie)).await;
+    send(form(&undo_url(&hist).unwrap(), &cookie, "")).await;
+    assert!(PostV2::get(spam).await.is_err(), "an add is undone: the row is removed");
+    PostV2::objects().filter(PostV2::ID.eq(victim)).delete().await.unwrap();
+    // Snapshots of encrypted fields stay encrypted, and undo restores them.
+    Note::objects().filter(Note::ID.eq(sid)).update([Note::SSN.set("123-45-6789".to_string())]).await.unwrap();
+    send(bearer("PATCH", &format!("/api/e2e_note/{sid}"), &at, r#"{"ssn": "999-99-9999"}"#)).await;
+    let entry = rangoli::admin::LogEntry::objects()
+        .filter(rangoli::admin::LogEntry::OBJECT_ID.eq(sid) & rangoli::admin::LogEntry::TABLE_NAME.eq("e2e_note"))
+        .order_by(rangoli::admin::LogEntry::ID.desc())
+        .first()
+        .await
+        .unwrap()
+        .unwrap();
+    let snap = entry.snapshot.clone().unwrap();
+    assert!(!snap.contains("123-45-6789") && snap.contains("enc:v1:"), "no plaintext in History: {snap}");
+    let (_, _, hist) = send(get(&format!("/admin/e2e_note/{sid}/history"), &cookie)).await;
+    send(form(&undo_url(&hist).unwrap(), &cookie, "")).await;
+    assert_eq!(Note::get(sid).await.unwrap().ssn.as_deref(), Some("123-45-6789"), "undo restores the encrypted value");
 
     // ---- rate limits: a runaway client or agent gets 429s, not the database
     // The limit is per calendar minute: don't straddle a minute boundary, or the count resets mid-test.
