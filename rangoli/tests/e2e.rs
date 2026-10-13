@@ -916,6 +916,33 @@ async fn scenario() {
     let long = "x".repeat(400); // longer than any username column (found by the fuzzer: a 500 on Postgres and MySQL)
     assert!(auth::authenticate(&long, "x").await.unwrap().is_none(), "an over-long username is a plain failure");
 
+    // ---- aggregates and GROUP BY, checked against the same numbers computed in Rust
+    let everything = PostV2::objects().all().await.unwrap();
+    let q = || PostV2::objects();
+    assert_eq!(q().sum(PostV2::VIEWS).await.unwrap(), Some(everything.iter().map(|p| p.views).sum::<i64>()), "sum");
+    let exact: Decimal<2> = everything.iter().map(|p| p.price).sum();
+    assert_eq!(q().sum(PostV2::PRICE).await.unwrap(), Some(exact), "decimal sums are exact");
+    let mean = everything.iter().map(|p| p.views as f64).sum::<f64>() / everything.len() as f64;
+    assert!((q().avg(PostV2::VIEWS).await.unwrap().unwrap() - mean).abs() < 1e-9, "avg");
+    let price_mean = everything.iter().map(|p| p.price.units() as f64 / 100.0).sum::<f64>() / everything.len() as f64;
+    assert!((q().avg(PostV2::PRICE).await.unwrap().unwrap() - price_mean).abs() < 1e-9, "decimal avg in its own units");
+    assert_eq!(q().max(PostV2::PRICE).await.unwrap(), everything.iter().map(|p| p.price).max(), "max");
+    assert_eq!(q().min(PostV2::CREATED_AT).await.unwrap(), everything.iter().map(|p| p.created_at).min(), "min of a datetime");
+    assert_eq!(q().max(PostV2::TITLE).await.unwrap(), everything.iter().map(|p| p.title.clone()).max(), "max of text");
+    assert_eq!(q().filter(PostV2::ID.eq(-1)).sum(PostV2::VIEWS).await.unwrap(), None, "no rows: None, not 0");
+    let mut by_author: std::collections::BTreeMap<i64, (i64, i64)> = Default::default();
+    for p in &everything {
+        let e = by_author.entry(p.author_id).or_default();
+        e.0 += 1;
+        e.1 += p.views;
+    }
+    let counts = q().group_by(PostV2::AUTHOR_ID).count().await.unwrap();
+    assert_eq!(counts, by_author.iter().map(|(k, v)| (Some(*k), v.0)).collect::<Vec<_>>(), "group_by count, in key order");
+    let sums = q().group_by(PostV2::AUTHOR_ID).sum(PostV2::VIEWS).await.unwrap();
+    assert_eq!(sums, by_author.iter().map(|(k, v)| (Some(*k), Some(v.1))).collect::<Vec<_>>(), "group_by sum");
+    let (_, queries) = orm::count_queries(q().group_by(PostV2::AUTHOR_ID).count()).await;
+    assert_eq!(queries, 1, "one query however many groups");
+
     // ---- per-object permissions: owned_by
     let alice = auth::create_user("alice", "correct horse", false).await.unwrap();
     let bob = auth::create_user("bob", "correct horse", false).await.unwrap();

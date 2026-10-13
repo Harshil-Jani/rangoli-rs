@@ -148,6 +148,18 @@ rangoli::atomic(async {
 .await?;
 ```
 
+### Totals, averages and GROUP BY
+
+```rust
+let revenue = Order::objects().filter(Order::PAID.eq(true)).sum(Order::TOTAL).await?;   // Option<Decimal<2>>, exact
+let rating = Post::objects().avg(Post::RATING).await?;                                     // Option<f64>
+let newest = Post::objects().max(Post::CREATED_AT).await?;                                 // Option<DateTime>
+let per_author = Post::objects().group_by(Post::AUTHOR_ID).count().await?;                // Vec<(Option<i64>, i64)>, one query
+let views = Post::objects().group_by(Post::AUTHOR_ID).sum(Post::VIEWS).await?;
+```
+
+Typed like everything else: summing a text column doesn't compile, and a `Decimal` total stays exact. Results are cast so all three databases hand back the same types (Postgres's `SUM(bigint)` is `numeric` otherwise). The e2e test checks every aggregate against the same numbers computed in Rust from the rows.
+
 ### Many-to-many
 
 ```rust

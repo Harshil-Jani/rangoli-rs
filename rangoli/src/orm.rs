@@ -1033,6 +1033,103 @@ pub trait Model: Sized + Send + Sync + Unpin + 'static {
     }
 }
 
+// ---------------------------------------------------------------- aggregates
+
+/// Column types that can be added up and averaged: whole numbers, floats and exact decimals.
+pub trait Summable: Kind + FromValue {}
+impl Summable for i64 {}
+impl Summable for f64 {}
+impl<const P: u32> Summable for crate::Decimal<P> {}
+
+/// Column types with an order, for `min` and `max`.
+pub trait Ordered: Kind + FromValue {}
+impl Ordered for i64 {}
+impl Ordered for f64 {}
+impl Ordered for String {}
+impl Ordered for crate::DateTime {}
+impl Ordered for crate::Date {}
+impl<const P: u32> Ordered for crate::Decimal<P> {}
+
+/// `FUNC(col)`, cast to a type every database hands back in a decodable form: Postgres's
+/// SUM(bigint) is `numeric`, MySQL's is DECIMAL, and sqlx's Any driver reads neither.
+fn agg_expr(d: Dialect, func: &str, col: &str, ty: FieldType) -> String {
+    let (int, float) = match d {
+        Dialect::Postgres => ("BIGINT", "DOUBLE PRECISION"),
+        Dialect::Mysql => ("SIGNED", "DOUBLE"),
+        Dialect::Sqlite => ("INTEGER", "REAL"),
+    };
+    let inner = format!("{func}({})", d.quote(col));
+    match (func, ty) {
+        ("AVG", _) | (_, FieldType::Float) => format!("CAST({inner} AS {float})"),
+        (_, FieldType::Int | FieldType::Decimal(_) | FieldType::DateTime | FieldType::Date) => format!("CAST({inner} AS {int})"),
+        _ => inner, // text: MIN/MAX come back as text already
+    }
+}
+
+impl Query {
+    /// One aggregate over the filtered rows, decoded as `ty` (`Float` for AVG).
+    pub(crate) async fn aggregate(&self, func: &str, col: &str, ty: FieldType) -> Result<Value> {
+        let d = db().dialect;
+        let (mut p, mut sql) = (vec![], format!("SELECT {} AS v FROM {}", agg_expr(d, func, col, ty), d.quote(self.table)));
+        self.push_where(d, &mut sql, &mut p);
+        let rows = fetch_all(&sql, &p).await?;
+        let decode = if func == "AVG" { FieldType::Float } else { ty };
+        read(rows.first().ok_or_else(|| Error::Decode("aggregate returned no row".into()))?, "v", decode)
+    }
+
+    /// The same, per value of `key`, in key order.
+    async fn grouped(&self, key: &str, key_ty: FieldType, value: &str, decode: FieldType) -> Result<Vec<(Value, Value)>> {
+        let d = db().dialect;
+        let k = d.quote(key);
+        let (mut p, mut sql) = (vec![], format!("SELECT {k} AS g, {value} AS v FROM {}", d.quote(self.table)));
+        self.push_where(d, &mut sql, &mut p);
+        sql.push_str(&format!(" GROUP BY {k} ORDER BY {k}"));
+        fetch_all(&sql, &p).await?.iter().map(|r| Ok((read(r, "g", key_ty)?, read(r, "v", decode)?))).collect()
+    }
+}
+
+/// A queryset grouped by one column; see `QuerySet::group_by`.
+pub struct Grouped<M, K> {
+    q: Query,
+    key: &'static str,
+    _m: PhantomData<fn() -> (M, K)>,
+}
+
+impl<M, K: Kind + FromValue> Grouped<M, K> {
+    async fn run<V: FromValue>(&self, value: String, decode: FieldType) -> Result<Vec<(Option<K>, V)>> {
+        self.q
+            .grouped(self.key, K::KIND, &value, decode)
+            .await?
+            .into_iter()
+            .map(|(k, v)| Ok((Option::<K>::from_value(k)?, V::from_value(v)?)))
+            .collect()
+    }
+
+    /// Rows per key.
+    pub async fn count(&self) -> Result<Vec<(Option<K>, i64)>> {
+        let int = if db().dialect == Dialect::Mysql { "SIGNED" } else { "BIGINT" };
+        self.run(format!("CAST(COUNT(*) AS {int})"), FieldType::Int).await
+    }
+
+    pub async fn sum<T: Summable>(&self, col: Col<M, T>) -> Result<Vec<(Option<K>, Option<T>)>> {
+        self.run(agg_expr(db().dialect, "SUM", col.name, T::KIND), T::KIND).await
+    }
+
+    pub async fn avg<T: Summable>(&self, col: Col<M, T>) -> Result<Vec<(Option<K>, Option<f64>)>> {
+        let scale = 10f64.powi(T::KIND.decimal_places() as i32);
+        let rows: Vec<(Option<K>, Option<f64>)> = self.run(agg_expr(db().dialect, "AVG", col.name, T::KIND), FieldType::Float).await?;
+        Ok(rows.into_iter().map(|(k, v)| (k, v.map(|x| x / scale))).collect())
+    }
+
+    pub async fn min<T: Ordered>(&self, col: Col<M, T>) -> Result<Vec<(Option<K>, Option<T>)>> {
+        self.run(agg_expr(db().dialect, "MIN", col.name, T::KIND), T::KIND).await
+    }
+
+    pub async fn max<T: Ordered>(&self, col: Col<M, T>) -> Result<Vec<(Option<K>, Option<T>)>> {
+        self.run(agg_expr(db().dialect, "MAX", col.name, T::KIND), T::KIND).await
+    }
+}
+
 /// Lazy, chainable query over `M`. Nothing runs until an async terminal method.
 pub struct QuerySet<M> {
     pub(crate) q: Query,
@@ -1131,6 +1228,35 @@ impl<M: Model> QuerySet<M> {
     pub async fn count(self) -> Result<i64> {
         self.q.count().await
     }
+
+    /// The total of a numeric column over the matching rows; `None` when there are none.
+    /// Exact for `Decimal` columns: `Order::objects().sum(Order::TOTAL)` is a `Decimal<2>`.
+    pub async fn sum<T: Summable>(self, col: Col<M, T>) -> Result<Option<T>> {
+        Option::<T>::from_value(self.q.aggregate("SUM", col.name, T::KIND).await?)
+    }
+
+    /// The mean of a numeric column (a `Decimal` column's mean in its own units, as `f64`).
+    pub async fn avg<T: Summable>(self, col: Col<M, T>) -> Result<Option<f64>> {
+        let v = Option::<f64>::from_value(self.q.aggregate("AVG", col.name, T::KIND).await?)?;
+        Ok(v.map(|x| x / 10f64.powi(T::KIND.decimal_places() as i32)))
+    }
+
+    /// The smallest value of a column with an order (numbers, text, dates).
+    pub async fn min<T: Ordered>(self, col: Col<M, T>) -> Result<Option<T>> {
+        Option::<T>::from_value(self.q.aggregate("MIN", col.name, T::KIND).await?)
+    }
+
+    /// The largest value of a column with an order (numbers, text, dates).
+    pub async fn max<T: Ordered>(self, col: Col<M, T>) -> Result<Option<T>> {
+        Option::<T>::from_value(self.q.aggregate("MAX", col.name, T::KIND).await?)
+    }
+
+    /// Aggregate per value of `col` (SQL `GROUP BY`): `Post::objects().group_by(Post::AUTHOR_ID).count()`.
+    /// Results come in key order; a NULL key is `None`.
+    pub fn group_by<K: Kind + FromValue>(self, col: Col<M, K>) -> Grouped<M, K> {
+        Grouped { q: self.q, key: col.name, _m: PhantomData }
+    }
+
     pub async fn exists(self) -> Result<bool> {
         Ok(self.limit(1).q.fetch().await?.len() == 1)
     }
