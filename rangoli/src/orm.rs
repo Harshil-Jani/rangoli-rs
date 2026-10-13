@@ -44,6 +44,10 @@ pub struct FieldMeta {
     pub unique: bool,
     /// Stored as an argon2 hash; the admin never displays it.
     pub password: bool,
+    /// Never leaves the server through the API or MCP: not shown, filtered, sorted, searched or
+    /// written there. Staff still see it in the admin. For secrets and personal data agents
+    /// shouldn't read (`#[field(private)]`).
+    pub private: bool,
     /// Table this column references (always its `id`).
     pub fk: Option<&'static str>,
     /// `ON DELETE CASCADE` instead of the default, which protects referenced rows.
@@ -139,6 +143,11 @@ impl FieldType {
 }
 
 impl FieldMeta {
+    /// May this field travel over the API and MCP? Not passwords, not private fields.
+    pub fn exposed(&self) -> bool {
+        !self.password && !self.private
+    }
+
     /// Filled in by the framework, never by forms.
     pub fn is_auto(&self) -> bool {
         self.auto_now || self.auto_now_add
@@ -1118,6 +1127,7 @@ pub(crate) const fn link_meta(name: &'static str) -> FieldMeta {
         null: false,
         unique: false,
         password: false,
+        private: false,
         fk: None,
         cascade: false,
         auto_now: false,

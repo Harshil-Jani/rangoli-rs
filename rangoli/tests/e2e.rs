@@ -47,6 +47,8 @@ struct Note {
     title: String,
     #[field(fk = rangoli::auth::User, cascade)]
     owner_id: i64,
+    #[field(max_length = 100, private)]
+    secret: Option<String>,
 }
 
 #[derive(Choices, Clone, Copy, Debug, PartialEq)]
@@ -164,8 +166,19 @@ async fn reset(db: &orm::Db) {
     }
 }
 
-#[tokio::test]
-async fn full_stack() {
+/// One long scenario: its future outgrows a test thread's default 2 MB stack in debug builds,
+/// so it runs on a thread with room to spare.
+#[test]
+fn full_stack() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(scenario()))
+        .unwrap()
+        .join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e));
+}
+
+async fn scenario() {
     let dir = std::env::temp_dir().join(format!("rangoli-e2e-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let url = std::env::var("RANGOLI_TEST_DATABASE_URL")
@@ -1084,6 +1097,33 @@ async fn full_stack() {
         (StatusCode::FORBIDDEN, Some("API tokens can't open the admin.")),
         "even a staff token"
     );
+
+    // ---- private fields never leave the server through the API or MCP (django-mcp-server #66/#72 leaked theirs)
+    let (_, _, body) = send(bearer("POST", "/api/e2e_note/", &at, r#"{"title": "has a secret"}"#)).await;
+    let sid = json(&body)["id"].as_i64().unwrap();
+    Note::objects().filter(Note::ID.eq(sid)).update([Note::SECRET.set("hunter2".to_string())]).await.unwrap();
+    let (_, _, body) = send(bearer("GET", &format!("/api/e2e_note/{sid}"), &at, "")).await;
+    assert!(json(&body).get("secret").is_none() && !body.contains("hunter2"), "not in responses: {body}");
+    let (_, _, body) = send(bearer("GET", "/api/e2e_note/", &at, "")).await;
+    assert!(!body.contains("hunter2"), "not in lists");
+    for probe in ["?secret=hunter2", "?secret__startswith=h", "?ordering=secret", "?ordering=-secret"] {
+        assert_eq!(
+            send(bearer("GET", &format!("/api/e2e_note/{probe}"), &at, "")).await.0,
+            StatusCode::BAD_REQUEST,
+            "{probe} can't probe it"
+        );
+    }
+    let (_, _, body) = send(bearer("GET", "/api/e2e_note/?search=hunter2", &at, "")).await;
+    assert_eq!(json(&body)["count"], 0, "search doesn't look inside it");
+    let (status, _, body) = send(bearer("PATCH", &format!("/api/e2e_note/{sid}"), &at, r#"{"secret": "changed"}"#)).await;
+    assert_eq!((status, json(&body)["secret"][0].as_str()), (StatusCode::BAD_REQUEST, Some("Unknown field.")), "nor written");
+    assert_eq!(Note::get(sid).await.unwrap().secret.as_deref(), Some("hunter2"));
+    let (_, _, body) = send(bearer("POST", "/mcp", &at, &call("e2e_note_get", serde_json::json!({ "id": sid })))).await;
+    assert!(!body.contains("hunter2"), "agents don't see it either");
+    let (_, _, body) = send(bearer("POST", "/mcp", &at, &rpc("tools/list", serde_json::json!({})))).await;
+    assert!(!body.contains("\"secret\""), "or know it exists");
+    let (_, _, schema) = send(get("/api/schema.json", "")).await;
+    assert!(!schema.contains("\"secret\""), "nor does the OpenAPI document");
 
     // Tokens in the admin: listed and revocable, never created there (the plaintext couldn't be shown).
     let (status, _, body) = send(get("/admin/rangoli_api_token/", &cookie)).await;

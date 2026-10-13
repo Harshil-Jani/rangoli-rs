@@ -1353,6 +1353,7 @@ mod tests {
                 null: false,
                 unique: false,
                 password: false,
+                private: false,
                 fk: None,
                 cascade: false,
                 auto_now: false,

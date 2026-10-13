@@ -334,6 +334,13 @@ Every model you expose with `.api::<M>(...)` is also an MCP server at `POST /mcp
 
 An agent is an ordinary API client. It signs in with an API token, from **Connect an AI agent** in the admin or `cargo run -- createtoken`, and each tool call runs through the JSON API as that token's user. Access levels, `owned_by`, validation and lockouts all apply unchanged, and an agent is only offered the tools its user can call. Every create, update and delete, through the API or MCP, writes a History entry ("Added via MCP.") in the same transaction as the change.
 
+Guardrails, all enforced by the server on every request, not just hidden from the tool list:
+
+- **Read-only by default.** Agents connected from the admin can look things up but not change anything unless you tick "Allow changes". `createtoken --read-only` does the same from the command line.
+- **Only the tables you pick.** A token limited to some tables sees the others as if they don't exist (404, and no tools for them).
+- **Private fields.** `#[field(private)]` keeps a column (an API key, a tax id) out of every API and MCP response, filter, sort, search, write and schema. Staff still see it in the admin. The most-used Django MCP package has had open bugs where its field allowlists leak ([#66](https://github.com/gts360/django-mcp-server/issues/66), [#72](https://github.com/gts360/django-mcp-server/issues/72)); here the e2e test tries those probes, and with the check removed it catches the leak.
+- **Tokens can't open the admin**, even a staff user's.
+
 Checked by: an e2e test that speaks raw MCP on all three databases (tool lists per user, writes and History, `owned_by` holding for agents, validation errors returned to the agent), 3,000 rounds of random JSON-RPC and tool calls in the fuzzer, and a live run of the official MCP Python SDK (2.3.0) against the example blog.
 
 ## Databases

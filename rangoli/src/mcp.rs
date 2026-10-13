@@ -117,7 +117,7 @@ fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonV
         }
         let (n, id) = (noun(meta), json!({ "type": "integer", "description": "The row's id" }));
         let mut fields = Map::new();
-        for f in meta.fields.iter().filter(|f| !f.is_auto()) {
+        for f in meta.fields.iter().filter(|f| !f.is_auto() && !f.private) {
             fields.insert(f.name.into(), field_schema(f));
         }
         for rel in meta.m2m {
@@ -129,7 +129,7 @@ fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonV
         let required: Vec<&str> = meta
             .fields
             .iter()
-            .filter(|f| !f.null && !f.is_auto() && f.ty != FieldType::Bool && f.default.is_none() && !f.password)
+            .filter(|f| !f.null && !f.is_auto() && f.ty != FieldType::Bool && f.default.is_none() && !f.password && !f.private)
             .map(|f| f.name)
             .collect();
         for (op, write) in OPS {

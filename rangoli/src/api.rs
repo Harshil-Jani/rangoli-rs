@@ -202,7 +202,7 @@ fn endpoint<'a>(
 fn to_json(meta: &ModelMeta, id: i64, vals: &[Value]) -> JsonValue {
     let mut obj = Map::new();
     obj.insert("id".into(), json!(id));
-    for (f, v) in meta.fields.iter().zip(vals).filter(|(f, _)| !f.password) {
+    for (f, v) in meta.fields.iter().zip(vals).filter(|(f, _)| f.exposed()) {
         let j = match v {
             Value::Null => JsonValue::Null,
             Value::Int(i) if f.ty == FieldType::DateTime => json!(DateTime::from_unix(*i).to_string()),
@@ -340,6 +340,17 @@ async fn columns(
             }
             continue;
         }
+        if f.private {
+            // Not writable here: new rows get the default (or empty), existing ones keep their value.
+            if adding {
+                cols.push((
+                    f.name,
+                    f.default.map_or_else(|| if f.null { Value::Null } else { crate::migrate::zero(f.ty) }, |d| d.value()),
+                    f.ty,
+                ));
+            }
+            continue;
+        }
         let value = match obj.get(f.name) {
             Some(j) => from_json(f, j),
             None if partial => continue,
@@ -359,7 +370,10 @@ async fn columns(
             }
         }
     }
-    if let Some(unknown) = obj.keys().find(|k| *k != "id" && meta.field(k).is_none() && !meta.m2m.iter().any(|r| r.name == *k)) {
+    // A private field reads as unknown: the API doesn't confirm it exists.
+    if let Some(unknown) =
+        obj.keys().find(|k| *k != "id" && meta.field(k).is_none_or(|f| f.private) && !meta.m2m.iter().any(|r| r.name == *k))
+    {
         errors.insert(unknown.clone(), json!(["Unknown field."]));
     }
     if errors.is_empty() {
@@ -405,7 +419,7 @@ async fn list(
         if matches!(k.as_str(), "limit" | "offset" | "ordering" | "search") {
             continue;
         }
-        let f = meta.field(k).filter(|f| !f.password).ok_or_else(|| problem(StatusCode::BAD_REQUEST, &format!("Unknown filter `{k}`.")))?;
+        let f = meta.field(k).filter(|f| f.exposed()).ok_or_else(|| problem(StatusCode::BAD_REQUEST, &format!("Unknown filter `{k}`.")))?;
         let j = match f.ty {
             FieldType::Json => return Err(problem(StatusCode::BAD_REQUEST, &format!("Cannot filter on JSON field `{k}`."))),
             FieldType::Varchar(_) | FieldType::Text | FieldType::DateTime | FieldType::Date | FieldType::Decimal(_) | FieldType::Uuid => {
@@ -422,7 +436,7 @@ async fn list(
         let text: Vec<Node> = meta
             .fields
             .iter()
-            .filter(|f| !f.password && matches!(f.ty, FieldType::Varchar(_) | FieldType::Text))
+            .filter(|f| f.exposed() && matches!(f.ty, FieldType::Varchar(_) | FieldType::Text))
             .map(|f| Node::Like(f.name, pat.clone()))
             .collect();
         q.filter.push(Node::Or(text));
@@ -433,7 +447,7 @@ async fn list(
             "id"
         } else {
             meta.field(name)
-                .filter(|f| !f.password)
+                .filter(|f| f.exposed())
                 .map(|f| f.name)
                 .ok_or_else(|| problem(StatusCode::BAD_REQUEST, &format!("Cannot order by `{name}`.")))?
         };
@@ -658,7 +672,7 @@ async fn schema(State(site): S) -> Json<JsonValue> {
     for (meta, _) in tables {
         let mut props = Map::new();
         props.insert("id".into(), json!({ "type": "integer", "format": "int64", "readOnly": true }));
-        for f in meta.fields {
+        for f in meta.fields.iter().filter(|f| !f.private) {
             props.insert(f.name.into(), field_schema(f));
         }
         for rel in meta.m2m {
@@ -670,7 +684,7 @@ async fn schema(State(site): S) -> Json<JsonValue> {
         let required: Vec<&str> = meta
             .fields
             .iter()
-            .filter(|f| !f.null && !f.is_auto() && f.ty != FieldType::Bool && f.default.is_none())
+            .filter(|f| !f.null && !f.is_auto() && !f.private && f.ty != FieldType::Bool && f.default.is_none())
             .map(|f| f.name)
             .collect();
         schemas.insert(meta.name.into(), json!({ "type": "object", "properties": props, "required": required }));

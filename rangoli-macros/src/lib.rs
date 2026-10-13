@@ -66,6 +66,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
 
         let (mut max_length, mut text, mut unique, mut password, mut cascade, mut fk) =
             (None::<u32>, false, false, false, false, None::<syn::Path>);
+        let mut private = false;
         let (mut auto_now, mut auto_now_add, mut auto, mut index, mut choices) = (false, false, false, false, false);
         let mut default: Option<Tokens> = None;
         for attr in f.attrs.iter().filter(|a| a.path().is_ident("field")) {
@@ -78,6 +79,8 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     unique = true;
                 } else if m.path.is_ident("password") {
                     password = true;
+                } else if m.path.is_ident("private") {
+                    private = true;
                 } else if m.path.is_ident("index") {
                     index = true;
                 } else if m.path.is_ident("choices") {
@@ -111,7 +114,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     fk = Some(m.value()?.parse()?);
                 } else {
                     return Err(m.error(
-                        "expected `max_length`, `text`, `unique`, `password`, `fk`, `cascade`, `index`, `choices`, `default`, `auto`, `auto_now` or `auto_now_add`",
+                        "expected `max_length`, `text`, `unique`, `password`, `fk`, `cascade`, `index`, `choices`, `default`, `private`, `auto`, `auto_now` or `auto_now_add`",
                     ));
                 }
                 Ok(())
@@ -198,7 +201,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
         metas.push(quote! {
             ::rangoli::orm::FieldMeta {
                 name: #name_s, ty: ::rangoli::orm::FieldType::#ty, null: #null,
-                unique: #unique, password: #password, fk: #fk_tokens, cascade: #cascade,
+                unique: #unique, password: #password, private: #private, fk: #fk_tokens, cascade: #cascade,
                 auto_now: #auto_now, auto_now_add: #framework_fills, index: #index,
                 choices: #choices_tokens, default: #default_tokens,
             }
