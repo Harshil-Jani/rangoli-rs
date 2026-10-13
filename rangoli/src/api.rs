@@ -420,7 +420,7 @@ async fn list(
     q.filter.extend(owned(ownership(opts, &user)));
     // `?field=value` filters on exact matches, typed by the field.
     for (k, raw) in &p {
-        if matches!(k.as_str(), "limit" | "offset" | "ordering" | "search") {
+        if matches!(k.as_str(), "limit" | "offset" | "ordering" | "search" | "cursor") {
             continue;
         }
         let f = meta.field(k).filter(|f| f.exposed()).ok_or_else(|| problem(StatusCode::BAD_REQUEST, &format!("Unknown filter `{k}`.")))?;
@@ -460,6 +460,31 @@ async fn list(
         q.order = vec![("id", false)];
     }
     let limit = param(&p, "limit").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    // `?cursor=` (empty for the first page): keyset pagination. No COUNT, no OFFSET, so page
+    // 10,000 costs what page 1 does. It walks the id order, ascending or (`ordering=-id`) descending.
+    if let Some(cursor) = param(&p, "cursor") {
+        let desc = match q.order.as_slice() {
+            [("id", desc)] => *desc,
+            _ => return Err(problem(StatusCode::BAD_REQUEST, "Cursor pagination follows the id order: use ordering=id or ordering=-id.")),
+        };
+        if !cursor.is_empty() {
+            let after: i64 = cursor.parse().map_err(|_| problem(StatusCode::BAD_REQUEST, "Invalid cursor."))?;
+            q.filter.push(Node::Cmp("id", if desc { "<" } else { ">" }, Value::Int(after), FieldType::Int));
+        }
+        q.limit = Some(limit + 1); // one extra row says whether there is a next page
+        let mut rows = q.rows().await.map_err(fail)?;
+        let more = rows.len() as u64 > limit;
+        rows.truncate(limit as usize);
+        let mut results: Vec<JsonValue> = rows.iter().map(|(id, v)| to_json(meta, *id, v)).collect();
+        attach_links(meta, &mut results).await?;
+        let next = more.then(|| {
+            let mut pairs: Vec<(String, String)> = p.iter().filter(|(k, _)| *k != "cursor").map(|(k, v)| (k.clone(), v.clone())).collect();
+            pairs.sort();
+            pairs.push(("cursor".into(), rows.last().map_or(0, |(id, _)| *id).to_string()));
+            format!("/api/{table}/?{}", serde_urlencoded::to_string(pairs).unwrap())
+        });
+        return Ok(Json(json!({ "next": next, "results": results })).into_response());
+    }
     let offset: u64 = param(&p, "offset").and_then(|v| v.parse().ok()).unwrap_or(0);
     let count = q.count().await.map_err(fail)? as u64;
     q.limit = Some(limit);

@@ -147,7 +147,8 @@ fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonV
                         "search": { "type": "string", "description": "Text to look for in the text fields" },
                         "ordering": { "type": "string", "description": "A field to sort by; prefix with - for descending" },
                         "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
-                        "offset": { "type": "integer", "minimum": 0 } } }),
+                        "offset": { "type": "integer", "minimum": 0 },
+                        "cursor": { "type": "string", "description": "For big tables: pass \"\" for the first page, then each page's next cursor (ordered by id; no total count)" } } }),
                 ),
                 "get" => (format!("Fetch one {n} by id."), json!({ "type": "object", "properties": { "id": id }, "required": ["id"] })),
                 "create" => (
@@ -201,7 +202,7 @@ async fn call(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>, name: &
                     q.push((k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned)));
                 }
             }
-            for k in ["search", "ordering", "limit", "offset"] {
+            for k in ["search", "ordering", "limit", "offset", "cursor"] {
                 if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
                     q.push((k.into(), v.as_str().map_or_else(|| v.to_string(), str::to_owned)));
                 }

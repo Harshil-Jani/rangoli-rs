@@ -774,6 +774,23 @@ async fn scenario() {
     let (_, _, body) = send(get("/api/blog_post/?search=machinery", "")).await;
     assert_eq!(json(&body)["count"], 1);
     assert_eq!(send(get("/api/blog_post/?nope=1", "")).await.0, StatusCode::BAD_REQUEST);
+    // Cursor pagination: walk every row, two at a time, both ways, with no COUNT.
+    let all_ids: Vec<i64> = PostV2::objects().order_by(PostV2::ID.asc()).all().await.unwrap().iter().map(|p| p.id.unwrap()).collect();
+    for (ordering, expected) in [("id", all_ids.clone()), ("-id", all_ids.iter().rev().copied().collect::<Vec<_>>())] {
+        let (mut seen, mut next) = (vec![], Some(format!("/api/blog_post/?cursor=&limit=2&ordering={ordering}")));
+        while let Some(url) = next {
+            let (status, _, body) = send(get(&url, "")).await;
+            assert_eq!(status, StatusCode::OK, "{url}: {body}");
+            let page = json(&body);
+            assert!(page.get("count").is_none(), "no COUNT on cursor pages");
+            seen.extend(page["results"].as_array().unwrap().iter().map(|r| r["id"].as_i64().unwrap()));
+            next = page["next"].as_str().map(str::to_owned);
+        }
+        assert_eq!(seen, expected, "every row once, in order ({ordering})");
+    }
+    assert_eq!(send(get("/api/blog_post/?cursor=abc", "")).await.0, StatusCode::BAD_REQUEST, "a bad cursor is a 400");
+    assert_eq!(send(get("/api/blog_post/?cursor=&ordering=title", "")).await.0, StatusCode::BAD_REQUEST, "cursors follow the id order");
+
     let (status, _, body) = send(get("/api/blog_post/999999", "")).await;
     assert_eq!((status, json(&body)["detail"].as_str()), (StatusCode::NOT_FOUND, Some("Not found.")));
 
