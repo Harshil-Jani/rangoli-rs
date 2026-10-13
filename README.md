@@ -1,52 +1,55 @@
 # Rangoli
 
-**The backend that's ready for AI on day one.**
+**Give your Django data to Claude in five minutes. Without giving it your database.**
 
-Describe your data once. Rangoli gives you an admin panel for your team, an API for your apps, and an MCP server so AI assistants like Claude and Cursor can work with that data safely. It all runs as one small, fast program.
+Every AI-to-database bridge today hands the model a database connection and hopes it behaves. Rangoli hands it a *user*: one who can only see what you allow, can't touch secrets, asks before changing anything, and leaves every move in a history you can undo.
 
 ![Connecting Claude to your data from the admin](docs/connect-agent.png)
 
-**[Watch the 16-second demo](site/ai-agent-demo.mp4)** · **[Measured results: Rangoli vs Django](https://harshil-jani.github.io/rangoli-rs/)**
+**[Watch the 16-second demo](site/ai-agent-demo.mp4)** · **[Measured results](https://harshil-jani.github.io/rangoli-rs/)**
 
-## What you get
-
-**For your team:** a complete admin panel, ready the moment you describe your data. Search, filters, bulk actions, a history of every change, light and dark mode, and it works on a phone.
-
-**For your apps:** a JSON API with documentation, login tokens for mobile apps and scripts, and per-user data, so people only see their own rows.
-
-**For AI:** click **Connect an AI agent** in the admin, paste one line into Claude Code or Cursor, and the assistant can look up, add and update your data. It only does what that user is allowed to do, and every change it makes is listed in the admin's History as "via MCP", next to everyone else's.
-
-![Every change an AI agent makes is in History](docs/agent-history.png)
-
-## Already on Django? Keep it.
-
-Point Rangoli at your Django database and get an admin, an API and a guarded MCP server for AI agents, without touching your Django code:
+## Already on Django? Keep it. Add AI on top.
 
 ```sh
 RANGOLI_DATABASE_URL=postgres://user:pw@host/your_django_db cargo run -p rangoli-django
 ```
 
-Sign in with your Django staff account (your Django password works), click **Connect an AI agent**, and Claude or Cursor can read your data. It's read-only unless you set `RANGOLI_DJANGO_WRITES=1`. Django's own tables (`auth_*`, `django_*`) are left out, and columns that look like secrets (`password`, `api_key`, `token`, ...) are private, so no agent ever sees them. Rangoli adds its own `rangoli_*` tables and never changes Django's.
+1. Open `/admin/` and sign in with your **Django** staff account. Your Django password works.
+2. Click **Connect an AI agent**, and paste the one line it gives you into Claude Code or Cursor.
+3. Ask Claude about your data. Every table of your Django app is there, read-only, with secret-looking columns (`password`, `api_key`, `token`...) left out.
 
-Tested against a real Django 6.1.2 database: a staff login with the Django password, the admin listing its 1,000 posts, and an agent using the official MCP SDK reading them, sorted and filtered, with its write refused. CI checks the same flow on Postgres, MySQL and SQLite using the exact column types Django creates on each.
+Your Django code isn't touched, and nothing in Django's tables changes. Tested on a real Django 6.1.2 database, and in CI on Postgres, MySQL and SQLite.
 
-## Why switch from Django
+## Why it can't go wrong
+
+These are rules the server enforces on every request. The model doesn't get a vote.
+
+| Risk | What Rangoli does | Proof |
+|---|---|---|
+| The agent reads secrets | Columns you mark private (or that look secret) never leave the server: not shown, filtered, searched or sorted | Tested, including the lookup tricks that leak in the most-used Django MCP package ([#66](https://github.com/gts360/django-mcp-server/issues/66)) |
+| A prompt injection hijacks it | It's scoped to the tables you pick and read-only by default, so a hijacked agent still can't reach or send anything | The 2025 [Supabase attack](https://generalanalysis.com/blog/supabase-mcp-blog) replayed in the test suite: every step fails |
+| It wrecks production | Changes can wait for your approval in the admin, and every change can be undone from History, deletes included | Tested: approve, reject, and undo of adds, edits and deletes |
+| It runs away in a loop | 120 requests a minute per agent by default, then a polite 429 | Tested |
+| You can't tell what it did | Every change is in History as "via MCP", next to your team's | Tested |
+
+## And it's a better Django
 
 | | Django | Rangoli |
 |---|---|---|
-| Let an AI assistant use your data | Build and secure an MCP server yourself | Built in. One click in the admin |
 | Requests per second (50 posts as JSON) | 2,909 | **14,119** |
 | Memory under load | 511 MB | **61 MB** |
 | Starts in | 232 ms | **15 ms** |
+| Page 10,000 of a million rows | Counts every row, every time | **103× faster** (cursor pages, no count) |
+| Insert 1,000 rows | One query each | **33× faster** on Postgres (one bulk insert) |
 | What you deploy | Python, gunicorn, a web server, static files, migration files | **One file** |
-| Background jobs and scheduled tasks | Celery plus Redis or RabbitMQ | Built in, using your database |
-| Live updates (chat, dashboards) | Channels plus Redis | Built in |
-| A typo in a database query | Found when a customer hits it | Found before the app is built |
-| Brute-force login protection | Not included | On by default, shared across servers |
+| Background jobs and schedules | Celery plus Redis or RabbitMQ | Built in, using your database |
+| Live updates | Channels plus Redis | Built in |
+| CORS, rate limits, encrypted fields | Three more packages | Built in |
+| A typo in a query | Found when a customer hits it | Found before the app is built |
 
-Numbers are measured on the same app and data on one laptop (Apple M1 Pro); the [report](https://harshil-jani.github.io/rangoli-rs/) has every run, and `python bench/run.py` repeats them. Everything else here is checked by tests that run on Postgres, MySQL and SQLite.
+Every number is measured on the same app and data (Apple M1 Pro); the [report](https://harshil-jani.github.io/rangoli-rs/) has every run, and `python bench/run.py` repeats them.
 
-## Try it in five minutes
+## Starting fresh
 
 ```sh
 git clone https://github.com/Harshil-Jani/rangoli-rs && cd rangoli-rs/examples/blog
@@ -54,6 +57,10 @@ cargo run -- migrate
 cargo run -- createsuperuser admin
 RANGOLI_DEBUG=1 cargo run           # open http://127.0.0.1:8000/admin/ and click "Connect an AI agent"
 ```
+
+Describe your data once in Rust, and you get the admin for your team, a JSON API for your apps and the MCP server for AI, from one small program.
+
+![Every change an AI agent makes is in History](docs/agent-history.png)
 
 **Status: early.** The core works end to end and is tested on Postgres, MySQL and SQLite. Read [What's not done yet](#whats-not-done-yet) before building anything real on it.
 
