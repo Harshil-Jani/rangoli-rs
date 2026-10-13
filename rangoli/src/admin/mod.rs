@@ -79,6 +79,8 @@ pub struct Options {
 type ActionFn = dyn Fn(Vec<i64>) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send>> + Send + Sync;
 
 /// A custom changelist action, type-erased: (name, label, run on the selected ids).
+/// Without the `admin` feature there are no pages to run it from, so only `name` is read.
+#[cfg_attr(not(feature = "admin"), allow(dead_code))]
 #[derive(Clone)]
 pub(crate) struct Action {
     pub(crate) name: &'static str,
