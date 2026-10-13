@@ -16,6 +16,7 @@ pub mod admin;
 pub mod api;
 pub mod approvals;
 pub mod auth;
+mod cors;
 pub mod datetime;
 pub mod decimal;
 pub mod forms;
@@ -56,7 +57,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use orm::ModelMeta;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 // ---------------------------------------------------------------- errors
 
@@ -219,7 +220,8 @@ pub fn settings() -> &'static Settings {
 /// forms and no `csrf_exempt` footguns. Requests without either header
 /// (curl, server-to-server) carry no ambient browser cookies and pass.
 pub async fn security_middleware(req: Request, next: Next) -> Response {
-    if !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) && is_cross_origin(&req) {
+    let trusted = req.extensions().get::<cors::TrustedOrigin>().is_some();
+    if !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) && !trusted && is_cross_origin(&req) {
         return (StatusCode::FORBIDDEN, "Cross-origin request blocked").into_response();
     }
     let mut res = next.run(req).await;
@@ -259,6 +261,7 @@ pub struct App {
     request_timeout: Option<std::time::Duration>,
     api_rate: Option<u32>,
     mcp_rate: Option<u32>,
+    cors: Option<Arc<cors::Cors>>,
 }
 
 impl Default for App {
@@ -365,6 +368,7 @@ impl App {
             request_timeout: None,
             api_rate: None,
             mcp_rate: Some(120),
+            cors: None,
             routes: Router::new(),
         }
     }
@@ -406,6 +410,24 @@ impl App {
         self.api.retain(|(m, _)| m.table != M::TABLE);
         self.api.push((M::meta(), settings.opts));
         self.model::<M>()
+    }
+
+    /// Let browser apps on these origins call this app (CORS), e.g. `["https://app.example.com"]`.
+    /// Listed origins may also make writes, which the cross-origin protection otherwise blocks.
+    /// `"*"` allows any site to read public data, without cookies. Cookies and auth headers
+    /// from listed origins need `cors_credentials(true)`.
+    pub fn cors<I: IntoIterator<Item = S>, S: Into<String>>(mut self, origins: I) -> Self {
+        let origins = origins.into_iter().map(Into::into).collect();
+        let credentials = self.cors.as_ref().is_some_and(|c| c.credentials);
+        self.cors = Some(Arc::new(cors::Cors { origins, credentials }));
+        self
+    }
+
+    /// Send `Access-Control-Allow-Credentials` to listed origins (cookies, auth headers).
+    pub fn cors_credentials(mut self, on: bool) -> Self {
+        let origins = self.cors.as_ref().map(|c| c.origins.clone()).unwrap_or_default();
+        self.cors = Some(Arc::new(cors::Cors { origins, credentials: on }));
+        self
     }
 
     /// Limit JSON API requests per caller per minute (the signed-in user, else the IP). Off by
@@ -474,21 +496,23 @@ impl App {
         let routes = self.routes.clone();
         #[cfg(feature = "admin")]
         let routes = routes.merge(admin::router(self.admin.clone(), self.models.clone()));
-        routes
-            .merge({
-                // Approved changes replay through an un-limited copy of the API.
-                approvals::set_api(api::router(self.api.clone()));
-                limited(api::router(self.api.clone()), self.api_rate)
-            })
+        // Approved changes replay through an un-limited copy of the API.
+        approvals::set_api(api::router(self.api.clone()));
+        let mut app = routes
+            .merge(limited(api::router(self.api.clone()), self.api_rate))
             .merge(limited(mcp::router(self.api.clone()), self.mcp_rate))
             .layer(from_fn(auth::session_middleware))
-            .layer(from_fn(security_middleware))
-            .layer(tower_http::timeout::TimeoutLayer::with_status_code(
-                StatusCode::SERVICE_UNAVAILABLE,
-                self.request_timeout.unwrap_or(std::time::Duration::from_secs(settings().request_timeout)),
-            ))
-            // Outermost: a panic in any handler or middleware becomes one 500, never a dead server.
-            .layer(tower_http::catch_panic::CatchPanicLayer::custom(panic_response))
+            .layer(from_fn(security_middleware));
+        if let Some(c) = &self.cors {
+            // Outside the cross-origin check, so it can vouch for listed origins and answer preflights.
+            app = app.layer(axum::middleware::from_fn_with_state(c.clone(), cors::middleware));
+        }
+        app.layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            self.request_timeout.unwrap_or(std::time::Duration::from_secs(settings().request_timeout)),
+        ))
+        // Outermost: a panic in any handler or middleware becomes one 500, never a dead server.
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(panic_response))
     }
 
     /// The `manage.py` replacement: dispatches on command-line arguments.

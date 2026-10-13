@@ -319,6 +319,8 @@ App::new().api::<Note>(Api::new().read(Access::Authenticated).write(Access::Auth
 
 Non-staff users then list, read, update and delete only their own notes. Someone else's is a 404, the same as a note that doesn't exist, so ids reveal nothing. Whatever owner a request body names is replaced by the requesting user, so nobody can create a row as someone else or hand one over. Staff see and reassign everything. `owned_by` on a column that isn't a foreign key to the user stops the app at startup. The e2e test has two users attempt every cross-user read and write on all three databases. With the owner filter removed from DELETE alone, the same test catches one user deleting the other's row.
 
+Browser apps on another domain (a React or mobile web front end) need CORS, which Django leaves to the django-cors-headers package ([new-features #8](https://github.com/django/new-features/issues/8)). Here it's one line: `App::new().cors(["https://app.example.com"])`. Listed origins get preflight answers and may also make writes, which the cross-origin protection otherwise blocks. `"*"` lets any site read public data without cookies, but never write. `cors_credentials(true)` allows cookies and auth headers from listed origins.
+
 Scripts, mobile apps and other services use API tokens (DRF's `authtoken`, without its plaintext storage):
 
 ```sh

@@ -1208,6 +1208,59 @@ async fn scenario() {
         "MCP too"
     );
 
+    // ---- CORS: listed browser apps may call the API, everyone else is still blocked
+    let cors_app = |origins: Vec<&str>| {
+        App::new()
+            .api::<Note>(Api::new().read(Access::Public).write(Access::Authenticated).owned_by(&Note::OWNER_ID))
+            .cors(origins)
+            .router()
+    };
+    let spa = cors_app(vec!["https://app.example.com"]);
+    let browser = |method: &str, origin: &str, extra: &[(&str, &str)]| {
+        let mut b =
+            Request::builder().method(method).uri("/api/e2e_note/").header(header::ORIGIN, origin).header("sec-fetch-site", "cross-site");
+        for (k, v) in extra {
+            b = b.header(*k, *v);
+        }
+        b.header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(if method == "POST" { r#"{"title": "from the SPA"}"# } else { "" }))
+            .unwrap()
+    };
+    let run = |app: axum::Router, req: Request<Body>| async move { app.oneshot(req).await.unwrap() };
+    let pre = run(
+        spa.clone(),
+        browser(
+            "OPTIONS",
+            "https://app.example.com",
+            &[("access-control-request-method", "POST"), ("access-control-request-headers", "authorization, content-type")],
+        ),
+    )
+    .await;
+    assert_eq!(pre.status(), StatusCode::NO_CONTENT, "preflight answered");
+    assert_eq!(pre.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "https://app.example.com");
+    assert!(pre.headers()[header::ACCESS_CONTROL_ALLOW_METHODS].to_str().unwrap().contains("POST"));
+    let auth = format!("Bearer {at}");
+    let write = run(spa.clone(), browser("POST", "https://app.example.com", &[("authorization", &auth)])).await;
+    assert_eq!(write.status(), StatusCode::CREATED, "a listed origin may write, cross-site");
+    assert_eq!(write.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "https://app.example.com");
+    let evil = run(spa.clone(), browser("POST", "https://evil.example", &[("authorization", &auth)])).await;
+    assert_eq!(evil.status(), StatusCode::FORBIDDEN, "an unlisted origin is still blocked");
+    assert!(evil.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+    let evil_pre = run(spa.clone(), browser("OPTIONS", "https://evil.example", &[("access-control-request-method", "POST")])).await;
+    assert!(evil_pre.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none(), "and gets no preflight approval");
+    let open = cors_app(vec!["*"]);
+    let read = run(open.clone(), browser("GET", "https://anyone.example", &[])).await;
+    assert_eq!(
+        (read.status(), read.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN].to_str().unwrap()),
+        (StatusCode::OK, "*"),
+        "* allows reads"
+    );
+    assert_eq!(
+        run(open, browser("POST", "https://anyone.example", &[("authorization", &auth)])).await.status(),
+        StatusCode::FORBIDDEN,
+        "but never writes"
+    );
+
     // Tokens in the admin: listed and revocable, never created there (the plaintext couldn't be shown).
     let (status, _, body) = send(get("/admin/rangoli_api_token/", &cookie)).await;
     assert_eq!(status, StatusCode::OK);
