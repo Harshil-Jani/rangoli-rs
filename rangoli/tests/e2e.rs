@@ -1125,6 +1125,41 @@ async fn scenario() {
     let (_, _, schema) = send(get("/api/schema.json", "")).await;
     assert!(!schema.contains("\"secret\""), "nor does the OpenAPI document");
 
+    // ---- rate limits: a runaway client or agent gets 429s, not the database
+    // The limit is per calendar minute: don't straddle a minute boundary, or the count resets mid-test.
+    let into_minute = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() % 60;
+    if into_minute > 54 {
+        tokio::time::sleep(std::time::Duration::from_secs(61 - into_minute)).await;
+    }
+    let limited = App::new()
+        .api::<Note>(Api::new().read(Access::Authenticated).write(Access::Authenticated).owned_by(&Note::OWNER_ID))
+        .rate_limit(2)
+        .mcp_rate_limit(Some(2))
+        .router();
+    let send_to = |req: Request<Body>| {
+        let app = limited.clone();
+        async move {
+            let res = app.oneshot(req).await.unwrap();
+            (res.status(), res.headers().clone())
+        }
+    };
+    for _ in 0..2 {
+        assert_eq!(send_to(bearer("GET", "/api/e2e_note/", &at, "")).await.0, StatusCode::OK);
+    }
+    let (status, headers) = send_to(bearer("GET", "/api/e2e_note/", &at, "")).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "the 3rd in a minute is refused");
+    let wait: i64 = headers[header::RETRY_AFTER].to_str().unwrap().parse().unwrap();
+    assert!((1..=60).contains(&wait), "with Retry-After: {wait}");
+    assert_eq!(send_to(bearer("GET", "/api/e2e_note/", &bt, "")).await.0, StatusCode::OK, "other users have their own count");
+    for _ in 0..2 {
+        assert_eq!(send_to(bearer("POST", "/mcp", &at, &rpc("tools/list", serde_json::json!({})))).await.0, StatusCode::OK);
+    }
+    assert_eq!(
+        send_to(bearer("POST", "/mcp", &at, &rpc("tools/list", serde_json::json!({})))).await.0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "MCP too"
+    );
+
     // Tokens in the admin: listed and revocable, never created there (the plaintext couldn't be shown).
     let (status, _, body) = send(get("/admin/rangoli_api_token/", &cookie)).await;
     assert_eq!(status, StatusCode::OK);

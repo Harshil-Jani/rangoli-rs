@@ -193,6 +193,7 @@ async fn the_framework_never_takes_the_server_down() {
             rangoli::admin::ModelAdmin::new()
                 .action("flag", "Flag selected", |selected| async move { selected.update([Post::FLAG.set(true)]).await.map(drop) }),
         )
+        .mcp_rate_limit(None) // thousands of MCP calls: the limiter would turn most into 429s
         .api::<Post>(Api::new().read(Access::Public).write(Access::Staff))
         .api::<Author>(Api::new().read(Access::Public).write(Access::Staff))
         .routes(

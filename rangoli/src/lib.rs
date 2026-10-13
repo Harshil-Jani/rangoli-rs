@@ -18,6 +18,7 @@ pub mod auth;
 pub mod datetime;
 pub mod decimal;
 pub mod forms;
+mod limit;
 pub mod mcp;
 pub mod migrate;
 pub mod orm;
@@ -255,6 +256,8 @@ pub struct App {
     api: Vec<(&'static ModelMeta, api::Options)>,
     routes: Router,
     request_timeout: Option<std::time::Duration>,
+    api_rate: Option<u32>,
+    mcp_rate: Option<u32>,
 }
 
 impl Default for App {
@@ -318,6 +321,8 @@ impl App {
             ],
             api: vec![],
             request_timeout: None,
+            api_rate: None,
+            mcp_rate: Some(120),
             routes: Router::new(),
         }
     }
@@ -359,6 +364,20 @@ impl App {
         self.api.retain(|(m, _)| m.table != M::TABLE);
         self.api.push((M::meta(), settings.opts));
         self.model::<M>()
+    }
+
+    /// Limit JSON API requests per caller per minute (the signed-in user, else the IP). Off by
+    /// default; over the limit is a 429 with `Retry-After`.
+    pub fn rate_limit(mut self, per_minute: u32) -> Self {
+        self.api_rate = Some(per_minute);
+        self
+    }
+
+    /// Limit MCP requests per caller per minute: 120 by default, so a runaway agent loop hits a
+    /// wall instead of the database. `None` turns it off.
+    pub fn mcp_rate_limit(mut self, per_minute: Option<u32>) -> Self {
+        self.mcp_rate = per_minute;
+        self
     }
 
     /// How long a request may take before it is answered with 503 (default `RANGOLI_REQUEST_TIMEOUT`).
@@ -414,8 +433,8 @@ impl App {
         #[cfg(feature = "admin")]
         let routes = routes.merge(admin::router(self.admin.clone(), self.models.clone()));
         routes
-            .merge(api::router(self.api.clone()))
-            .merge(mcp::router(self.api.clone()))
+            .merge(limited(api::router(self.api.clone()), self.api_rate))
+            .merge(limited(mcp::router(self.api.clone()), self.mcp_rate))
             .layer(from_fn(auth::session_middleware))
             .layer(from_fn(security_middleware))
             .layer(tower_http::timeout::TimeoutLayer::with_status_code(
@@ -533,7 +552,8 @@ impl App {
                 let addr = positional.unwrap_or(&s.bind);
                 let listener = tokio::net::TcpListener::bind(addr).await?;
                 println!("Rangoli serving on http://{addr} (admin at /admin/){}", if s.debug { " [debug]" } else { "" });
-                axum::serve(listener, self.router())
+                // Client addresses reach the rate limiter as `ConnectInfo`.
+                axum::serve(listener, self.router().into_make_service_with_connect_info::<std::net::SocketAddr>())
                     .with_graceful_shutdown(async {
                         tokio::signal::ctrl_c().await.ok();
                     })
@@ -542,6 +562,13 @@ impl App {
             other => return Err(Error::Config(format!("unknown command `{other}` (try `help`)"))),
         }
         Ok(())
+    }
+}
+
+fn limited(router: Router, per_minute: Option<u32>) -> Router {
+    match per_minute {
+        Some(n) => router.layer(axum::middleware::from_fn_with_state(limit::Limiter::new(n), limit::middleware)),
+        None => router,
     }
 }
 
