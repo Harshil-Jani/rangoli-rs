@@ -166,8 +166,26 @@ fn fail(e: Error) -> Response {
     }
 }
 
-fn endpoint<'a>(site: &'a Site, table: &str, user: &CurrentUser, write: bool) -> Result<(&'static ModelMeta, &'a Options), Response> {
-    let (meta, opts) = site.models.get(table).ok_or_else(|| problem(StatusCode::NOT_FOUND, "Not found."))?;
+/// A token's scope on this request, if it came with a bearer token.
+pub(crate) type ScopeExt = Option<axum::Extension<auth::TokenScope>>;
+
+fn endpoint<'a>(
+    site: &'a Site,
+    table: &str,
+    user: &CurrentUser,
+    scope: &ScopeExt,
+    write: bool,
+) -> Result<(&'static ModelMeta, &'a Options), Response> {
+    let not_found = || problem(StatusCode::NOT_FOUND, "Not found.");
+    let (meta, opts) = site.models.get(table).ok_or_else(not_found)?;
+    if let Some(axum::Extension(scope)) = scope {
+        if !scope.allows_table(table) {
+            return Err(not_found()); // outside the token's tables: as if it didn't exist
+        }
+        if write && scope.read_only {
+            return Err(problem(StatusCode::FORBIDDEN, "This token is read-only."));
+        }
+    }
     let access = if write { opts.write } else { opts.read };
     if access.allows(user) {
         Ok((meta, opts))
@@ -372,8 +390,14 @@ fn param<'a>(p: &'a HashMap<String, String>, k: &str) -> Option<&'a str> {
 
 // ---------------------------------------------------------------- handlers
 
-async fn list(State(site): S, user: CurrentUser, Path(table): Path<String>, UrlQuery(p): UrlQuery<HashMap<String, String>>) -> Reply {
-    let (meta, opts) = endpoint(&site, &table, &user, false)?;
+async fn list(
+    State(site): S,
+    user: CurrentUser,
+    scope: ScopeExt,
+    Path(table): Path<String>,
+    UrlQuery(p): UrlQuery<HashMap<String, String>>,
+) -> Reply {
+    let (meta, opts) = endpoint(&site, &table, &user, &scope, false)?;
     let mut q = Query::new(meta);
     q.filter.extend(owned(ownership(opts, &user)));
     // `?field=value` filters on exact matches, typed by the field.
@@ -438,8 +462,8 @@ async fn list(State(site): S, user: CurrentUser, Path(table): Path<String>, UrlQ
     Ok(Json(json!({ "count": count, "next": next, "previous": previous, "results": results })).into_response())
 }
 
-async fn detail(State(site): S, user: CurrentUser, Path((table, id)): Path<(String, i64)>) -> Reply {
-    let (meta, opts) = endpoint(&site, &table, &user, false)?;
+async fn detail(State(site): S, user: CurrentUser, scope: ScopeExt, Path((table, id)): Path<(String, i64)>) -> Reply {
+    let (meta, opts) = endpoint(&site, &table, &user, &scope, false)?;
     Ok(Json(fetch(meta, id, ownership(opts, &user)).await?).into_response())
 }
 
@@ -479,9 +503,16 @@ async fn audit(user: &CurrentUser, meta: &'static ModelMeta, id: i64, action: i6
     entry.save().await
 }
 
-async fn create(State(site): S, user: CurrentUser, via: ViaExt, Path(table): Path<String>, Json(body): Json<JsonValue>) -> Reply {
+async fn create(
+    State(site): S,
+    user: CurrentUser,
+    scope: ScopeExt,
+    via: ViaExt,
+    Path(table): Path<String>,
+    Json(body): Json<JsonValue>,
+) -> Reply {
     let via = via.map(|v| v.0);
-    let (meta, opts) = endpoint(&site, &table, &user, true)?;
+    let (meta, opts) = endpoint(&site, &table, &user, &scope, true)?;
     if opts.owner.is_some() && user.0.is_none() {
         // An owned row needs an owner; with `write(Access::Public)` the body could otherwise name anyone.
         return Err(problem(StatusCode::UNAUTHORIZED, "Authentication credentials were not provided."));
@@ -502,8 +533,18 @@ async fn create(State(site): S, user: CurrentUser, via: ViaExt, Path(table): Pat
     Ok((StatusCode::CREATED, Json(fetch(meta, id, None).await?)).into_response())
 }
 
-async fn update(site: &Site, user: &CurrentUser, via: Option<Via>, table: &str, id: i64, body: &JsonValue, partial: bool) -> Reply {
-    let (meta, opts) = endpoint(site, table, user, true)?;
+#[allow(clippy::too_many_arguments)]
+async fn update(
+    site: &Site,
+    user: &CurrentUser,
+    scope: &ScopeExt,
+    via: Option<Via>,
+    table: &str,
+    id: i64,
+    body: &JsonValue,
+    partial: bool,
+) -> Reply {
+    let (meta, opts) = endpoint(site, table, user, scope, true)?;
     fetch(meta, id, ownership(opts, user)).await?; // 404 before validation, like DRF (and for others' rows)
     let body = &claim(opts, user, body, false);
     let cols = columns(meta, body, false, partial).await?;
@@ -530,25 +571,27 @@ async fn update(site: &Site, user: &CurrentUser, via: Option<Via>, table: &str, 
 async fn replace(
     State(site): S,
     user: CurrentUser,
+    scope: ScopeExt,
     via: ViaExt,
     Path((table, id)): Path<(String, i64)>,
     Json(body): Json<JsonValue>,
 ) -> Reply {
-    update(&site, &user, via.map(|v| v.0), &table, id, &body, false).await
+    update(&site, &user, &scope, via.map(|v| v.0), &table, id, &body, false).await
 }
 
 async fn patch(
     State(site): S,
     user: CurrentUser,
+    scope: ScopeExt,
     via: ViaExt,
     Path((table, id)): Path<(String, i64)>,
     Json(body): Json<JsonValue>,
 ) -> Reply {
-    update(&site, &user, via.map(|v| v.0), &table, id, &body, true).await
+    update(&site, &user, &scope, via.map(|v| v.0), &table, id, &body, true).await
 }
 
-async fn remove(State(site): S, user: CurrentUser, via: ViaExt, Path((table, id)): Path<(String, i64)>) -> Reply {
-    let (meta, opts) = endpoint(&site, &table, &user, true)?;
+async fn remove(State(site): S, user: CurrentUser, scope: ScopeExt, via: ViaExt, Path((table, id)): Path<(String, i64)>) -> Reply {
+    let (meta, opts) = endpoint(&site, &table, &user, &scope, true)?;
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
     q.filter.extend(owned(ownership(opts, &user)));

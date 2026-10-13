@@ -3,7 +3,7 @@
 {% block content %}
 <p class="intro">Let Claude, Cursor or any assistant that speaks MCP read and update your data. It works as you, with your permissions, and every change it makes shows up in History as “via MCP”.</p>
 {% if token %}
-<p class="message success" role="status">Token “{{ name }}” created. Copy it now: it won't be shown again.</p>
+<p class="message success" role="status">Token “{{ name }}” created. Copy it now: it won't be shown again. {{ can }}</p>
 <section class="panel fields agent-setup">
   <div class="field"><span class="field-label">Server address</span><div class="field-control"><code>{{ url }}</code></div></div>
   <div class="field"><span class="field-label">Token</span><div class="field-control"><code>{{ token }}</code></div></div>
@@ -21,6 +21,22 @@
       <div class="field-control"><input type="text" name="name" id="id_name" maxlength="100" placeholder="Claude on my laptop" required><p class="help">So you can tell your agents apart later.</p></div>
     </div>
     <div class="field">
+      <span class="field-label">What it may do</span>
+      <div class="field-control">
+        <label class="check"><input type="checkbox" name="allow_writes"> Allow changes (add, edit and delete)</label>
+        <p class="help">Off by default: the agent can look things up but not change anything.</p>
+      </div>
+    </div>
+    {% if choices %}
+    <div class="field">
+      <span class="field-label">Only these tables</span>
+      <div class="field-control">
+        {% for c in choices %}<label class="check"><input type="checkbox" name="tables" value="{{ c.table }}"> {{ c.label }}</label>{% endfor %}
+        <p class="help">Leave all unticked to allow every table you can use. Others will look like they don't exist.</p>
+      </div>
+    </div>
+    {% endif %}
+    <div class="field">
       <label class="field-label" for="id_days">Stops working after</label>
       <div class="field-control"><select name="days" id="id_days">
         <option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option><option value="0">Never</option>
@@ -32,9 +48,9 @@
 {% if tokens %}
 <table class="panel">
   <caption>Your agents</caption>
-  <thead><tr><th scope="col">Name</th><th scope="col">Token starts with</th><th scope="col">Last used</th><th scope="col">Stops working</th></tr></thead>
+  <thead><tr><th scope="col">Name</th><th scope="col">May</th><th scope="col">Tables</th><th scope="col">Token starts with</th><th scope="col">Last used</th><th scope="col">Stops working</th></tr></thead>
   <tbody>
-  {% for t in tokens %}<tr><th scope="row"><a href="/admin/rangoli_api_token/{{ t.id }}/">{{ t.name }}</a></th><td><code>{{ t.prefix }}</code></td><td>{{ t.used }}</td><td>{{ t.expires }}</td></tr>{% endfor %}
+  {% for t in tokens %}<tr><th scope="row"><a href="/admin/rangoli_api_token/{{ t.id }}/">{{ t.name }}</a></th><td>{{ t.access }}</td><td>{{ t.tables }}</td><td><code>{{ t.prefix }}</code></td><td>{{ t.used }}</td><td>{{ t.expires }}</td></tr>{% endfor %}
   </tbody>
 </table>
 <p class="help">To disconnect an agent, open it and delete it.</p>

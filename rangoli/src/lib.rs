@@ -287,6 +287,7 @@ impl App {
                             &auth::ApiToken::NAME,
                             &auth::ApiToken::PREFIX,
                             &auth::ApiToken::USER_ID,
+                            &auth::ApiToken::READ_ONLY,
                             &auth::ApiToken::LAST_USED_AT,
                             &auth::ApiToken::EXPIRES_AT,
                         ])
@@ -450,7 +451,7 @@ impl App {
         }
         if matches!(cmd, "help" | "--help" | "-h") {
             println!(
-                "commands:\n  runserver [addr]            serve the app (default {})\n  migrate [--check]           apply pending migrations\n  makemigrations [name] [--check]\n  createsuperuser [username]  password from RANGOLI_PASSWORD or a prompt\n  createtoken <username> [name] [--days N]  print a new API token (shown once)\n  worker                      run background tasks (RANGOLI_WORKERS loops)",
+                "commands:\n  runserver [addr]            serve the app (default {})\n  migrate [--check]           apply pending migrations\n  makemigrations [name] [--check]\n  createsuperuser [username]  password from RANGOLI_PASSWORD or a prompt\n  createtoken <username> [name] [--days N] [--read-only] [--tables a,b]  print a new API token (shown once)\n  worker                      run background tasks (RANGOLI_WORKERS loops)",
                 s.bind
             );
             return Ok(());
@@ -498,7 +499,8 @@ impl App {
                 println!("Superuser `{username}` created.");
             }
             "createtoken" => {
-                let username = positional.ok_or_else(|| Error::Config("usage: createtoken <username> [name] [--days N]".into()))?;
+                let username = positional
+                    .ok_or_else(|| Error::Config("usage: createtoken <username> [name] [--days N] [--read-only] [--tables a,b]".into()))?;
                 let user = auth::User::objects().filter(auth::User::USERNAME.eq(username)).get().await?;
                 let args: Vec<String> = std::env::args().collect();
                 let after = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).cloned();
@@ -506,7 +508,11 @@ impl App {
                     after("--days").map(|d| d.parse::<u64>().map_err(|_| Error::Config("--days takes a number".into()))).transpose()?;
                 let name =
                     args.iter().skip_while(|a| *a != username).nth(1).filter(|a| !a.starts_with("--")).cloned().unwrap_or("cli".into());
-                let (_, token) = auth::create_token(&user, &name, days.map(|d| std::time::Duration::from_secs(d * 86_400))).await?;
+                let tables =
+                    after("--tables").map(|t| t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>());
+                let scope = auth::TokenScope { read_only: flag("--read-only"), tables: tables.filter(|t| !t.is_empty()) };
+                let ttl = days.map(|d| std::time::Duration::from_secs(d * 86_400));
+                let (_, token) = auth::create_scoped_token(&user, &name, ttl, &scope).await?;
                 println!("{token}");
                 eprintln!("Token `{name}` for `{username}`. Store it now: only its hash is kept.");
             }

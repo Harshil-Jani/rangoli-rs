@@ -9,8 +9,8 @@
 //! only the tools their user may call, and every change they make lands in the admin History
 //! as "… via MCP", next to the admin's own.
 
-use crate::api::{field_schema, Options, Via};
-use crate::auth::CurrentUser;
+use crate::api::{field_schema, Options, ScopeExt, Via};
+use crate::auth::{CurrentUser, TokenScope};
 use crate::orm::{FieldType, ModelMeta};
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
@@ -47,7 +47,13 @@ fn rpc_error(id: &JsonValue, code: i64, message: &str) -> Response {
     Json(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })).into_response()
 }
 
-async fn handle(axum::extract::State(mcp): axum::extract::State<Arc<Mcp>>, user: CurrentUser, body: axum::body::Bytes) -> Response {
+async fn handle(
+    axum::extract::State(mcp): axum::extract::State<Arc<Mcp>>,
+    user: CurrentUser,
+    scope: ScopeExt,
+    body: axum::body::Bytes,
+) -> Response {
+    let scope = scope.map(|s| s.0);
     let Ok(msg) = serde_json::from_slice::<JsonValue>(&body) else {
         return rpc_error(&JsonValue::Null, -32700, "Parse error");
     };
@@ -76,11 +82,11 @@ async fn handle(axum::extract::State(mcp): axum::extract::State<Arc<Mcp>>, user:
             )
         }
         "ping" => reply(&id, json!({})),
-        "tools/list" => reply(&id, json!({ "tools": tools(&mcp, &user) })),
+        "tools/list" => reply(&id, json!({ "tools": tools(&mcp, &user, scope.as_ref()) })),
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            match call(&mcp, &user, name, &args).await {
+            match call(&mcp, &user, scope.as_ref(), name, &args).await {
                 Some(result) => reply(&id, result),
                 None => rpc_error(&id, -32602, &format!("Unknown tool: {name}")),
             }
@@ -103,9 +109,12 @@ fn noun(meta: &ModelMeta) -> String {
     words
 }
 
-fn tools(mcp: &Mcp, user: &CurrentUser) -> Vec<JsonValue> {
+fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonValue> {
     let mut out = vec![];
     for (meta, opts) in &mcp.models {
+        if scope.is_some_and(|s| !s.allows_table(meta.table)) {
+            continue; // outside the token's tables
+        }
         let (n, id) = (noun(meta), json!({ "type": "integer", "description": "The row's id" }));
         let mut fields = Map::new();
         for f in meta.fields.iter().filter(|f| !f.is_auto()) {
@@ -126,7 +135,8 @@ fn tools(mcp: &Mcp, user: &CurrentUser) -> Vec<JsonValue> {
         for (op, write) in OPS {
             let allowed = (if write { opts.write } else { opts.read }).allows(user);
             // Owned rows need a signed-in owner, so anonymous writes there always fail: don't offer them.
-            if !allowed || (write && opts.owner.is_some() && user.0.is_none()) {
+            let read_only = scope.is_some_and(|s| s.read_only);
+            if !allowed || (write && opts.owner.is_some() && user.0.is_none()) || (write && read_only) {
                 continue; // only offer what this user may actually do
             }
             let (description, schema) = match op {
@@ -168,7 +178,7 @@ fn tools(mcp: &Mcp, user: &CurrentUser) -> Vec<JsonValue> {
 
 /// Run a tool by sending the matching request through the JSON API as this user.
 /// `None` for an unknown tool name.
-async fn call(mcp: &Mcp, user: &CurrentUser, name: &str, args: &JsonValue) -> Option<JsonValue> {
+async fn call(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>, name: &str, args: &JsonValue) -> Option<JsonValue> {
     let (table, op) = name.rsplit_once('_')?;
     mcp.models.iter().find(|(m, _)| m.table == table)?;
     let id = || args["id"].as_i64();
@@ -201,6 +211,9 @@ async fn call(mcp: &Mcp, user: &CurrentUser, name: &str, args: &JsonValue) -> Op
     let ext = req.extensions_mut()?;
     ext.insert(user.clone());
     ext.insert(Via("MCP"));
+    if let Some(scope) = scope {
+        ext.insert(scope.clone()); // the API enforces it on every tool call, not just the tool list
+    }
     let req = req.body(body.map_or_else(Body::empty, |b| Body::from(b.to_string()))).ok()?;
     let res = mcp.api.clone().oneshot(req).await.ok()?;
     let status = res.status();

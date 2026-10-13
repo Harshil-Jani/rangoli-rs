@@ -111,6 +111,8 @@ async fn agent_rows(u: &User) -> Result<Vec<minijinja::Value>, Response> {
         .map(|t| {
             context! {
                 id => t.id, name => t.name, prefix => t.prefix,
+                access => if t.read_only { "Read only" } else { "Read and change" },
+                tables => t.tables.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| "All".to_string()),
                 used => t.last_used_at.map_or("Never".to_string(), DateTime::human),
                 expires => t.expires_at.map_or("Never".to_string(), DateTime::human),
             }
@@ -118,30 +120,51 @@ async fn agent_rows(u: &User) -> Result<Vec<minijinja::Value>, Response> {
         .collect())
 }
 
+/// The app's own tables an agent can be limited to (framework tables are never offered).
+fn agent_tables(site: &Site) -> Vec<(&'static str, String)> {
+    site.models.iter().filter(|m| !m.table.starts_with("rangoli_")).map(|m| (m.table, title_plural(m.name))).collect()
+}
+
+fn table_choices(site: &Site) -> Vec<minijinja::Value> {
+    agent_tables(site).into_iter().map(|(table, label)| context! { table, label }).collect()
+}
+
 async fn agents_page(State(site): S, user: CurrentUser, uri: Uri) -> Page {
     let u = staff(&user, &uri)?;
     let tokens = agent_rows(u).await?;
-    render(&site, "agents.html", context! { title => "Connect an AI agent", tokens, ..chrome(&site, u, None) })
+    let choices = table_choices(&site);
+    render(&site, "agents.html", context! { title => "Connect an AI agent", tokens, choices, ..chrome(&site, u, None) })
 }
 
 /// Create a token for the signed-in user and show it once, with setup for common clients.
 async fn agents_submit(State(site): S, user: CurrentUser, uri: Uri, headers: axum::http::HeaderMap, Form(f): Form<Pairs>) -> Page {
     let u = staff(&user, &uri)?;
     let name = param(&f, "name").unwrap_or("").trim().to_string();
+    let choices = table_choices(&site);
     if name.is_empty() || name.chars().count() > 100 || name.contains('\0') {
         let tokens = agent_rows(u).await?;
         let error = "Give the agent a name of up to 100 characters.";
-        return render(&site, "agents.html", context! { title => "Connect an AI agent", error, tokens, ..chrome(&site, u, None) });
+        return render(&site, "agents.html", context! { title => "Connect an AI agent", error, tokens, choices, ..chrome(&site, u, None) });
     }
     let days: u64 = param(&f, "days").and_then(|d| d.parse().ok()).filter(|d| *d <= 3650).unwrap_or(30);
     let ttl = (days > 0).then(|| std::time::Duration::from_secs(days * 86_400));
-    let (_, token) = auth::create_token(u, &name, ttl).await.map_err(fail)?;
+    // Safe by default: read-only unless "Allow changes" is ticked; only known tables are accepted.
+    let known = agent_tables(&site);
+    let picked: Vec<String> =
+        f.iter().filter(|(k, _)| k == "tables").filter(|(_, v)| known.iter().any(|(t, _)| t == v)).map(|(_, v)| v.clone()).collect();
+    let scope = auth::TokenScope { read_only: param(&f, "allow_writes") != Some("on"), tables: (!picked.is_empty()).then_some(picked) };
+    let (_, token) = auth::create_scoped_token(u, &name, ttl, &scope).await.map_err(fail)?;
     let url = mcp_url(&headers);
     let tokens = agent_rows(u).await?;
+    let can = match (&scope.read_only, &scope.tables) {
+        (true, None) => "It can read everything you can, and change nothing.".to_string(),
+        (false, None) => "It can read and change everything you can.".to_string(),
+        (ro, Some(ts)) => format!("It can {} only these tables: {}.", if *ro { "read" } else { "read and change" }, ts.join(", ")),
+    };
     render(
         &site,
         "agents.html",
-        context! { title => "Connect an AI agent", name, token, server => server_name(&url), url, tokens, ..chrome(&site, u, None) },
+        context! { title => "Connect an AI agent", name, token, can, server => server_name(&url), url, tokens, choices, ..chrome(&site, u, None) },
     )
 }
 

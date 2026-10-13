@@ -1032,7 +1032,7 @@ async fn full_stack() {
     assert_eq!(status, StatusCode::OK);
     let (_, _, home) = send(get("/admin/", &cookie)).await;
     assert!(home.contains("/admin/agents/"), "the dashboard links to it");
-    let (status, _, page2) = send(form("/admin/agents/", &cookie, "name=Claude+on+my+laptop&days=30")).await;
+    let (status, _, page2) = send(form("/admin/agents/", &cookie, "name=Claude+on+my+laptop&days=30&allow_writes=on")).await;
     assert_eq!(status, StatusCode::OK);
     let shown: String = page2.split("rgl_").nth(1).map(|t| format!("rgl_{}", &t[..40])).expect("token on the page");
     assert!(
@@ -1046,6 +1046,44 @@ async fn full_stack() {
     let (_, _, again) = send(get("/admin/agents/", &cookie)).await;
     assert!(again.contains("Claude on my laptop") && !again.contains(&shown), "listed afterwards by name, never by token");
     assert_eq!(send(get("/admin/agents/", "")).await.0, StatusCode::SEE_OTHER, "staff only");
+
+    // ---- guardrails: agents are read-only unless allowed, scoped to tables, kept out of the admin
+    let token_on = |page: &str| page.split("rgl_").nth(1).map(|t| format!("rgl_{}", &t[..40])).expect("token on the page");
+    let (_, _, page3) = send(form("/admin/agents/", &cookie, "name=Careful+agent&days=7")).await;
+    let careful = token_on(&page3);
+    assert!(page3.contains("change nothing"), "the page says what the agent can do");
+    let (_, _, body) = send(bearer("POST", "/mcp", &careful, &rpc("tools/list", serde_json::json!({})))).await;
+    let ro_tools = names(&body);
+    assert!(
+        ro_tools.contains(&"blog_post_list".to_string()) && !ro_tools.iter().any(|t| t.ends_with("_create") || t.ends_with("_delete")),
+        "read-only by default: {ro_tools:?}"
+    );
+    let blocked = serde_json::json!({ "title": "nope", "body": "b", "author_id": alan.id.unwrap(), "views": 0, "price": "1" }).to_string();
+    let (status, _, body) = send(bearer("POST", "/api/blog_post/", &careful, &blocked)).await;
+    assert_eq!(
+        (status, json(&body)["detail"].as_str()),
+        (StatusCode::FORBIDDEN, Some("This token is read-only.")),
+        "enforced by the API, not just hidden"
+    );
+    let (_, _, body) = send(bearer("POST", "/mcp", &careful, &call("blog_post_create", serde_json::from_str(&blocked).unwrap()))).await;
+    assert_eq!(json(&body)["result"]["structuredContent"]["status"], 403, "and over MCP even when the agent calls a tool it wasn't shown");
+    let root_user = auth::User::objects().filter(auth::User::USERNAME.eq("root")).get().await.unwrap();
+    let notes_only = auth::TokenScope { read_only: false, tables: Some(vec!["e2e_note".into()]) };
+    let (_, narrow) = auth::create_scoped_token(&root_user, "notes bot", None, &notes_only).await.unwrap();
+    assert_eq!(
+        send(bearer("GET", "/api/blog_post/", &narrow, "")).await.0,
+        StatusCode::NOT_FOUND,
+        "other tables look like they don't exist"
+    );
+    assert_eq!(send(bearer("GET", "/api/e2e_note/", &narrow, "")).await.0, StatusCode::OK);
+    let (_, _, body) = send(bearer("POST", "/mcp", &narrow, &rpc("tools/list", serde_json::json!({})))).await;
+    assert!(names(&body).iter().all(|t| t.starts_with("e2e_note_")), "only its tables' tools: {:?}", names(&body));
+    let (status, _, body) = send(bearer("GET", "/admin/", &token, "")).await;
+    assert_eq!(
+        (status, json(&body)["detail"].as_str()),
+        (StatusCode::FORBIDDEN, Some("API tokens can't open the admin.")),
+        "even a staff token"
+    );
 
     // Tokens in the admin: listed and revocable, never created there (the plaintext couldn't be shown).
     let (status, _, body) = send(get("/admin/rangoli_api_token/", &cookie)).await;

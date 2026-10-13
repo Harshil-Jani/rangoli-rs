@@ -56,6 +56,36 @@ pub struct ApiToken {
     pub created_at: DateTime,
     pub last_used_at: Option<DateTime>,
     pub expires_at: Option<DateTime>,
+    /// Reads only: any create, update or delete is refused (403), over the API and MCP alike.
+    pub read_only: bool,
+    /// Tables this token may touch, comma-separated (`blog_post,blog_author`); empty or none means
+    /// all its user can reach. Others look like they don't exist (404, and no MCP tools).
+    #[field(text)]
+    pub tables: Option<String>,
+}
+
+/// What a token may do beyond its user's own rights. Set on bearer requests only; sessions
+/// (people in a browser) have no scope.
+#[derive(Clone, Debug, Default)]
+pub struct TokenScope {
+    pub read_only: bool,
+    pub tables: Option<Vec<String>>,
+}
+
+impl TokenScope {
+    fn of(t: &ApiToken) -> Self {
+        let tables = t
+            .tables
+            .as_deref()
+            .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect::<Vec<_>>())
+            .filter(|v| !v.is_empty());
+        TokenScope { read_only: t.read_only, tables }
+    }
+
+    /// May this token see `table` at all?
+    pub fn allows_table(&self, table: &str) -> bool {
+        self.tables.as_ref().is_none_or(|ts| ts.iter().any(|t| t == table))
+    }
 }
 
 /// Every token starts with this, so secret scanners (and people) can recognise a leaked one.
@@ -68,9 +98,19 @@ fn token_digest(token: &str) -> String {
     sha2::Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Create a token for `user`. Returns the stored row and the token, which is never retrievable again.
-/// `valid_for: None` never expires; revoke by deleting the row.
+/// Create a token for `user` with all of that user's rights. Returns the stored row and the
+/// token, which is never retrievable again. `valid_for: None` never expires; revoke by deleting the row.
 pub async fn create_token(user: &User, name: &str, valid_for: Option<std::time::Duration>) -> Result<(ApiToken, String)> {
+    create_scoped_token(user, name, valid_for, &TokenScope::default()).await
+}
+
+/// `create_token`, narrowed: read-only, and/or limited to some tables. What an AI agent should get.
+pub async fn create_scoped_token(
+    user: &User,
+    name: &str,
+    valid_for: Option<std::time::Duration>,
+    scope: &TokenScope,
+) -> Result<(ApiToken, String)> {
     let token = format!("{TOKEN_PREFIX}{}", random_hex(20)?); // 160 random bits
     let mut row = ApiToken {
         id: None,
@@ -81,13 +121,16 @@ pub async fn create_token(user: &User, name: &str, valid_for: Option<std::time::
         created_at: DateTime::now(),
         last_used_at: None,
         expires_at: valid_for.map(|d| DateTime::from_unix(now() + d.as_secs() as i64)),
+        read_only: scope.read_only,
+        tables: scope.tables.as_ref().map(|t| t.join(",")),
     };
     row.save().await?;
     Ok((row, token))
 }
 
-/// The active user a token belongs to; `None` for unknown, expired or malformed tokens.
-pub async fn token_user(token: &str) -> Result<Option<User>> {
+/// The active user a token belongs to, with the token's scope; `None` for unknown, expired or
+/// malformed tokens.
+pub async fn token_user(token: &str) -> Result<Option<(User, TokenScope)>> {
     if !token.starts_with(TOKEN_PREFIX) || token.len() != TOKEN_PREFIX.len() + 40 {
         return Ok(None); // not ours: no query
     }
@@ -97,7 +140,8 @@ pub async fn token_user(token: &str) -> Result<Option<User>> {
         row.last_used_at = Some(DateTime::now());
         ApiToken::objects().filter(ApiToken::ID.eq(row.id.unwrap_or(-1))).update([ApiToken::LAST_USED_AT.set(DateTime::now())]).await?;
     }
-    User::objects().filter(User::ID.eq(row.user_id) & User::IS_ACTIVE.eq(true)).first().await
+    let user = User::objects().filter(User::ID.eq(row.user_id) & User::IS_ACTIVE.eq(true)).first().await?;
+    Ok(user.map(|u| (u, TokenScope::of(&row))))
 }
 
 pub const COOKIE: &str = "rangoli_sid";
@@ -299,8 +343,13 @@ pub async fn session_middleware(mut req: Request, next: Next) -> Response {
         .and_then(|v| v.strip_prefix("Bearer "))
         .filter(|t| t.trim().starts_with(TOKEN_PREFIX));
     if let Some(token) = bearer {
-        let user = match token_user(token.trim()).await {
-            Ok(Some(u)) => u,
+        // Tokens are for programs and agents. The admin is for people, signed in with a password.
+        if req.uri().path().starts_with("/admin") {
+            let body = axum::Json(serde_json::json!({ "detail": "API tokens can't open the admin." }));
+            return (axum::http::StatusCode::FORBIDDEN, body).into_response();
+        }
+        let (user, scope) = match token_user(token.trim()).await {
+            Ok(Some(found)) => found,
             Ok(None) => {
                 let body = axum::Json(serde_json::json!({ "detail": "Invalid token." }));
                 return (axum::http::StatusCode::UNAUTHORIZED, [(axum::http::header::WWW_AUTHENTICATE, "Bearer")], body).into_response();
@@ -308,6 +357,7 @@ pub async fn session_middleware(mut req: Request, next: Next) -> Response {
             Err(e) => return e.into_response(), // the database is down: 503, not "your token is bad"
         };
         req.extensions_mut().insert(CurrentUser(Some(user)));
+        req.extensions_mut().insert(scope);
         return next.run(req).await;
     }
     let key = req.headers().get(axum::http::header::COOKIE).and_then(|v| v.to_str().ok()).and_then(session_key).map(str::to_owned);
