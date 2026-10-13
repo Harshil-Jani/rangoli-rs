@@ -137,8 +137,8 @@ footer { max-width: 1080px; margin: 0 auto; padding: var(--s6) var(--s5) var(--s
 </div></header>
 <main>
 <section class="hero">
-  <h1>The backend that's ready for AI on day one</h1>
-  <p class="lede">Describe your data once. Rangoli gives you an admin panel for your team, an API for your apps, and an MCP server so AI assistants like Claude and Cursor can work with that data safely, as a user, with every change on record. It all runs as one small, fast program.</p>
+  <h1>Give your Django data to Claude in five minutes. Without giving it your database.</h1>
+  <p class="lede">Every AI-to-database bridge today hands the model a database connection and hopes it behaves. Rangoli hands it a <em>user</em>: one who sees only what you allow, can't touch secrets, asks before changing anything, and leaves every move in a history you can undo. Point it at your Django database, sign in with your Django account, click <strong>Connect an AI agent</strong>.</p>
   <div class="actions"><a class="btn" href="#start">Get started</a><a class="btn ghost" href="https://github.com/Harshil-Jani/rangoli-rs">Source on GitHub</a><a class="btn ghost" href="#results">See the benchmarks</a></div>
   <video controls preload="metadata" poster="ai-agent-demo-poster.jpg" aria-describedby="video-caption">
     <source src="ai-agent-demo.mp4" type="video/mp4">
@@ -151,7 +151,8 @@ footer { max-width: 1080px; margin: 0 auto; padding: var(--s6) var(--s5) var(--s
   <h2>Why it exists</h2>
   <p class="method">Rust used to be hard to adopt because engineers who knew it were hard to find. Picking up a language is much faster now; what teams lack is a framework as complete as Django. Rangoli is that framework, with Django's shape and Rust's cost profile.</p>
   <dl class="why">
-    <div><dt>Ready for AI</dt><dd>Every model is also an MCP server. Connect Claude or Cursor from the admin; agents act as a user, see only that user's data, and every change is in History.</dd></div>
+    <div><dt>Safe AI, enforced by the server</dt><dd>Agents are read-only by default, scoped to the tables you pick, blind to private and secret-looking columns, rate limited, and every change can wait for your approval and be undone. The 2025 Supabase prompt-injection attack is replayed in the test suite, and every step of it fails.</dd></div>
+    <div><dt>Keep your Django app</dt><dd><code>rangoli-django</code> reads your existing Django database (Postgres, MySQL or SQLite), lets staff sign in with their Django passwords, and serves the admin, an API and MCP on top. It never changes Django's tables.</dd></div>
     <div><dt>Async from the ground up</dt><dd>No sync views to convert, no ASGI migration, no <code>sync_to_async</code> tax. WebSockets are a handler.</dd></div>
     <div><dt>Light</dt><dd>One binary. Admin, templates, real-time and each database driver are features you can leave out.</dd></div>
     <div><dt>Never the reason you're down</dt><dd>Fuzzed on every push on three databases; outages give fast 503s and recover on their own.</dd></div>
