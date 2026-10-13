@@ -413,6 +413,10 @@ Money is `Decimal<P>`, with the number of places in the type: `price: Decimal<2>
 
 `Uuid` is stored as lowercase text (`VARCHAR(36)`) on every database. `#[field(auto, unique)] public_id: Uuid` fills a time-ordered v7 on insert unless you set one, and shows read-only in the admin and the API (`format: uuid`). Adding a unique UUID column to a table that already has rows is one `makemigrations`: the migration adds it nullable, gives each existing row its own UUID, then makes it `NOT NULL UNIQUE`. Django needs [three hand-written migrations](https://docs.djangoproject.com/en/stable/howto/writing-migrations/#migrations-that-add-unique-fields) for that; the e2e test runs it on all three databases, and without that step Postgres refuses with `could not create unique index`. `#[field(auto_now_add)]` and `#[field(auto_now)]` fill `created_at`/`updated_at` style fields on save, and the admin keeps them read-only. Field attributes: `max_length`, `text`, `unique`, `index`, `choices`, `default = literal`, `password`, `fk = Model`, `auto` (UUIDs), `auto_now`, `auto_now_add`, and `cascade` (`ON DELETE CASCADE`; foreign keys protect referenced rows by default).
 
+### Encrypted fields
+
+`#[field(encrypted)] tax_id: String` keeps the value encrypted in the database (AES-256-GCM, a fresh nonce on every write), so a dump or a backup shows `enc:v1:...` instead of the data. Your code, the admin, the API and MCP see plain values; only the storage boundary changes. Set `RANGOLI_ENCRYPTION_KEY` to 64 hex characters (`openssl rand -hex 32`); an app with encrypted fields won't start without one. To rotate, move the old key to `RANGOLI_ENCRYPTION_OLD_KEYS` and set a new one: old values still read, and each row is re-encrypted on its next save. Rows written before a field was encrypted read as they are. Encrypted fields can't be searched or filtered, since the stored bytes change on every write; the API says so with a 400. Django needs a third-party package for this ([new-features #150](https://github.com/django/new-features/issues/150)).
+
 ## Migrations
 
 ```json

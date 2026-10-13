@@ -17,6 +17,7 @@ pub mod api;
 pub mod approvals;
 pub mod auth;
 mod cors;
+mod crypt;
 pub mod datetime;
 pub mod decimal;
 pub mod django;
@@ -393,6 +394,10 @@ impl App {
 
     /// Track a model in migrations.
     pub fn model<M: orm::Model>(mut self) -> Self {
+        let encrypted = M::meta().fields.iter().any(|f| f.ty == orm::FieldType::Encrypted);
+        if encrypted && !crypt::configured() {
+            panic!("rangoli: {} has encrypted fields: set RANGOLI_ENCRYPTION_KEY to 64 hex characters (openssl rand -hex 32)", M::TABLE);
+        }
         if !self.models.iter().any(|m| m.table == M::TABLE) {
             self.models.push(M::meta());
         }

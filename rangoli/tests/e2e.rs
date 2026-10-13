@@ -49,6 +49,8 @@ struct Note {
     owner_id: i64,
     #[field(max_length = 100, private)]
     secret: Option<String>,
+    #[field(encrypted)]
+    ssn: Option<String>,
 }
 
 #[derive(Choices, Clone, Copy, Debug, PartialEq)]
@@ -180,6 +182,8 @@ fn full_stack() {
 }
 
 async fn scenario() {
+    // Before any model is registered: encrypted fields need a key at startup.
+    std::env::set_var("RANGOLI_ENCRYPTION_KEY", "4f1c2e8a9b7d6c5e3a1f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b");
     let dir = std::env::temp_dir().join(format!("rangoli-e2e-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let url = std::env::var("RANGOLI_TEST_DATABASE_URL")
@@ -1378,6 +1382,35 @@ async fn scenario() {
         send(bearer("POST", "/mcp", &bot, &call("e2e_note_create", serde_json::json!({ "title": "exfiltrated: ..." })))).await;
     assert_eq!(json(&body)["result"]["structuredContent"]["status"], 403, "4. and it can't write anything out: read-only");
     assert_eq!(send(bearer("GET", "/admin/", &bot, "")).await.0, StatusCode::FORBIDDEN, "5. nor reach the admin");
+
+    // ---- encrypted fields: ciphertext in the database, plain values everywhere else
+    let mut private_note = Note::get(sid).await.unwrap();
+    private_note.ssn = Some("123-45-6789".into());
+    private_note.save().await.unwrap();
+    let raw = |id: i64| {
+        let sql = format!(
+            "SELECT {} AS v FROM {} WHERE {} = {id}",
+            db.dialect.quote("ssn"),
+            db.dialect.quote("e2e_note"),
+            db.dialect.quote("id")
+        );
+        async move {
+            let row = sqlx::query(&sql).fetch_one(&db.pool).await.unwrap();
+            // A plain TEXT read (no decryption); it also copes with MySQL's TEXT-as-BLOB.
+            match orm::read(&row, "v", rangoli::orm::FieldType::Text).unwrap() {
+                rangoli::orm::Value::Text(s) => s,
+                other => panic!("{other:?}"),
+            }
+        }
+    };
+    let stored = raw(sid).await;
+    assert!(stored.starts_with("enc:v1:") && !stored.contains("6789"), "the database holds ciphertext: {stored}");
+    assert_eq!(Note::get(sid).await.unwrap().ssn.as_deref(), Some("123-45-6789"), "the ORM reads plain text");
+    let (_, _, body) = send(bearer("GET", &format!("/api/e2e_note/{sid}"), &at, "")).await;
+    assert_eq!(json(&body)["ssn"], "123-45-6789", "so does the API (for the owner)");
+    private_note.save().await.unwrap();
+    assert_ne!(raw(sid).await, stored, "each write uses a fresh nonce");
+    assert_eq!(send(bearer("GET", "/api/e2e_note/?ssn=123-45-6789", &at, "")).await.0, StatusCode::BAD_REQUEST, "can't be filtered");
 
     // Tokens in the admin: listed and revocable, never created there (the plaintext couldn't be shown).
     let (status, _, body) = send(get("/admin/rangoli_api_token/", &cookie)).await;

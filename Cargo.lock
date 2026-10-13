@@ -1133,6 +1133,7 @@ dependencies = [
  "libsqlite3-sys",
  "minijinja",
  "rangoli-macros",
+ "ring",
  "rpassword",
  "serde",
  "serde_json",

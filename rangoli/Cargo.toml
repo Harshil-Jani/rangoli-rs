@@ -20,6 +20,8 @@ argon2 = "0.5"
 getrandom = "0.3"
 # Already compiled in through sqlx; hashes API tokens.
 sha2 = "0.10"
+# Already compiled in through rustls; AES-256-GCM for encrypted fields.
+ring = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_urlencoded = "0.7"

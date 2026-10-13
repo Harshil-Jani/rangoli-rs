@@ -265,7 +265,7 @@ fn from_json(f: &FieldMeta, j: &JsonValue) -> Result<Value, String> {
         },
         FieldType::Json => unreachable!("handled above"),
         FieldType::Uuid => j.as_str().and_then(crate::Uuid::parse).map(Value::from).ok_or_else(|| "Must be a valid UUID.".into()),
-        FieldType::Text => match j.as_str() {
+        FieldType::Text | FieldType::Encrypted => match j.as_str() {
             Some(s) if s.contains('\0') => Err("Null characters are not allowed.".into()),
             Some(s) if s.is_empty() && !f.null => Err("This field may not be blank.".into()),
             Some(s) => Ok(Value::Text(s.into())),
@@ -426,6 +426,7 @@ async fn list(
         let f = meta.field(k).filter(|f| f.exposed()).ok_or_else(|| problem(StatusCode::BAD_REQUEST, &format!("Unknown filter `{k}`.")))?;
         let j = match f.ty {
             FieldType::Json => return Err(problem(StatusCode::BAD_REQUEST, &format!("Cannot filter on JSON field `{k}`."))),
+            FieldType::Encrypted => return Err(problem(StatusCode::BAD_REQUEST, &format!("Cannot filter on encrypted field `{k}`."))),
             FieldType::Varchar(_) | FieldType::Text | FieldType::DateTime | FieldType::Date | FieldType::Decimal(_) | FieldType::Uuid => {
                 json!(raw)
             }
@@ -698,6 +699,7 @@ pub(crate) fn field_schema(f: &FieldMeta) -> JsonValue {
         FieldType::Bool => json!({ "type": "boolean" }),
         FieldType::Varchar(n) => json!({ "type": "string", "maxLength": n }),
         FieldType::Text => json!({ "type": "string" }),
+        FieldType::Encrypted => json!({ "type": "string", "description": "Stored encrypted; can't be searched or filtered" }),
         FieldType::Uuid => json!({ "type": "string", "format": "uuid" }),
         FieldType::DateTime => json!({ "type": "string", "format": "date-time" }),
         FieldType::Date => json!({ "type": "string", "format": "date" }),

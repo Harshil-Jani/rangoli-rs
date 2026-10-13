@@ -66,7 +66,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
 
         let (mut max_length, mut text, mut unique, mut password, mut cascade, mut fk) =
             (None::<u32>, false, false, false, false, None::<syn::Path>);
-        let mut private = false;
+        let (mut private, mut encrypted) = (false, false);
         let (mut auto_now, mut auto_now_add, mut auto, mut index, mut choices) = (false, false, false, false, false);
         let mut default: Option<Tokens> = None;
         for attr in f.attrs.iter().filter(|a| a.path().is_ident("field")) {
@@ -81,6 +81,8 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     password = true;
                 } else if m.path.is_ident("private") {
                     private = true;
+                } else if m.path.is_ident("encrypted") {
+                    encrypted = true;
                 } else if m.path.is_ident("index") {
                     index = true;
                 } else if m.path.is_ident("choices") {
@@ -114,7 +116,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     fk = Some(m.value()?.parse()?);
                 } else {
                     return Err(m.error(
-                        "expected `max_length`, `text`, `unique`, `password`, `fk`, `cascade`, `index`, `choices`, `default`, `private`, `auto`, `auto_now` or `auto_now_add`",
+                        "expected `max_length`, `text`, `unique`, `password`, `fk`, `cascade`, `index`, `choices`, `default`, `private`, `encrypted`, `auto`, `auto_now` or `auto_now_add`",
                     ));
                 }
                 Ok(())
@@ -157,7 +159,11 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
         }
 
         let mut checks = quote!();
+        if encrypted && base != "String" {
+            return Err(syn::Error::new_spanned(&f.ty, "`encrypted` applies to String fields"));
+        }
         let ty = match base {
+            _ if encrypted => quote!(Encrypted),
             "i64" => quote!(Int),
             "f64" => quote!(Float),
             "bool" => quote!(Bool),

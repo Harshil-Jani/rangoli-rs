@@ -34,6 +34,9 @@ pub enum FieldType {
     Uuid,
     /// `crate::Json`, stored as text.
     Json,
+    /// A `String` stored encrypted (`#[field(encrypted)]`): AES-256-GCM ciphertext in a TEXT
+    /// column, decrypted when read. Not searchable or filterable.
+    Encrypted,
     /// A column of a type Rangoli doesn't model (a Django `timestamptz`, `numeric` or native
     /// `uuid`), found by introspecting an existing database. Read as text by casting in SQL,
     /// shown read-only, never written, filtered or sorted by Rangoli.
@@ -497,11 +500,14 @@ fn bind<'q>(q: AnyQuery<'q>, v: &Value, ty: FieldType) -> AnyQuery<'q> {
             FieldType::Int | FieldType::DateTime | FieldType::Date | FieldType::Decimal(_) => q.bind(None::<i64>),
             FieldType::Float => q.bind(None::<f64>),
             FieldType::Bool => q.bind(None::<bool>),
-            FieldType::Varchar(_) | FieldType::Text | FieldType::Json | FieldType::Uuid | FieldType::Opaque => q.bind(None::<String>),
+            FieldType::Varchar(_) | FieldType::Text | FieldType::Json | FieldType::Uuid | FieldType::Opaque | FieldType::Encrypted => {
+                q.bind(None::<String>)
+            }
         },
         Value::Bool(b) => q.bind(*b),
         Value::Int(i) => q.bind(*i),
         Value::Float(f) => q.bind(*f),
+        Value::Text(s) if ty == FieldType::Encrypted => q.bind(crate::crypt::encrypt(s)),
         Value::Text(s) => q.bind(s.clone()),
     }
 }
@@ -606,6 +612,13 @@ pub(crate) async fn execute(sql: &str, params: &Params) -> Result<AnyQueryResult
 
 /// Read one column as a `Value`, tolerating how each driver reports ints and bools.
 pub fn read(row: &AnyRow, col: &str, ty: FieldType) -> Result<Value> {
+    match read_raw(row, col, ty)? {
+        Value::Text(s) if ty == FieldType::Encrypted => Ok(Value::Text(crate::crypt::decrypt(&s)?)),
+        v => Ok(v),
+    }
+}
+
+fn read_raw(row: &AnyRow, col: &str, ty: FieldType) -> Result<Value> {
     fn int(row: &AnyRow, col: &str) -> Result<Option<i64>> {
         if let Ok(v) = row.try_get::<Option<i64>, _>(col) {
             return Ok(v);
@@ -625,7 +638,7 @@ pub fn read(row: &AnyRow, col: &str, ty: FieldType) -> Result<Value> {
             Ok(v) => v.map_or(Value::Null, Value::Bool),
             Err(_) => int(row, col)?.map_or(Value::Null, |i| Value::Bool(i != 0)),
         },
-        FieldType::Varchar(_) | FieldType::Text | FieldType::Json | FieldType::Uuid | FieldType::Opaque => {
+        FieldType::Varchar(_) | FieldType::Text | FieldType::Json | FieldType::Uuid | FieldType::Opaque | FieldType::Encrypted => {
             match row.try_get::<Option<String>, _>(col) {
                 Ok(v) => v.map_or(Value::Null, Value::Text),
                 // MySQL TEXT columns surface as BLOB through the Any driver.

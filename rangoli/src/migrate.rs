@@ -264,7 +264,7 @@ pub(crate) fn zero(ty: FieldType) -> Value {
         FieldType::Int | FieldType::DateTime | FieldType::Date | FieldType::Decimal(_) => Value::Int(0),
         FieldType::Float => Value::Float(0.0),
         FieldType::Bool => Value::Bool(false),
-        FieldType::Varchar(_) | FieldType::Text | FieldType::Opaque => Value::Text(String::new()),
+        FieldType::Varchar(_) | FieldType::Text | FieldType::Opaque | FieldType::Encrypted => Value::Text(String::new()),
         FieldType::Uuid => Value::from(crate::Uuid::NIL),
         FieldType::Json => Value::Text("null".into()),
     }
@@ -458,7 +458,7 @@ fn col_type(d: Dialect, ty: FieldType) -> String {
         // VARCHAR, not CHAR: sqlx's Any driver can't decode Postgres `bpchar`.
         (FieldType::Uuid, _) => "VARCHAR(36)".into(),
         // Opaque columns come from introspection, never from Rangoli's own migrations.
-        (FieldType::Text | FieldType::Json | FieldType::Opaque, _) => "TEXT".into(),
+        (FieldType::Text | FieldType::Json | FieldType::Opaque | FieldType::Encrypted, _) => "TEXT".into(),
     }
 }
 
