@@ -53,6 +53,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         ("history.html", include_str!("templates/history.html")),
         ("password_change.html", include_str!("templates/password_change.html")),
         ("agents.html", include_str!("templates/agents.html")),
+        ("two_factor.html", include_str!("templates/two_factor.html")),
     ] {
         env.add_template(name, src).expect("admin template");
     }
@@ -65,6 +66,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         .route("/admin/logout", post(logout))
         .route("/admin/password_change/", get(password_page).post(password_submit))
         .route("/admin/agents/", get(agents_page).post(agents_submit))
+        .route("/admin/2fa/", get(two_factor_page).post(two_factor_submit))
         .route("/admin/static/{file}", get(static_file))
         .route("/admin/{table}/", get(list).post(bulk))
         .route("/admin/{table}/add", get(add_page).post(add_submit))
@@ -73,6 +75,52 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         .route("/admin/{table}/{id}/history", get(history))
         .route("/admin/{table}/{id}/undo/{entry}", post(undo))
         .with_state(Arc::new(Site { admin, options, models, env, version }))
+}
+
+// ---------------------------------------------------------------- two-factor sign-in
+
+async fn two_factor_page(State(site): S, user: CurrentUser, uri: Uri) -> Page {
+    let u = staff(&user, &uri)?;
+    let enabled = u.totp_secret.as_deref().is_some_and(|s| !s.is_empty());
+    let secret = crate::totp::new_secret();
+    let uri = crate::totp::uri("Rangoli", &u.username, &secret);
+    render(&site, "two_factor.html", context! { title => "Two-factor sign-in", enabled, secret, uri, ..chrome(&site, u, None) })
+}
+
+/// Turn it on (with the new key and a code from it) or off (with a current code).
+async fn two_factor_submit(State(site): S, user: CurrentUser, uri: Uri, Form(f): Form<Pairs>) -> Page {
+    let u = staff(&user, &uri)?;
+    let code = param(&f, "code").unwrap_or("");
+    let now = auth::now();
+    let (secret, turning_on) = match param(&f, "action") {
+        Some("enable") => (param(&f, "secret").unwrap_or("").to_string(), true),
+        _ => (u.totp_secret.clone().unwrap_or_default(), false),
+    };
+    let step =
+        (!secret.is_empty()).then(|| crate::totp::verify(&secret, code, now, if turning_on { 0 } else { u.totp_last_step })).flatten();
+    let Some(step) = step else {
+        let enabled = !turning_on;
+        let fresh = if turning_on { secret.clone() } else { crate::totp::new_secret() };
+        let uri = crate::totp::uri("Rangoli", &u.username, &fresh);
+        let error = "That code doesn't match. Check the time on your phone and try the newest code.";
+        return render(
+            &site,
+            "two_factor.html",
+            context! { title => "Two-factor sign-in", enabled, secret => fresh, uri, error, ..chrome(&site, u, None) },
+        );
+    };
+    let mut me = u.clone();
+    me.totp_secret = turning_on.then_some(secret);
+    me.totp_last_step = step;
+    me.save().await.map_err(fail)?;
+    let done = if turning_on { "Two-factor sign-in is on. Next time, you'll be asked for a code." } else { "Two-factor sign-in is off." };
+    let secret = crate::totp::new_secret();
+    let uri = crate::totp::uri("Rangoli", &u.username, &secret);
+    render(
+        &site,
+        "two_factor.html",
+        context! { title => "Two-factor sign-in", enabled => turning_on, done, secret, uri, ..chrome(&site, u, None) },
+    )
 }
 
 // ---------------------------------------------------------------- AI agents (MCP)
@@ -412,7 +460,9 @@ fn safe_next(next: Option<&str>) -> &str {
 async fn login_submit(State(site): S, Form(f): Form<Pairs>) -> Response {
     let (username, password) = (param(&f, "username").unwrap_or(""), param(&f, "password").unwrap_or(""));
     let next = safe_next(param(&f, "next"));
-    let error = match auth::authenticate(username, password).await {
+    let code = param(&f, "code").filter(|c| !c.trim().is_empty());
+    let mut ask_code = code.is_some();
+    let error = match auth::authenticate_with_code(username, password, code).await {
         Ok(Some(u)) if u.is_staff => match auth::login(&u).await {
             Ok(cookie) => return ([(header::SET_COOKIE, cookie)], Redirect::to(next)).into_response(),
             Err(e) => return fail(e),
@@ -421,9 +471,13 @@ async fn login_submit(State(site): S, Form(f): Form<Pairs>) -> Response {
             "Please enter the correct username and password for a staff account. Note that both fields may be case-sensitive.".to_string()
         }
         Err(Error::Locked) => Error::Locked.to_string(),
+        Err(Error::CodeRequired) => {
+            ask_code = true;
+            "Enter the 6-digit code from your authenticator app.".to_string()
+        }
         Err(e) => return fail(e),
     };
-    let page = render(&site, "login.html", context! { title => "Log in", next, error, username });
+    let page = render(&site, "login.html", context! { title => "Log in", next, error, username, ask_code });
     (StatusCode::UNAUTHORIZED, page.unwrap_or_else(|e| e)).into_response()
 }
 

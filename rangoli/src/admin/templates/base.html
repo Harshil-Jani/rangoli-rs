@@ -17,7 +17,7 @@
   <nav class="usertools" aria-label="Account">
     <span>Signed in as <strong>{{ username }}</strong></span>
     <a href="/" hx-boost="false">View site</a>
-    <a href="/admin/password_change/">Change password</a>
+    <a href="/admin/password_change/">Change password</a> <a href="/admin/2fa/">Two-factor</a>
     <form method="post" action="/admin/logout"><button type="submit" class="linkbutton">Log out</button></form>
   </nav>
   {% endif %}

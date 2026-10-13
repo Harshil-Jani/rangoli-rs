@@ -29,6 +29,7 @@ pub mod orm;
 #[cfg(feature = "realtime")]
 pub mod realtime;
 pub mod tasks;
+pub mod totp;
 pub mod uuid;
 #[cfg(feature = "web")]
 pub mod web;
@@ -74,6 +75,8 @@ pub enum Error {
     Io(std::io::Error),
     /// Too many failed logins for this username.
     Locked,
+    /// The password was right; this account also needs its two-factor code.
+    CodeRequired,
     /// A template failed to load or render.
     Template(String),
     /// A background task failed.
@@ -93,6 +96,7 @@ impl std::fmt::Display for Error {
             Error::Migration(m) => write!(f, "migration error: {m}"),
             Error::Io(e) => write!(f, "io error: {e}"),
             Error::Locked => f.write_str("too many failed logins, try again in 15 minutes"),
+            Error::CodeRequired => f.write_str("enter the 6-digit code from your authenticator app"),
             Error::Template(m) => write!(f, "template error: {m}"),
             Error::Task(m) => write!(f, "task error: {m}"),
         }

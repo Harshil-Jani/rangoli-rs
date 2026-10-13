@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block crumbs %}<span aria-hidden="true">›</span>Two-factor sign-in{% endblock %}
+{% block content %}
+{% if done %}<p class="message success" role="status">{{ done }}</p>{% endif %}
+{% if error %}<p class="message error" role="alert">{{ error }}</p>{% endif %}
+{% if enabled %}
+<p class="intro">Two-factor sign-in is <strong>on</strong>: signing in needs your password and the 6-digit code from your authenticator app.</p>
+<form method="post" novalidate>
+  <fieldset class="panel fields">
+    <legend class="sr">Turn it off</legend>
+    <div class="field">
+      <label class="field-label required" for="id_code">Current code</label>
+      <div class="field-control"><input type="text" name="code" id="id_code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" class="narrow" required><p class="help">To turn two-factor sign-in off, confirm with a code.</p></div>
+    </div>
+  </fieldset>
+  <input type="hidden" name="action" value="disable">
+  <div class="submit-row"><button type="submit" class="btn">Turn off</button></div>
+</form>
+{% else %}
+<p class="intro">Add your account to an authenticator app (Google Authenticator, 1Password, Authy, ...), then enter the code it shows. After that, signing in needs your password and a code.</p>
+<section class="panel fields agent-setup">
+  <div class="field"><span class="field-label">Key</span><div class="field-control"><code>{{ secret }}</code><p class="help">Type this into the app, or open the link below on your phone.</p></div></div>
+  <div class="field"><span class="field-label">Link</span><div class="field-control"><pre><code>{{ uri }}</code></pre></div></div>
+</section>
+<form method="post" novalidate>
+  <fieldset class="panel fields">
+    <legend class="sr">Turn it on</legend>
+    <div class="field">
+      <label class="field-label required" for="id_code">Code from the app</label>
+      <div class="field-control"><input type="text" name="code" id="id_code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" class="narrow" required></div>
+    </div>
+  </fieldset>
+  <input type="hidden" name="secret" value="{{ secret }}">
+  <input type="hidden" name="action" value="enable">
+  <div class="submit-row"><button type="submit" class="btn primary">Turn on</button></div>
+</form>
+{% endif %}
+{% endblock %}

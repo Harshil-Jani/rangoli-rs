@@ -222,6 +222,7 @@ Modeled on Django's admin, page for page: the blue header, breadcrumbs, the app-
 - **Delete confirmation** that lists the protected related objects blocking the delete, or the related rows that cascade with it
 - **History** for every object and **Recent actions** on the index, recorded in an admin log (Django's `LogEntry`), with change messages like "Changed title and body."
 - Success messages like 'The post "X" was added successfully.'
+- **two-factor sign-in**: each staff member can turn on authenticator-app codes (RFC 6238) under **Two-factor**; from then on signing in needs the code. A code works once, and wrong codes count toward the lockout even with the right password, so knowing a password doesn't let anyone guess codes. (Django needs django-otp or allauth, [new-features #12](https://github.com/django/new-features/issues/12).)
 - user management (password hashes are never shown; leave the field blank to keep the current password), **change password**, login and logout for staff only
 - square edges throughout, light and dark themes, and a mobile layout
 

@@ -24,6 +24,11 @@ pub struct User {
     pub is_active: bool,
     pub is_staff: bool,
     pub is_superuser: bool,
+    /// Two-factor sign-in key (base32), once turned on in the admin. Never leaves the server.
+    #[field(max_length = 64, private)]
+    pub totp_secret: Option<String>,
+    /// The newest code step used, so a code works only once.
+    pub totp_last_step: i64,
 }
 
 #[derive(rangoli_macros::Model, Clone, Debug)]
@@ -278,9 +283,16 @@ pub fn set_external_login(f: ExternalLogin) {
 async fn mirror(ext: ExternalUser) -> Result<User> {
     let mut u = match User::objects().filter(User::USERNAME.eq(ext.username.as_str())).first().await? {
         Some(u) => u,
-        None => {
-            User { id: None, username: ext.username.clone(), password: "!".into(), is_active: true, is_staff: false, is_superuser: false }
-        }
+        None => User {
+            id: None,
+            username: ext.username.clone(),
+            password: "!".into(),
+            is_active: true,
+            is_staff: false,
+            is_superuser: false,
+            totp_secret: None,
+            totp_last_step: 0,
+        },
     };
     (u.is_active, u.is_staff, u.is_superuser) = (ext.is_active, ext.is_staff, ext.is_superuser);
     u.save().await?;
@@ -289,7 +301,29 @@ async fn mirror(ext: ExternalUser) -> Result<User> {
 
 /// Check credentials. Locks a username for 15 minutes after 5 failures
 /// (Django has no built-in brute-force protection).
+/// Check a username and password. For an account with two-factor sign-in on, use
+/// `authenticate_with_code`; this one answers `Err(CodeRequired)` for it.
 pub async fn authenticate(username: &str, password: &str) -> Result<Option<User>> {
+    authenticate_with_code(username, password, None).await
+}
+
+/// The second factor, checked before the failure count is cleared: with only the password
+/// right, a missing code is `Err(CodeRequired)` and a wrong or reused one a failed login, so
+/// knowing the password doesn't let anyone guess codes past the lockout.
+async fn second_factor(u: User, code: Option<&str>) -> Result<Option<User>> {
+    let Some(secret) = u.totp_secret.clone().filter(|s| !s.is_empty()) else { return Ok(Some(u)) };
+    let Some(code) = code.filter(|c| !c.trim().is_empty()) else { return Err(Error::CodeRequired) };
+    let Some(step) = crate::totp::verify(&secret, code, now(), u.totp_last_step) else { return Ok(None) };
+    // A code works once, even when two requests race with it: only one moves the step forward.
+    let moved = User::objects()
+        .filter(User::ID.eq(u.id.unwrap_or(-1)) & User::TOTP_LAST_STEP.lt(step))
+        .update([User::TOTP_LAST_STEP.set(step)])
+        .await?;
+    Ok((moved == 1).then_some(u))
+}
+
+/// `authenticate`, with the two-factor code when the account has one.
+pub async fn authenticate_with_code(username: &str, password: &str, code: Option<&str>) -> Result<Option<User>> {
     // No stored username contains NUL (and Postgres can't even compare one): a plain failure.
     if username.contains('\0') {
         return Ok(None);
@@ -302,8 +336,9 @@ pub async fn authenticate(username: &str, password: &str) -> Result<Option<User>
     if let Some(external) = EXTERNAL_LOGIN.get() {
         if let Some(ext) = external(username.to_string(), password.to_string()).await? {
             if ext.is_active {
+                let Some(u) = second_factor(mirror(ext).await?, code).await? else { return Ok(None) };
                 LoginFailure::objects().filter(LoginFailure::USERNAME.eq(failure_key(username))).delete().await?;
-                return Ok(Some(mirror(ext).await?));
+                return Ok(Some(u));
             }
         }
     }
@@ -314,6 +349,7 @@ pub async fn authenticate(username: &str, password: &str) -> Result<Option<User>
     let ok = verify_password(password, user.as_ref().map_or(dummy, |u| &u.password)).await;
     match user {
         Some(u) if ok && u.is_active => {
+            let Some(u) = second_factor(u, code).await? else { return Ok(None) };
             LoginFailure::objects().filter(LoginFailure::USERNAME.eq(failure_key(username))).delete().await?;
             Ok(Some(u))
         }
@@ -336,6 +372,8 @@ pub async fn create_user(username: &str, password: &str, staff: bool) -> Result<
         is_active: true,
         is_staff: staff,
         is_superuser: staff,
+        totp_secret: None,
+        totp_last_step: 0,
     };
     u.save().await?;
     Ok(u)

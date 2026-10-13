@@ -1,0 +1,6 @@
+{
+  "operations": [
+    { "op": "add_column", "table": "rangoli_user", "column": { "name": "totp_secret", "type": { "varchar": 64 }, "null": true } },
+    { "op": "add_column", "table": "rangoli_user", "column": { "name": "totp_last_step", "type": "int" }, "default": 0 }
+  ]
+}

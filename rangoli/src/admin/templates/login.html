@@ -9,6 +9,8 @@
   <input type="text" name="username" id="id_username" value="{{ username or "" }}" autocomplete="username" maxlength="150" required autofocus>
   <label for="id_password">Password</label>
   <input type="password" name="password" id="id_password" autocomplete="current-password" required>
+  {% if ask_code %}<label for="id_code">Code from your authenticator app</label>
+  <input type="text" name="code" id="id_code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required autofocus>{% endif %}
   <input type="hidden" name="next" value="{{ next }}">
   <button type="submit" class="btn primary">Log in</button>
 </form>

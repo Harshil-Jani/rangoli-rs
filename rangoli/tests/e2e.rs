@@ -1609,6 +1609,45 @@ async fn scenario() {
         "only the latest tick catches up"
     );
 
+    // ---- two-factor sign-in (TOTP)
+    auth::create_user("twofa", "correct horse", true).await.unwrap();
+    let login_as = |extra: &str| form("/admin/login", "", &format!("username=twofa&password=correct+horse{extra}"));
+    let (_, headers, _) = send(login_as("")).await;
+    let tf_cookie = headers[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_string();
+    let (_, _, page) = send(get("/admin/2fa/", &tf_cookie)).await;
+    let secret = page.split("name=\"secret\" value=\"").nth(1).and_then(|r| r.split('"').next()).unwrap().to_string();
+    let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let (_, _, page) = send(form("/admin/2fa/", &tf_cookie, "action=enable&secret=ABCDEFGHIJKLMNOP&code=000000")).await;
+    assert!(page.contains("Check the time on your phone"), "a wrong code doesn't turn it on");
+    let code = rangoli::totp::current_code(&secret, now()).unwrap();
+    let (_, _, page) = send(form("/admin/2fa/", &tf_cookie, &format!("action=enable&secret={secret}&code={code}"))).await;
+    assert!(page.contains("Two-factor sign-in is on"), "turned on with a code from the key");
+    let (status, _, page) = send(login_as("")).await;
+    assert!(
+        status == StatusCode::UNAUTHORIZED && page.contains("id=\"id_code\"") && page.contains("6-digit code"),
+        "the password alone isn't enough"
+    );
+    assert_eq!(send(login_as("&code=123456")).await.0, StatusCode::UNAUTHORIZED, "a wrong code fails");
+    let next_code = rangoli::totp::current_code(&secret, now() + 30).unwrap(); // the next window, allowed for clock drift
+    assert_eq!(send(login_as(&format!("&code={next_code}"))).await.0, StatusCode::SEE_OTHER, "password and code sign in");
+    assert_eq!(send(login_as(&format!("&code={next_code}"))).await.0, StatusCode::UNAUTHORIZED, "a code works once");
+    for _ in 0..5 {
+        send(login_as("&code=000001")).await;
+    }
+    let (status, _, page) = send(login_as(&format!("&code={}", rangoli::totp::current_code(&secret, now() + 30).unwrap()))).await;
+    assert!(
+        status == StatusCode::UNAUTHORIZED && page.contains("too many failed logins"),
+        "guessing codes with the right password hits the lockout"
+    );
+    rangoli::auth::LoginFailure::objects().filter(rangoli::auth::LoginFailure::USERNAME.eq("twofa")).delete().await.unwrap();
+    // Time passes: let the next window's code be fresh again, then turn it off with it.
+    auth::User::objects().filter(auth::User::USERNAME.eq("twofa")).update([auth::User::TOTP_LAST_STEP.set(0)]).await.unwrap();
+    let (_, _, page) =
+        send(form("/admin/2fa/", &tf_cookie, &format!("action=disable&code={}", rangoli::totp::current_code(&secret, now()).unwrap())))
+            .await;
+    assert!(page.contains("Two-factor sign-in is off"));
+    assert_eq!(send(login_as("")).await.0, StatusCode::SEE_OTHER, "off again: the password is enough");
+
     // Password change, then log in with the new password.
     let (status, _, body) =
         send(form("/admin/password_change/", &cookie, "old_password=wrong&new_password1=n3w-pass-123&new_password2=n3w-pass-123")).await;
