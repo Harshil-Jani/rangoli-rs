@@ -19,6 +19,7 @@ pub mod auth;
 mod cors;
 pub mod datetime;
 pub mod decimal;
+pub mod django;
 pub mod forms;
 mod limit;
 pub mod mcp;
@@ -377,6 +378,16 @@ impl App {
     /// Deploy the binary alone; `migrate` finds them without a `migrations/` directory.
     pub fn embed_migrations(self, files: &'static [(&'static str, &'static str)]) -> Self {
         migrate::embed(files);
+        self
+    }
+
+    /// Serve a model found at run time (the Django bridge's introspected tables) in the admin,
+    /// the JSON API and MCP, for staff. `writes` lets staff change it; otherwise it's read-only.
+    pub fn dynamic_model(mut self, meta: &'static ModelMeta, writes: bool) -> Self {
+        self.models.push(meta);
+        self.admin.push((meta, admin::Options::default()));
+        let write = if writes { api::Access::Staff } else { api::Access::Nobody };
+        self.api.push((meta, api::Options { read: api::Access::Staff, write, owner: None }));
         self
     }
 

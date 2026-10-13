@@ -956,7 +956,7 @@ async fn form_fields(
             (_, Some(choices)) => choices.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
             _ => vec![],
         };
-        if readonly.contains(&f.name) {
+        if readonly.contains(&f.name) || f.ty == FieldType::Opaque {
             let raw = raw.get(f.name).cloned().unwrap_or_default();
             let shown = match (f.ty, raw.as_str()) {
                 (_, "") if f.ty != FieldType::Bool => "-".to_string(),

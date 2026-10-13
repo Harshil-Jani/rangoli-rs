@@ -1146,6 +1146,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rangoli-django"
+version = "0.0.0"
+dependencies = [
+ "rangoli",
+ "tokio",
+]
+
+[[package]]
 name = "rangoli-macros"
 version = "0.2.0"
 dependencies = [

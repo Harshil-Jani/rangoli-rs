@@ -255,6 +255,38 @@ async fn count_attempt(username: &str) -> Result<()> {
     Err(last.unwrap_or(Error::Locked))
 }
 
+/// A user another system vouched for (Django's `auth_user`), mirrored into `rangoli_user` at login.
+#[derive(Clone, Debug)]
+pub struct ExternalUser {
+    pub username: String,
+    pub is_staff: bool,
+    pub is_superuser: bool,
+    pub is_active: bool,
+}
+
+type ExternalLogin = fn(String, String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<ExternalUser>>> + Send>>;
+static EXTERNAL_LOGIN: std::sync::OnceLock<ExternalLogin> = std::sync::OnceLock::new();
+
+/// Check passwords against another user store first (the Django bridge sets this to Django's
+/// `auth_user`). A match signs in as a mirrored Rangoli user; lockouts still apply.
+pub fn set_external_login(f: ExternalLogin) {
+    let _ = EXTERNAL_LOGIN.set(f);
+}
+
+/// The Rangoli user mirroring an external one: created or updated to match, with an unusable
+/// password, so only the external store can let them in.
+async fn mirror(ext: ExternalUser) -> Result<User> {
+    let mut u = match User::objects().filter(User::USERNAME.eq(ext.username.as_str())).first().await? {
+        Some(u) => u,
+        None => {
+            User { id: None, username: ext.username.clone(), password: "!".into(), is_active: true, is_staff: false, is_superuser: false }
+        }
+    };
+    (u.is_active, u.is_staff, u.is_superuser) = (ext.is_active, ext.is_staff, ext.is_superuser);
+    u.save().await?;
+    Ok(u)
+}
+
 /// Check credentials. Locks a username for 15 minutes after 5 failures
 /// (Django has no built-in brute-force protection).
 pub async fn authenticate(username: &str, password: &str) -> Result<Option<User>> {
@@ -266,6 +298,14 @@ pub async fn authenticate(username: &str, password: &str) -> Result<Option<User>
     // pass a check that only sees failures recorded after the (slow) verification.
     if record_attempt(username).await? > i64::from(MAX_FAILURES) {
         return Err(Error::Locked);
+    }
+    if let Some(external) = EXTERNAL_LOGIN.get() {
+        if let Some(ext) = external(username.to_string(), password.to_string()).await? {
+            if ext.is_active {
+                LoginFailure::objects().filter(LoginFailure::USERNAME.eq(failure_key(username))).delete().await?;
+                return Ok(Some(mirror(ext).await?));
+            }
+        }
     }
     let user = User::objects().filter(User::USERNAME.eq(username)).first().await?;
     // Hash even for unknown users so response time doesn't reveal which usernames exist.

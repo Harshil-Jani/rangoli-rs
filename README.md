@@ -18,6 +18,18 @@ Describe your data once. Rangoli gives you an admin panel for your team, an API 
 
 ![Every change an AI agent makes is in History](docs/agent-history.png)
 
+## Already on Django? Keep it.
+
+Point Rangoli at your Django database and get an admin, an API and a guarded MCP server for AI agents, without touching your Django code:
+
+```sh
+RANGOLI_DATABASE_URL=postgres://user:pw@host/your_django_db cargo run -p rangoli-django
+```
+
+Sign in with your Django staff account (your Django password works), click **Connect an AI agent**, and Claude or Cursor can read your data. It's read-only unless you set `RANGOLI_DJANGO_WRITES=1`. Django's own tables (`auth_*`, `django_*`) are left out, and columns that look like secrets (`password`, `api_key`, `token`, ...) are private, so no agent ever sees them. Rangoli adds its own `rangoli_*` tables and never changes Django's.
+
+Tested against a real Django 6.1.2 database: a staff login with the Django password, the admin listing its 1,000 posts, and an agent using the official MCP SDK reading them, sorted and filtered, with its write refused. CI checks the same flow on Postgres, MySQL and SQLite using the exact column types Django creates on each.
+
 ## Why switch from Django
 
 | | Django | Rangoli |

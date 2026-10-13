@@ -22,6 +22,10 @@ pub(crate) async fn validate(
             }
             continue;
         }
+        // Columns Rangoli only shows as text are never written; the database keeps its value.
+        if f.ty == FieldType::Opaque {
+            continue;
+        }
         // Read-only fields ignore whatever was posted; new rows get NULL or the type's zero value.
         if readonly.contains(&f.name) {
             if is_add {

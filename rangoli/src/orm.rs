@@ -34,6 +34,10 @@ pub enum FieldType {
     Uuid,
     /// `crate::Json`, stored as text.
     Json,
+    /// A column of a type Rangoli doesn't model (a Django `timestamptz`, `numeric` or native
+    /// `uuid`), found by introspecting an existing database. Read as text by casting in SQL,
+    /// shown read-only, never written, filtered or sorted by Rangoli.
+    Opaque,
 }
 
 #[derive(Debug)]
@@ -416,6 +420,17 @@ impl Dialect {
     }
 
     /// Placeholder for the `n`th (1-based) bound parameter.
+    /// `CAST(col AS TEXT) AS col`: how opaque columns are read (MySQL spells it CHAR).
+    /// `table` qualifies the column, for joins; the alias is the bare column name.
+    pub fn as_text(self, col: &str, table: Option<&str>) -> String {
+        let src = match table {
+            Some(t) => format!("{}.{}", self.quote(t), self.quote(col)),
+            None => self.quote(col),
+        };
+        let ty = if self == Dialect::Mysql { "CHAR" } else { "TEXT" };
+        format!("CAST({src} AS {ty}) AS {}", self.quote(col))
+    }
+
     pub fn ph(self, n: usize) -> String {
         match self {
             Dialect::Postgres => format!("${n}"),
@@ -482,7 +497,7 @@ fn bind<'q>(q: AnyQuery<'q>, v: &Value, ty: FieldType) -> AnyQuery<'q> {
             FieldType::Int | FieldType::DateTime | FieldType::Date | FieldType::Decimal(_) => q.bind(None::<i64>),
             FieldType::Float => q.bind(None::<f64>),
             FieldType::Bool => q.bind(None::<bool>),
-            FieldType::Varchar(_) | FieldType::Text | FieldType::Json | FieldType::Uuid => q.bind(None::<String>),
+            FieldType::Varchar(_) | FieldType::Text | FieldType::Json | FieldType::Uuid | FieldType::Opaque => q.bind(None::<String>),
         },
         Value::Bool(b) => q.bind(*b),
         Value::Int(i) => q.bind(*i),
@@ -610,14 +625,16 @@ pub fn read(row: &AnyRow, col: &str, ty: FieldType) -> Result<Value> {
             Ok(v) => v.map_or(Value::Null, Value::Bool),
             Err(_) => int(row, col)?.map_or(Value::Null, |i| Value::Bool(i != 0)),
         },
-        FieldType::Varchar(_) | FieldType::Text | FieldType::Json | FieldType::Uuid => match row.try_get::<Option<String>, _>(col) {
-            Ok(v) => v.map_or(Value::Null, Value::Text),
-            // MySQL TEXT columns surface as BLOB through the Any driver.
-            Err(_) => match row.try_get::<Option<Vec<u8>>, _>(col)? {
-                Some(b) => Value::Text(String::from_utf8(b).map_err(|e| Error::Decode(e.to_string()))?),
-                None => Value::Null,
-            },
-        },
+        FieldType::Varchar(_) | FieldType::Text | FieldType::Json | FieldType::Uuid | FieldType::Opaque => {
+            match row.try_get::<Option<String>, _>(col) {
+                Ok(v) => v.map_or(Value::Null, Value::Text),
+                // MySQL TEXT columns surface as BLOB through the Any driver.
+                Err(_) => match row.try_get::<Option<Vec<u8>>, _>(col)? {
+                    Some(b) => Value::Text(String::from_utf8(b).map_err(|e| Error::Decode(e.to_string()))?),
+                    None => Value::Null,
+                },
+            }
+        }
     })
 }
 
@@ -842,7 +859,16 @@ impl Query {
     }
 
     pub fn select_sql(&self, d: Dialect, p: &mut Params) -> String {
-        let cols: Vec<String> = std::iter::once("id").chain(self.fields.iter().map(|f| f.name)).map(|c| d.quote(c)).collect();
+        let cols: Vec<String> = std::iter::once(d.quote("id"))
+            .chain(self.fields.iter().map(|f| match (f.ty, d) {
+                (FieldType::Opaque, _) => d.as_text(f.name, None),
+                // Django's booleans are `bool` on SQLite and TINYINT(1) on MySQL, which sqlx's Any
+                // driver can't decode; read them as integers (a no-op for Rangoli's own columns).
+                (FieldType::Bool, Dialect::Sqlite) => format!("CAST({q} AS INTEGER) AS {q}", q = d.quote(f.name)),
+                (FieldType::Bool, Dialect::Mysql) => format!("CAST({q} AS SIGNED) AS {q}", q = d.quote(f.name)),
+                _ => d.quote(f.name),
+            }))
+            .collect();
         let mut sql = format!("SELECT {} FROM {}", cols.join(", "), d.quote(self.table));
         self.push_where(d, &mut sql, p);
         if !self.order.is_empty() {

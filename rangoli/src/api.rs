@@ -232,6 +232,7 @@ fn from_json(f: &FieldMeta, j: &JsonValue) -> Result<Value, String> {
         return if f.null { Ok(Value::Null) } else { Err("This field may not be null.".into()) };
     }
     match f.ty {
+        FieldType::Opaque => Err("This field is read-only.".into()),
         FieldType::Int => j.as_i64().map(Value::Int).ok_or_else(|| "A valid integer is required.".into()),
         FieldType::Float => j.as_f64().filter(|x| x.is_finite()).map(Value::Float).ok_or_else(|| "A valid number is required.".into()),
         FieldType::Bool => j.as_bool().map(Value::Bool).ok_or_else(|| "Must be a valid boolean.".into()),
@@ -339,6 +340,9 @@ async fn columns(
                 cols.push((f.name, f.auto_value(), f.ty));
             }
             continue;
+        }
+        if f.ty == FieldType::Opaque {
+            continue; // shown as text, never written: the database keeps its value or default
         }
         if f.private {
             // Not writable here: new rows get the default (or empty), existing ones keep their value.
@@ -661,6 +665,9 @@ async fn remove(State(site): S, user: CurrentUser, scope: ScopeExt, via: ViaExt,
 
 pub(crate) fn field_schema(f: &FieldMeta) -> JsonValue {
     let mut s = match f.ty {
+        FieldType::Opaque => {
+            json!({ "type": "string", "readOnly": true, "description": "A value of a database type Rangoli shows as text" })
+        }
         FieldType::Int => json!({ "type": "integer", "format": "int64" }),
         FieldType::Float => json!({ "type": "number", "format": "double" }),
         FieldType::Bool => json!({ "type": "boolean" }),
