@@ -38,6 +38,7 @@ async fn post(Path(id): Path<i64>) -> rangoli::Result<Json<Post>> {
 #[tokio::main]
 async fn main() -> rangoli::Result<()> {
     App::new()
+        .embed_migrations(rangoli::migrations!()) // ship the binary alone: no migrations/ dir needed
         .admin::<Author>()
         .admin::<Tag>()
         .admin_with::<Post>(
@@ -47,7 +48,9 @@ async fn main() -> rangoli::Result<()> {
                 .list_filter([&Post::PUBLISHED, &Post::AUTHOR_ID, &Post::CREATED_AT])
                 .ordering(Post::CREATED_AT.desc()),
         )
-        .api::<Post>(Api::new().read(Access::Public)) // /api/blog_post/ and /api/schema.json
+        // /api/blog_post/ for apps, /api/schema.json for docs, and /mcp for AI agents (Claude, Cursor).
+        .api::<Post>(Api::new().read(Access::Public).write(Access::Staff))
+        .api::<Author>(Api::new().read(Access::Public).write(Access::Staff))
         .static_files("/static", "static")
         .routes(
             Router::new()

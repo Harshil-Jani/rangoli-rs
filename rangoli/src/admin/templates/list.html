@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block bodyclass %}change-list{% endblock %}
 {% block breadcrumbs %}<nav class="crumbs" aria-label="Breadcrumbs"><a href="/admin/">Home</a><span aria-hidden="true">›</span>{{ app }}<span aria-hidden="true">›</span>{{ plural }}</nav>{% endblock %}
-{% block tools %}<a href="/admin/{{ table }}/add" class="btn primary">Add {{ name }}</a>{% endblock %}
+{% block tools %}{% if can_add %}<a href="/admin/{{ table }}/add" class="btn primary">Add {{ name }}</a>{% endif %}{% endblock %}
 {% block content %}
 <div class="changelist{% if filters %} has-filters{% endif %}">
   <div class="changelist-main">
@@ -23,6 +23,7 @@
         <select name="action" id="action-select">
           <option value="" selected>Choose an action</option>
           <option value="delete_selected">Delete selected {{ plural|lower }}</option>
+          {% for a in actions %}<option value="{{ a.name }}">{{ a.label }}</option>{% endfor %}
         </select>
         <button type="submit" class="btn">Go</button>
         <span class="action-counter meta">0 of {{ rows|length }} selected</span>
@@ -44,7 +45,7 @@
               {% endfor %}
             </tr>
             {% else %}
-            <tr><td colspan="{{ columns|length + 1 }}" class="empty">{% if filtered %}No {{ plural|lower }} match these filters.{% else %}No {{ plural|lower }} yet. <a href="/admin/{{ table }}/add">Add the first one</a>.{% endif %}</td></tr>
+            <tr><td colspan="{{ columns|length + 1 }}" class="empty">{% if filtered %}No {{ plural|lower }} match these filters.{% else %}No {{ plural|lower }} yet.{% if can_add %} <a href="/admin/{{ table }}/add">Add the first one</a>.{% endif %}{% endif %}</td></tr>
             {% endfor %}
           </tbody>
         </table>

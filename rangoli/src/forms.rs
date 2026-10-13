@@ -18,7 +18,7 @@ pub(crate) async fn validate(
     for f in meta.fields {
         if f.is_auto() {
             if f.auto_now || is_add {
-                cols.push((f.name, Value::Int(DateTime::now().unix()), f.ty));
+                cols.push((f.name, f.auto_value(), f.ty));
             }
             continue;
         }
@@ -45,6 +45,11 @@ pub(crate) async fn validate(
             match f.ty {
                 FieldType::Int => raw.parse().map(Value::Int).map_err(|_| "Enter a whole number.".to_string()),
                 FieldType::DateTime => DateTime::parse(raw).map(Value::from).ok_or("Enter a valid date and time.".to_string()),
+                FieldType::Date => crate::Date::parse(raw).map(Value::from).ok_or("Enter a valid date.".to_string()),
+                FieldType::Decimal(p) => {
+                    crate::decimal::parse_units(raw, p).map(Value::Int).ok_or(format!("Enter a number with at most {p} decimal places."))
+                }
+                FieldType::Uuid => crate::Uuid::parse(raw).map(Value::from).ok_or("Enter a valid UUID.".to_string()),
                 FieldType::Json => serde_json::from_str::<serde_json::Value>(raw)
                     .map(|j| Value::Text(j.to_string()))
                     .map_err(|e| format!("Enter valid JSON ({e}).")),

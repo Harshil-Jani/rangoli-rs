@@ -1,14 +1,53 @@
 # Rangoli
 
-**A batteries-included, Django-style web framework for Rust.** Typed models, automatic migrations, a generated admin, and auth in a single binary, with fixes for the design gaps Django has carried for years.
+**The backend that's ready for AI on day one.**
 
-> Django is named after a jazz guitarist. Rangoli is named after the Indian art of building one pattern from many small colorful pieces, which is what a batteries-included framework does.
+Describe your data once. Rangoli gives you an admin panel for your team, an API for your apps, and an MCP server so AI assistants like Claude and Cursor can work with that data safely. It all runs as one small, fast program.
 
-![The Rangoli admin](docs/admin.png)
+![Connecting Claude to your data from the admin](docs/connect-agent.png)
 
-**[Report and demo video: Rangoli vs Django 6.1.2](https://harshil-jani.github.io/rangoli-rs/)**
+**[Watch the 16-second demo](site/ai-agent-demo.mp4)** · **[Measured results: Rangoli vs Django](https://harshil-jani.github.io/rangoli-rs/)**
 
-**Status: early (0.1).** The core works end to end and is tested on Postgres, MySQL and SQLite. Read [What's not done yet](#whats-not-done-yet) before building anything real on it.
+## What you get
+
+**For your team:** a complete admin panel, ready the moment you describe your data. Search, filters, bulk actions, a history of every change, light and dark mode, and it works on a phone.
+
+**For your apps:** a JSON API with documentation, login tokens for mobile apps and scripts, and per-user data, so people only see their own rows.
+
+**For AI:** click **Connect an AI agent** in the admin, paste one line into Claude Code or Cursor, and the assistant can look up, add and update your data. It only does what that user is allowed to do, and every change it makes is listed in the admin's History as "via MCP", next to everyone else's.
+
+![Every change an AI agent makes is in History](docs/agent-history.png)
+
+## Why switch from Django
+
+| | Django | Rangoli |
+|---|---|---|
+| Let an AI assistant use your data | Build and secure an MCP server yourself | Built in. One click in the admin |
+| Requests per second (50 posts as JSON) | 2,909 | **14,119** |
+| Memory under load | 511 MB | **61 MB** |
+| Starts in | 232 ms | **15 ms** |
+| What you deploy | Python, gunicorn, a web server, static files, migration files | **One file** |
+| Background jobs and scheduled tasks | Celery plus Redis or RabbitMQ | Built in, using your database |
+| Live updates (chat, dashboards) | Channels plus Redis | Built in |
+| A typo in a database query | Found when a customer hits it | Found before the app is built |
+| Brute-force login protection | Not included | On by default, shared across servers |
+
+Numbers are measured on the same app and data on one laptop (Apple M1 Pro); the [report](https://harshil-jani.github.io/rangoli-rs/) has every run, and `python bench/run.py` repeats them. Everything else here is checked by tests that run on Postgres, MySQL and SQLite.
+
+## Try it in five minutes
+
+```sh
+git clone https://github.com/Harshil-Jani/rangoli-rs && cd rangoli-rs/examples/blog
+cargo run -- migrate
+cargo run -- createsuperuser admin
+RANGOLI_DEBUG=1 cargo run           # open http://127.0.0.1:8000/admin/ and click "Connect an AI agent"
+```
+
+**Status: early.** The core works end to end and is tested on Postgres, MySQL and SQLite. Read [What's not done yet](#whats-not-done-yet) before building anything real on it.
+
+---
+
+The rest of this page is for developers.
 
 ## Quickstart
 
@@ -80,9 +119,15 @@ let mut post = Post::get(id).await?;      // Error::NotFound becomes a 404 in ha
 post.title = "New title".into();
 post.save().await?;
 
-let authors = Author::in_bulk(posts.iter().map(|p| p.author_id)).await?; // one query, no N+1
+// Foreign keys: `#[field(fk = Author)] author_id` also generates `Post::AUTHOR` and `post.author()`.
+let author = post.author().await?;                       // one query
+let authors = Post::AUTHOR.load(&posts).await?;          // one query for any number of posts: authors[&p.author_id]
+let rows = Post::objects().filter(Post::PUBLISHED.eq(true)).select_related(Post::AUTHOR).await?; // one JOIN: Vec<(Post, Option<Author>)>
+let theirs = Post::AUTHOR.reverse(&author).filter(Post::PUBLISHED.eq(true)); // Django's author.post_set
+let by_author = Post::AUTHOR.prefetch_reverse(&authors_list).await?;          // one query: author id -> Vec<Post>
 
 // Django's transaction.atomic: every ORM call inside uses one transaction. Ok commits, Err rolls back.
+// A nested atomic is a savepoint: its Err undoes only its own writes.
 rangoli::atomic(async {
     order.save().await?;
     Stock::objects().filter(Stock::ID.eq(item)).update([Stock::COUNT.set(left - 1)]).await?;
@@ -115,16 +160,16 @@ The join table (`blog_post_tags`, one row per pair, a unique index so each pair 
 |---|---|
 | Lookups are strings (`title__icontains`); typos fail at runtime | Typed column constants; mistakes are compile errors |
 | Two branches that each add a migration conflict and need a "merge migration", even for unrelated tables | Migrations are timestamped files and the database records the *set* applied. Unrelated migrations from different branches both apply. A real conflict (two branches changing the same column) is caught and names both files |
-| Lazy relation access hides N+1 queries | No lazy loading: a foreign key is an id. `in_bulk` fetches related rows in one query, and the admin batches FK labels the same way |
+| Lazy relation access hides N+1 queries | No lazy loading: a foreign key is an id, and following it is an explicit `await`. `select_related` is a single JOIN, and `Post::AUTHOR.load(&posts)` and `prefetch_reverse` are one query each however many rows (asserted with `count_queries` in the test suite). For 50 posts with their authors, the JOIN took 593 µs against 1,066 µs for two queries on Postgres over TCP, and 159 against 187 µs on SQLite (best of 5 × 2,000 runs), and the admin batches FK labels the same way |
 | ORM is sync-first; async needs `sync_to_async` | Async everywhere, built on tokio and sqlx |
 | `SECRET_KEY` must be kept secret and rotated, and leaks are common | There is no `SECRET_KEY`: sessions are random keys stored in the database, and CSRF protection needs no token |
 | CSRF tokens in every form, plus `csrf_exempt` footguns | Every unsafe request is checked with the browser's `Sec-Fetch-Site`/`Origin` headers. No tokens, and no way to forget them |
 | CSP arrived in Django 6.0 as opt-in middleware | A strict CSP, `nosniff`, `X-Frame-Options` and `Referrer-Policy` are on by default (handlers can override them) |
-| No built-in login throttling | After 5 failed logins a username is locked for 15 minutes. Unknown usernames take the same time to reject, so you can't tell which usernames exist |
+| No built-in login throttling | After 5 failed logins a username is locked for 15 minutes, counted in the database so every instance and restart shares one count. Unknown usernames take the same time to reject and lock the same way, so you can't tell which usernames exist. Each attempt is counted with one atomic UPDATE before its password is checked, so of 50 parallel guesses at most 5 reach the check (counting after the check let all 50 through, which an independent review caught), and none of the 50 is lost (a read-then-write counter recorded 5 of 20 on Postgres) |
 | `startproject` ships with `DEBUG = True` | Debug is off unless `RANGOLI_DEBUG=1` |
 | `get_object_or_404` boilerplate | `Error::NotFound` renders as 404 |
 | Settings are an importable, mutable Python module | Typed `Settings` read from the environment (`RANGOLI_DATABASE_URL`, `RANGOLI_DEBUG`, `RANGOLI_BIND`, `RANGOLI_MIGRATIONS`) |
-| Deploying means WSGI/ASGI, gunicorn, `collectstatic` and WhiteNoise | One binary. Admin templates, CSS and htmx are compiled in |
+| Deploying means WSGI/ASGI, gunicorn, `collectstatic` and WhiteNoise | One binary. Admin templates, CSS, htmx and (with `embed_migrations`) your migrations are compiled in |
 | Admin JS is jQuery-era | Server-rendered with htmx: live search, boosted navigation, and it still works without JavaScript |
 
 ## The admin
@@ -154,6 +199,18 @@ App::new().admin_with::<Post>(
         .list_per_page(50),
 )
 ```
+
+Custom actions join "Delete selected" in the changelist's Action menu (Django's `ModelAdmin.actions`):
+
+```rust
+.action("publish", "Mark selected as published", |selected| async move {
+    selected.update([Post::PUBLISHED.set(true)]).await.map(drop)   // `selected` is a typed QuerySet<Post>
+})
+```
+
+An action runs in one transaction with a History entry for every row it touched, so an `Err` undoes both, and the admin reports "Applied “Mark selected as published” to 2 posts." or that it failed and nothing changed. The message is built from the registered label, so a crafted link can't make the admin display other text (the e2e test tries).
+
+`.no_add()` removes "Add" for rows made elsewhere (Django's `has_add_permission` returning `False`): the links disappear and the add URLs answer 403. API tokens use it: they appear in the admin under **API tokens** by name and prefix, where you can rename one, set an expiry or delete it to revoke it, but not create one, since the token itself is shown only once by `createtoken`.
 
 Settings that can't work (searching a non-text column, filtering on an unsupported type) stop the app at startup, like Django's admin checks.
 
@@ -207,6 +264,16 @@ SendWelcome { user_id: 7 }.enqueue().await?;          // or .enqueue_in(Duration
 
 `runserver` runs `RANGOLI_WORKERS` task loops in-process (default 1, `0` turns them off); `cargo run -- worker` runs a dedicated worker. Runs are claimed with a compare-and-set update, so two workers never run the same one. Failures retry with exponential backoff (10s, 20s, 40s, up to an hour), panics are caught and recorded, and runs left `running` by a crashed worker are retried after a ten-minute lease. Every run is visible in the admin under **Task records**, filterable by status.
 
+Recurring work is Celery beat's job, which is a separate process: run two by accident and every job fires twice. Here it's one line, and no extra process:
+
+```rust
+App::new()
+    .schedule("0 3 * * *", PurgeSessions)              // 03:00 UTC daily
+    .schedule("*/15 * * * 1-5", SyncPrices { venue: "nse".into() })  // weekdays, every 15 min
+```
+
+Standard five-field cron in UTC (`*`, ranges, steps, lists, `@daily` and friends; Vixie day-of-month/day-of-week semantics), checked at startup. Every worker loop, in every process, offers each tick to the queue under a unique key, and the database accepts exactly one. The e2e test races 20 workers with separate memory on one tick on all three databases: one run is queued and it runs once. With the unique key removed, the same test queues it 20 times. A tick missed while every worker was down runs once on restart if it is less than ten minutes old, and only the latest such tick runs. Scheduled runs are ordinary task runs, so they get retries, backoff and the admin view.
+
 ## Real-time: WebSockets and Server-Sent Events
 
 Django needs Channels, a Redis channel layer and an ASGI server (daphne or uvicorn) for this, and moving a sync codebase onto them is a rewrite of its views. Rangoli is async throughout, so a socket is just another handler:
@@ -223,7 +290,7 @@ realtime::publish("chat:lobby", "deploy finished");      // from any view or bac
 async fn feed() -> impl IntoResponse { realtime::events("dashboard") }  // the same groups as SSE
 ```
 
-A WebSocket handshake is a `GET`, so ordinary CSRF checks don't cover it; `serve` refuses browsers whose `Origin` isn't your host (cross-site WebSocket hijacking). Slow clients skip ahead instead of stalling a room, idle groups are cleaned up, and connections are pinged every 30 seconds. Groups live in one process today; spreading them over several instances (Postgres `LISTEN/NOTIFY`) is on the roadmap.
+A WebSocket handshake is a `GET`, so ordinary CSRF checks don't cover it; `serve` refuses browsers whose `Origin` isn't your host (cross-site WebSocket hijacking). Slow clients skip ahead instead of stalling a room, idle groups are cleaned up, and connections are pinged every 30 seconds. On Postgres, `runserver` and `worker` join every instance through `LISTEN/NOTIFY`, so a publish from any web server or background worker reaches subscribers on all of them, with no Redis. Delivery across instances is at most once (like Channels' Redis layer), in publish order, with messages up to about 7.9 KB (bigger ones stay on the publishing instance). A live run with two servers and a worker on one database: a message posted to server B, and one published by a task in the worker, both reached an SSE client on server A. On MySQL and SQLite, groups live in one process.
 
 ## JSON API
 
@@ -242,13 +309,38 @@ App::new().api::<Post>(Api::new().read(Access::Public).write(Access::Staff))
 | `DELETE /api/blog_post/7` | `204` |
 | `GET /api/schema.json` | OpenAPI 3 document for every exposed model |
 
-Validation uses the same rules as the admin and answers like DRF: `400 {"title": ["This field may not be blank."]}`. Access levels are `Public`, `Authenticated`, `Staff` (the default) and `Nobody`. Password fields are write-only, datetimes are ISO 8601, `auto_now` fields are filled in. Browser requests are covered by the same cross-origin protection as the admin.
+Validation uses the same rules as the admin and answers like DRF: `400 {"title": ["This field may not be blank."]}`. Access levels are `Public`, `Authenticated`, `Staff` (the default) and `Nobody`.
+
+Rows that belong to a user take one call instead of DRF's `IsOwner` permission class, a `get_queryset` override and a `perform_create` override:
+
+```rust
+App::new().api::<Note>(Api::new().read(Access::Authenticated).write(Access::Authenticated).owned_by(&Note::OWNER_ID))
+```
+
+Non-staff users then list, read, update and delete only their own notes. Someone else's is a 404, the same as a note that doesn't exist, so ids reveal nothing. Whatever owner a request body names is replaced by the requesting user, so nobody can create a row as someone else or hand one over. Staff see and reassign everything. `owned_by` on a column that isn't a foreign key to the user stops the app at startup. The e2e test has two users attempt every cross-user read and write on all three databases. With the owner filter removed from DELETE alone, the same test catches one user deleting the other's row.
+
+Scripts, mobile apps and other services use API tokens (DRF's `authtoken`, without its plaintext storage):
+
+```sh
+cargo run -- createtoken alice ci-bot --days 90   # prints rgl_… once
+curl -H "Authorization: Bearer rgl_…" -X POST localhost:8000/api/blog_post/ -d @post.json
+```
+
+or `rangoli::auth::create_token(&user, "ci-bot", Some(ttl))` in code. A token carries its user's rights and stops working when it expires, when its `ApiToken` row is deleted, or when the user is deactivated. Only a SHA-256 of the token is stored, so a database leak doesn't leak working tokens, and the `rgl_` prefix lets secret scanners recognise one pushed to a repository. A bad token is a `401 {"detail": "Invalid token."}` with `WWW-Authenticate: Bearer`. `last_used_at` is written at most once a minute per token, so checking a token is two reads and no write on hot paths (asserted with `count_queries`). Password fields are write-only, datetimes are ISO 8601, `auto_now` fields are filled in. Browser requests are covered by the same cross-origin protection as the admin.
+
+## AI agents (MCP)
+
+Every model you expose with `.api::<M>(...)` is also an MCP server at `POST /mcp` (Streamable HTTP, protocol 2025-06-18 back to 2024-11-05). Each model gets five tools, such as `blog_post_list`, `blog_post_get`, `blog_post_create`, `blog_post_update` and `blog_post_delete`, with input schemas generated from the model.
+
+An agent is an ordinary API client. It signs in with an API token, from **Connect an AI agent** in the admin or `cargo run -- createtoken`, and each tool call runs through the JSON API as that token's user. Access levels, `owned_by`, validation and lockouts all apply unchanged, and an agent is only offered the tools its user can call. Every create, update and delete, through the API or MCP, writes a History entry ("Added via MCP.") in the same transaction as the change.
+
+Checked by: an e2e test that speaks raw MCP on all three databases (tool lists per user, writes and History, `owned_by` holding for agents, validation errors returned to the agent), 3,000 rounds of random JSON-RPC and tool calls in the fuzzer, and a live run of the official MCP Python SDK (2.3.0) against the example blog.
 
 ## Databases
 
 Postgres, MySQL and SQLite share one code path through sqlx's `Any` driver. Only the SQL spelling differs per dialect. CI runs the same end-to-end test on all three.
 
-Field types: `i64`, `f64`, `bool`, `String` (`VARCHAR`, or `TEXT` with `#[field(text)]`), `DateTime`, `Json` and choice enums, each optionally wrapped in `Option` for a nullable column.
+Field types: `i64`, `f64`, `bool`, `String` (`VARCHAR`, or `TEXT` with `#[field(text)]`), `DateTime`, `Date`, `Decimal<P>`, `Uuid`, `Json` and choice enums, each optionally wrapped in `Option` for a nullable column.
 
 Choices are real Rust enums instead of Django's string tuples, so `Post::STATUS.eq(Status::Publisehd)` doesn't compile:
 
@@ -265,7 +357,11 @@ pub struct Post {
 }
 ```
 
-A stored value longer than the column's `max_length` is a compile error. `#[field(default = ...)]` takes a literal and is used for existing rows when `makemigrations` adds the column, as the initial value of new admin forms, and for fields an API client leaves out. `DateTime` is UTC, stored as Unix seconds so it behaves identically on every database, and serializes as ISO 8601. `#[field(auto_now_add)]` and `#[field(auto_now)]` fill `created_at`/`updated_at` style fields on save, and the admin keeps them read-only. Field attributes: `max_length`, `text`, `unique`, `index`, `choices`, `default = literal`, `password`, `fk = Model`, `auto_now`, `auto_now_add`, and `cascade` (`ON DELETE CASCADE`; foreign keys protect referenced rows by default).
+A stored value longer than the column's `max_length` is a compile error. `#[field(default = ...)]` takes a literal and is used for existing rows when `makemigrations` adds the column, as the initial value of new admin forms, and for fields an API client leaves out. `DateTime` is UTC, stored as Unix seconds so it behaves identically on every database, and serializes as ISO 8601. `Date` is a calendar date stored as days since 1970-01-01: `YYYY-MM-DD` in the API and OpenAPI (`format: date`), a native date picker and date-range filters in the admin, and `Date::today()` for existing rows when `makemigrations` adds a non-null one.
+
+Money is `Decimal<P>`, with the number of places in the type: `price: Decimal<2>`. It is stored as an integer count of the smallest unit (cents), so ten `0.10`s sum to exactly `1.00` (they don't as floats; a unit test shows both), SQL equality and ordering are exact on every database, and mixing `Decimal<2>` with `Decimal<3>` doesn't compile. Input with more places than `P` is rejected rather than silently rounded, in the API (`"1.005"` → 400), the admin and forms. The API writes decimals as strings, like DRF, and reads strings or whole numbers. A fractional JSON number is refused, since it is already a float when parsed (`19.999999999999999` arrives as `20`), so clients send `"19.99"`. Range: ±92 quadrillion at 2 places.
+
+`Uuid` is stored as lowercase text (`VARCHAR(36)`) on every database. `#[field(auto, unique)] public_id: Uuid` fills a time-ordered v7 on insert unless you set one, and shows read-only in the admin and the API (`format: uuid`). Adding a unique UUID column to a table that already has rows is one `makemigrations`: the migration adds it nullable, gives each existing row its own UUID, then makes it `NOT NULL UNIQUE`. Django needs [three hand-written migrations](https://docs.djangoproject.com/en/stable/howto/writing-migrations/#migrations-that-add-unique-fields) for that; the e2e test runs it on all three databases, and without that step Postgres refuses with `could not create unique index`. `#[field(auto_now_add)]` and `#[field(auto_now)]` fill `created_at`/`updated_at` style fields on save, and the admin keeps them read-only. Field attributes: `max_length`, `text`, `unique`, `index`, `choices`, `default = literal`, `password`, `fk = Model`, `auto` (UUIDs), `auto_now`, `auto_now_add`, and `cascade` (`ON DELETE CASCADE`; foreign keys protect referenced rows by default).
 
 ## Migrations
 
@@ -277,24 +373,22 @@ A stored value longer than the column's `max_length` is a compile error. `#[fiel
 }
 ```
 
-Operations: `create_table`, `drop_table`, `add_column`, `drop_column`, `alter_column`, `add_index`, `drop_index`, and `sql` (the equivalent of Django's RunSQL). Each migration runs in its own transaction. MySQL commits DDL automatically, just as it does under Django. `makemigrations --check` and `migrate --check` exit non-zero, for CI.
+To deploy the binary alone, compile the migrations in: `App::new().embed_migrations(rangoli::migrations!())`. `migrate` then uses the embedded files plus any in `RANGOLI_MIGRATIONS` (a file on disk wins over an embedded one with the same name, so a fresh `makemigrations` works before the next build). The example blog's release binary, copied alone into an empty directory, migrates and serves; built without that line, the same test gets a 500 because its tables were never created. Cargo rebuilds when an embedded file changes but not when a new one appears, so `migrate` warns, like Django, when the models have changes that no migration in the binary or on disk covers.
+
+Operations: `create_table`, `drop_table`, `add_column`, `drop_column`, `alter_column`, `add_index`, `drop_index`, and `sql` (the equivalent of Django's RunSQL). Each migration runs in its own transaction. MySQL commits DDL automatically, just as it does under Django. `makemigrations --check` and `migrate --check` exit non-zero, for CI. `makemigrations` refuses a type change that would silently reinterpret stored numbers, such as `Decimal<2>` to `Decimal<3>` (19.99 would read as 1.999), `i64` to `Decimal`, or `DateTime` to `Date`. It prints the `UPDATE` that converts the data, for a migration you write by hand.
 
 ## What's not done yet
 
 This is the roadmap, in rough order. Nothing here is implemented yet:
 
-1. **More field types**: date, decimal, uuid
-2. Savepoints for nested `atomic` blocks (today a nested block joins the outer one)
-3. **Relations**: `select_related`-style joins, reverse foreign key accessors
-4. **More admin customization**: inlines, custom actions, fieldsets, per-model permissions, groups
-5. **Form rendering helpers** (widgets from model metadata); template filters for dates and choices
-6. **API tokens** for non-browser API clients, and per-object API permissions
-7. **Scheduled (cron-style) tasks** on top of the task queue
-8. **Real-time across instances** (Postgres `LISTEN/NOTIFY` for `realtime` groups), model signals
-9. Password reset, groups, email, caching, i18n, embedding migrations in the binary, multi-database routing
-10. **WebAssembly**, explored later: the same validation rules running in the browser and on the server, and sandboxed WASM plugins
+1. **More admin customization**: inlines, fieldsets, per-model permissions, groups
+2. **Form rendering helpers** (widgets from model metadata); template filters for dates and choices
+3. **API permissions**: token scopes, and per-object rules beyond ownership
+4. **Model signals**; real-time across instances on MySQL and SQLite (Postgres has it)
+5. Password reset, groups, email, caching, i18n, multi-database routing
+6. **WebAssembly**, explored later: the same validation rules running in the browser and on the server, and sandboxed WASM plugins
 
-Known limits today: login lockouts are per process, the admin's foreign-key select loads at most 1000 rows, and changing `unique`/`fk` on an existing column needs an `sql` operation on Postgres and MySQL.
+Known limits today: the admin's foreign-key select loads at most 1000 rows, and changing `unique`/`fk` on an existing column needs an `sql` operation on Postgres and MySQL.
 
 ## Only what you use
 

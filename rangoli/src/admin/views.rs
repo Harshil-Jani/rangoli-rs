@@ -52,6 +52,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         ("delete.html", include_str!("templates/delete.html")),
         ("history.html", include_str!("templates/history.html")),
         ("password_change.html", include_str!("templates/password_change.html")),
+        ("agents.html", include_str!("templates/agents.html")),
     ] {
         env.add_template(name, src).expect("admin template");
     }
@@ -63,6 +64,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         .route("/admin/login", get(login_page).post(login_submit))
         .route("/admin/logout", post(logout))
         .route("/admin/password_change/", get(password_page).post(password_submit))
+        .route("/admin/agents/", get(agents_page).post(agents_submit))
         .route("/admin/static/{file}", get(static_file))
         .route("/admin/{table}/", get(list).post(bulk))
         .route("/admin/{table}/add", get(add_page).post(add_submit))
@@ -70,6 +72,77 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         .route("/admin/{table}/{id}/delete", get(delete_page).post(delete_submit))
         .route("/admin/{table}/{id}/history", get(history))
         .with_state(Arc::new(Site { admin, options, models, env, version }))
+}
+
+// ---------------------------------------------------------------- AI agents (MCP)
+
+/// The MCP address as the browser reached this admin: `https://host/mcp` (plain http in debug).
+fn mcp_url(headers: &axum::http::HeaderMap) -> String {
+    let host = headers.get(axum::http::header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("localhost");
+    let scheme = if crate::settings().debug { "http" } else { "https" };
+    format!("{scheme}://{host}/mcp")
+}
+
+/// A short MCP server name for config snippets: `blog` for `blog.example.com`, `rangoli`
+/// for localhost or a bare IP address.
+fn server_name(url: &str) -> String {
+    let host = url.split("://").nth(1).unwrap_or(url).split(['/', ':']).next().unwrap_or("");
+    let first = host.split('.').next().unwrap_or("");
+    let ok = !first.is_empty()
+        && first != "localhost"
+        && first.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !first.chars().all(|c| c.is_ascii_digit());
+    if ok {
+        first.to_ascii_lowercase()
+    } else {
+        "rangoli".into()
+    }
+}
+
+async fn agent_rows(u: &User) -> Result<Vec<minijinja::Value>, Response> {
+    let tokens = auth::ApiToken::objects()
+        .filter(auth::ApiToken::USER_ID.eq(u.id.unwrap_or(-1)))
+        .order_by(auth::ApiToken::ID.desc())
+        .all()
+        .await
+        .map_err(fail)?;
+    Ok(tokens
+        .iter()
+        .map(|t| {
+            context! {
+                id => t.id, name => t.name, prefix => t.prefix,
+                used => t.last_used_at.map_or("Never".to_string(), DateTime::human),
+                expires => t.expires_at.map_or("Never".to_string(), DateTime::human),
+            }
+        })
+        .collect())
+}
+
+async fn agents_page(State(site): S, user: CurrentUser, uri: Uri) -> Page {
+    let u = staff(&user, &uri)?;
+    let tokens = agent_rows(u).await?;
+    render(&site, "agents.html", context! { title => "Connect an AI agent", tokens, ..chrome(&site, u, None) })
+}
+
+/// Create a token for the signed-in user and show it once, with setup for common clients.
+async fn agents_submit(State(site): S, user: CurrentUser, uri: Uri, headers: axum::http::HeaderMap, Form(f): Form<Pairs>) -> Page {
+    let u = staff(&user, &uri)?;
+    let name = param(&f, "name").unwrap_or("").trim().to_string();
+    if name.is_empty() || name.chars().count() > 100 || name.contains('\0') {
+        let tokens = agent_rows(u).await?;
+        let error = "Give the agent a name of up to 100 characters.";
+        return render(&site, "agents.html", context! { title => "Connect an AI agent", error, tokens, ..chrome(&site, u, None) });
+    }
+    let days: u64 = param(&f, "days").and_then(|d| d.parse().ok()).filter(|d| *d <= 3650).unwrap_or(30);
+    let ttl = (days > 0).then(|| std::time::Duration::from_secs(days * 86_400));
+    let (_, token) = auth::create_token(u, &name, ttl).await.map_err(fail)?;
+    let url = mcp_url(&headers);
+    let tokens = agent_rows(u).await?;
+    render(
+        &site,
+        "agents.html",
+        context! { title => "Connect an AI agent", name, token, server => server_name(&url), url, tokens, ..chrome(&site, u, None) },
+    )
 }
 
 // ---------------------------------------------------------------- helpers
@@ -100,6 +173,15 @@ fn model(site: &Site, table: &str) -> Result<&'static ModelMeta, Response> {
     site.admin.iter().copied().find(|m| m.table == table).ok_or_else(|| StatusCode::NOT_FOUND.into_response())
 }
 
+/// A model whose admin allows adding; `no_add()` models answer 403 like Django.
+fn addable(site: &Site, table: &str) -> Result<&'static ModelMeta, Response> {
+    let meta = model(site, table)?;
+    if options(site, meta).no_add {
+        return Err(StatusCode::FORBIDDEN.into_response());
+    }
+    Ok(meta)
+}
+
 fn options<'a>(site: &'a Site, meta: &ModelMeta) -> &'a Options {
     static DEFAULT: std::sync::OnceLock<Options> = std::sync::OnceLock::new();
     site.options.get(meta.table).unwrap_or_else(|| DEFAULT.get_or_init(Options::default))
@@ -114,8 +196,11 @@ fn verbose(name: &str) -> String {
         }
         out.extend(c.to_lowercase());
     }
-    out
+    // Acronyms stay acronyms: `ApiToken` is an "API token", not an "api token".
+    out.split(' ').map(|w| if ACRONYMS.contains(&w) { w.to_uppercase() } else { w.to_string() }).collect::<Vec<_>>().join(" ")
 }
+
+const ACRONYMS: [&str; 8] = ["api", "mcp", "url", "uuid", "ip", "sms", "http", "ai"];
 
 /// `TaskRecord` -> `task records`.
 fn verbose_plural(name: &str) -> String {
@@ -128,6 +213,9 @@ fn title_plural(name: &str) -> String {
 }
 
 fn plural(name: &str) -> String {
+    if name.ends_with(|c: char| c.is_ascii_uppercase()) {
+        return format!("{name}s"); // "URLs", "APIs"
+    }
     match name.strip_suffix('y') {
         Some(stem) if !stem.ends_with(['a', 'e', 'i', 'o', 'u']) => format!("{stem}ies"),
         _ if name.ends_with('s') => format!("{name}es"),
@@ -157,7 +245,9 @@ fn apps(site: &Site, current: Option<&str>) -> Vec<minijinja::Value> {
     let mut groups: Vec<(String, Vec<minijinja::Value>)> = vec![];
     for m in &site.admin {
         let app = app_of(m.table);
-        let entry = context! { table => m.table, plural => title_plural(m.name), current => current == Some(m.table) };
+        let entry = context! {
+            table => m.table, plural => title_plural(m.name), current => current == Some(m.table), can_add => !options(site, m).no_add,
+        };
         match groups.iter_mut().find(|(a, _)| *a == app) {
             Some((_, models)) => models.push(entry),
             None => groups.push((app, vec![entry])),
@@ -175,6 +265,7 @@ fn chrome(site: &Site, u: &User, current: Option<&'static ModelMeta>) -> minijin
         table => current.map(|m| m.table),
         name => current.map(|m| verbose(m.name)),
         plural => current.map(|m| title_plural(m.name)),
+        can_add => current.is_some_and(|m| !options(site, m).no_add),
     }
 }
 
@@ -183,7 +274,11 @@ fn display(v: &Value, f: &FieldMeta) -> String {
         Value::Null => "-".into(),
         Value::Bool(b) => (if *b { "True" } else { "False" }).into(),
         Value::Int(i) if f.ty == FieldType::DateTime => DateTime::from_unix(*i).human(),
-        Value::Int(i) => i.to_string(),
+        Value::Int(i) if f.ty == FieldType::Date => crate::Date::from_days(*i).to_string(),
+        Value::Int(i) => match f.ty {
+            FieldType::Decimal(p) => crate::decimal::format_units(*i, p),
+            _ => i.to_string(),
+        },
         Value::Float(x) => x.to_string(),
         Value::Text(s) if f.choices.is_some() => {
             f.choices.into_iter().flatten().find(|(v, _)| v == s).map_or(s.clone(), |(_, l)| l.to_string())
@@ -446,7 +541,11 @@ fn search_fields(meta: &'static ModelMeta, opts: &Options) -> Vec<&'static str> 
 fn filter_fields(meta: &'static ModelMeta, opts: &Options) -> Vec<&'static FieldMeta> {
     match &opts.list_filter {
         Some(names) => names.iter().filter_map(|n| meta.field(n)).collect(),
-        None => meta.fields.iter().filter(|f| matches!(f.ty, FieldType::Bool | FieldType::DateTime) || f.choices.is_some()).collect(),
+        None => meta
+            .fields
+            .iter()
+            .filter(|f| matches!(f.ty, FieldType::Bool | FieldType::DateTime | FieldType::Date) || f.choices.is_some())
+            .collect(),
     }
 }
 
@@ -483,6 +582,10 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
             FieldType::Bool if v == "1" || v == "0" => Node::Cmp(f.name, "=", Value::Bool(v == "1"), FieldType::Bool),
             FieldType::DateTime => match date_range_start(v) {
                 Some(since) => Node::Cmp(f.name, ">=", Value::Int(since.unix()), FieldType::DateTime),
+                None => continue,
+            },
+            FieldType::Date => match date_range_start(v) {
+                Some(since) => Node::Cmp(f.name, ">=", Value::Int(since.unix().div_euclid(86_400)), FieldType::Date),
                 None => continue,
             },
             FieldType::Int if f.fk.is_some() => match v.parse::<i64>() {
@@ -542,7 +645,10 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
     let link = |set: &[(&str, &str)]| {
         let mut pairs: Vec<(String, String)> = p
             .iter()
-            .filter(|(k, _)| !matches!(k.as_str(), "p" | "log" | "deleted" | "what" | "warn") && !set.iter().any(|(s, _)| s == k))
+            .filter(|(k, _)| {
+                !matches!(k.as_str(), "p" | "log" | "deleted" | "what" | "warn" | "applied" | "failed" | "n")
+                    && !set.iter().any(|(s, _)| s == k)
+            })
             .cloned()
             .collect();
         pairs.extend(set.iter().filter(|(_, v)| !v.is_empty()).map(|(k, v)| (k.to_string(), v.to_string())));
@@ -571,7 +677,7 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
         let current = param(&p, &key).unwrap_or("");
         let choices: Vec<(String, String)> = match (f.ty, f.fk) {
             (FieldType::Bool, _) => [("", "All"), ("1", "Yes"), ("0", "No")].iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
-            (FieldType::DateTime, _) => DATE_RANGES.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
+            (FieldType::DateTime | FieldType::Date, _) => DATE_RANGES.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
             (FieldType::Varchar(_), _) if f.choices.is_some() => std::iter::once((String::new(), "All".to_string()))
                 .chain(f.choices.into_iter().flatten().map(|(v, l)| (v.to_string(), l.to_string())))
                 .collect(),
@@ -595,11 +701,26 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
         "list.html",
         context! {
             title => format!("Select {} to change", verbose(meta.name)),
-            messages => message(&p, u, "list").await, q, keep, count, full_count, filtered, what, page_links,
+            messages => match action_message(&site, meta, &p) { Some(m) => Some(m), None => message(&p, u, "list").await },
+            actions => options(&site, meta).actions.iter().map(|a| context! { name => a.name, label => a.label }).collect::<Vec<_>>(),
+            q, keep, count, full_count, filtered, what, page_links,
             columns => headers, rows, filters => filter_blocks, searchable => !searchable.is_empty(), clear_url => base.clone(),
             ..chrome(&site, u, Some(meta))
         },
     )
+}
+
+/// The result of a custom action. Only registered action names are shown, with their
+/// registered labels, so a crafted link can't put words in the admin's mouth.
+fn action_message(site: &Site, meta: &ModelMeta, p: &[(String, String)]) -> Option<minijinja::Value> {
+    let find = |name: &str| options(site, meta).actions.iter().find(|a| a.name == name);
+    if let Some(a) = param(p, "failed").and_then(find) {
+        return Some(context! { level => "error", text => format!("The “{}” action failed, so nothing was changed.", a.label) });
+    }
+    let a = param(p, "applied").and_then(find)?;
+    let n: usize = param(p, "n")?.parse().ok()?;
+    let what = if n == 1 { verbose(meta.name) } else { verbose_plural(meta.name) };
+    Some(context! { level => "success", text => format!("Applied “{}” to {n} {what}.", a.label) })
 }
 
 /// Django's date filter choices: (URL value, label).
@@ -631,6 +752,31 @@ async fn bulk(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
     let mut q = Query::new(meta);
     q.filter.push(Node::In("id", ids.iter().map(|i| Value::Int(*i)).collect(), FieldType::Int));
     let rows = q.rows().await.map_err(fail)?;
+    let chosen = param(&f, "action").unwrap_or("");
+    if chosen != "delete_selected" {
+        let Some(action) = options(&site, meta).actions.iter().find(|a| a.name == chosen).cloned() else {
+            return Ok(Redirect::to(&format!("/admin/{table}/?warn=noaction")).into_response());
+        };
+        // Only rows that still exist count; the action and its History entries commit together.
+        let found: Vec<i64> = rows.iter().map(|(id, _)| *id).collect();
+        let outcome = crate::atomic(async {
+            (action.run)(found.clone()).await?;
+            for (id, vals) in &rows {
+                log(u, meta, *id, &repr(meta, *id, vals), CHANGE, format!("Ran the “{}” action.", action.label)).await?;
+            }
+            Ok(())
+        })
+        .await;
+        let qs = match outcome {
+            Ok(()) => serde_urlencoded::to_string([("applied", action.name.to_string()), ("n", found.len().to_string())]),
+            Err(e) => {
+                eprintln!("rangoli admin: action `{}` on {table} failed: {e}", action.name);
+                serde_urlencoded::to_string([("failed", action.name)])
+            }
+        }
+        .unwrap();
+        return Ok(Redirect::to(&format!("/admin/{table}/?{qs}")).into_response());
+    }
     if param(&f, "post") != Some("yes") {
         let related = related(&site, meta, &ids).await?;
         let objects: Vec<_> = rows
@@ -712,7 +858,11 @@ fn raw_values(meta: &ModelMeta, vals: &[Value]) -> HashMap<String, String> {
                 Value::Null | Value::Bool(false) => return None,
                 Value::Bool(true) => "on".into(),
                 Value::Int(i) if f.ty == FieldType::DateTime => DateTime::from_unix(*i).input_value(),
-                Value::Int(i) => i.to_string(),
+                Value::Int(i) if f.ty == FieldType::Date => crate::Date::from_days(*i).to_string(),
+                Value::Int(i) => match f.ty {
+                    FieldType::Decimal(p) => crate::decimal::format_units(*i, p),
+                    _ => i.to_string(),
+                },
                 Value::Float(x) => x.to_string(),
                 Value::Text(s) if f.ty == FieldType::Json => serde_json::from_str::<serde_json::Value>(s)
                     .and_then(|j| serde_json::to_string_pretty(&j))
@@ -794,6 +944,8 @@ async fn form_fields(
             (_, _, FieldType::Float) => "float",
             (_, _, FieldType::Text) => "textarea",
             (_, _, FieldType::DateTime) => "datetime",
+            (_, _, FieldType::Date) => "date",
+            (_, _, FieldType::Decimal(_)) => "decimal",
             _ => "text",
         };
         let value = raw.get(f.name).cloned().unwrap_or_default();
@@ -919,7 +1071,7 @@ fn after_save(table: &str, id: i64, log_id: i64, form: &HashMap<String, String>)
 async fn add_page(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>, UrlQuery(p): UrlQuery<Pairs>) -> Page {
     let u = staff(&user, &uri)?;
     let messages = message(&p, u, "add").await;
-    let meta = model(&site, &table)?;
+    let meta = addable(&site, &table)?;
     // New forms start from the model's defaults, like Django's `initial`.
     let defaults: Vec<Value> = meta.fields.iter().map(|f| f.default.map_or(Value::Null, |d| d.value())).collect();
     form_page(&site, u, meta, None, &raw_values(meta, &defaults), &Links::new(), HashMap::new(), StatusCode::OK, messages).await
@@ -927,7 +1079,7 @@ async fn add_page(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path
 
 async fn add_submit(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>, Form(pairs): Form<Pairs>) -> Page {
     let u = staff(&user, &uri)?;
-    let meta = model(&site, &table)?;
+    let meta = addable(&site, &table)?;
     let form: HashMap<String, String> = pairs.iter().cloned().collect();
     let links = submitted_links(meta, &pairs);
     let errors = match validate(meta, &form, true, &options(&site, meta).readonly_fields).await {
@@ -1150,6 +1302,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn names_read_like_english() {
+        assert_eq!(super::title_plural("ApiToken"), "API tokens");
+        assert_eq!(super::title_plural("TaskRecord"), "Task records");
+        assert_eq!(super::server_name("https://blog.example.com/mcp"), "blog");
+        assert_eq!(super::server_name("http://127.0.0.1:8000/mcp"), "rangoli");
+        assert_eq!(super::server_name("http://localhost:8000/mcp"), "rangoli");
     }
 
     #[test]

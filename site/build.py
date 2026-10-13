@@ -342,20 +342,21 @@ footer {{ max-width: 1080px; margin: 0 auto; padding: var(--s6) var(--s5) var(--
 </div></header>
 <main>
 <section class="hero">
-  <h1>A Django-style web framework for Rust</h1>
-  <p class="lede">Rangoli gives you what Django gives you: models, migrations, an admin, auth, forms, templates, a JSON API, background tasks and WebSockets. It adds what Django can't: queries the compiler checks, migrations that don't conflict across branches, async all the way down, safe defaults, and one fast binary to deploy. <code>cargo add rangoli</code>.</p>
+  <h1>The backend that's ready for AI on day one</h1>
+  <p class="lede">Describe your data once. Rangoli gives you an admin panel for your team, an API for your apps, and an MCP server so AI assistants like Claude and Cursor can work with that data safely, as a user, with every change on record. It all runs as one small, fast program.</p>
   <div class="actions"><a class="btn" href="#start">Get started</a><a class="btn ghost" href="{REPO}">Source on GitHub</a><a class="btn ghost" href="#results">See the benchmarks</a></div>
-  <video controls preload="metadata" poster="rangoli-demo-poster.jpg" aria-describedby="video-caption">
-    <source src="rangoli-demo.mp4" type="video/mp4">
-    Your browser can't play this video. <a href="rangoli-demo.mp4">Download it</a>.
+  <video controls preload="metadata" poster="ai-agent-demo-poster.jpg" aria-describedby="video-caption">
+    <source src="ai-agent-demo.mp4" type="video/mp4">
+    Your browser can't play this video. <a href="ai-agent-demo.mp4">Download it</a>.
   </video>
-  <p class="caption" id="video-caption">49 seconds, no sound: define models, run the commands, then the public pages, the admin, the JSON API and the task list of the example blog. Recorded from the real app.</p>
+  <p class="caption" id="video-caption">16 seconds, no sound, recorded from the real app: sign in, connect an AI agent in two clicks, then see the post that agent wrote and its entry in History. For developers, the <a href="rangoli-demo.mp4">49-second code walkthrough</a>.</p>
 </section>
 
 <section id="why">
   <h2>Why it exists</h2>
   <p class="method">Rust used to be hard to adopt because engineers who knew it were hard to find. Picking up a language is much faster now; what teams lack is a framework as complete as Django. Rangoli is that framework, with Django's shape and Rust's cost profile.</p>
   <dl class="why">
+    <div><dt>Ready for AI</dt><dd>Every model is also an MCP server. Connect Claude or Cursor from the admin; agents act as a user, see only that user's data, and every change is in History.</dd></div>
     <div><dt>Async from the ground up</dt><dd>No sync views to convert, no ASGI migration, no <code>sync_to_async</code> tax. WebSockets are a handler.</dd></div>
     <div><dt>Light</dt><dd>One binary. Admin, templates, real-time and each database driver are features you can leave out.</dd></div>
     <div><dt>Never the reason you're down</dt><dd>Fuzzed on every push on three databases; outages give fast 503s and recover on their own.</dd></div>
@@ -479,7 +480,7 @@ python experiments.py  # the findings above -> results/experiments.json</code></
 
 DIST.mkdir(exist_ok=True)
 (DIST / "index.html").write_text(page)
-for asset in ["rangoli-demo.mp4", "rangoli-demo-poster.jpg", "favicon.svg"]:
+for asset in ["rangoli-demo.mp4", "rangoli-demo-poster.jpg", "ai-agent-demo.mp4", "ai-agent-demo-poster.jpg", "favicon.svg"]:
     shutil.copy(SITE / asset, DIST / asset)
 (DIST / ".nojekyll").write_text("")
 print(f"wrote {DIST / 'index.html'}")

@@ -10,7 +10,7 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use rangoli::api::{Access, Api};
-use rangoli::{migrate, App, Choices, DateTime, Json, Model};
+use rangoli::{migrate, App, Choices, Date, DateTime, Decimal, Json, Model, Uuid};
 use std::time::Duration;
 use tower::ServiceExt;
 
@@ -52,6 +52,10 @@ struct Post {
     #[field(choices, default = "draft")]
     status: Status,
     published_at: Option<DateTime>,
+    due: Option<Date>,
+    price: Option<Decimal<2>>,
+    #[field(auto, unique)]
+    ref_id: Uuid,
     extra: Option<Json>,
     #[field(auto_now_add)]
     created_at: DateTime,
@@ -150,6 +154,9 @@ impl Rng {
                     "author_id",
                     "status",
                     "published_at",
+                    "due",
+                    "price",
+                    "ref_id",
                     "extra",
                     "tags",
                     "id",
@@ -182,7 +189,10 @@ async fn the_framework_never_takes_the_server_down() {
     let app = App::new()
         .admin::<Author>()
         .admin::<Tag>()
-        .admin::<Post>()
+        .admin_with::<Post>(
+            rangoli::admin::ModelAdmin::new()
+                .action("flag", "Flag selected", |selected| async move { selected.update([Post::FLAG.set(true)]).await.map(drop) }),
+        )
         .api::<Post>(Api::new().read(Access::Public).write(Access::Staff))
         .api::<Author>(Api::new().read(Access::Public).write(Access::Staff))
         .routes(
@@ -193,11 +203,15 @@ async fn the_framework_never_takes_the_server_down() {
     let migrations = dir.join("migrations");
     migrate::make(&migrations, app.models(), None).unwrap();
     let db = rangoli::orm::connect(&url).await.unwrap();
+    // e2e's tables too: the suites share a database in CI, and these reference rangoli_user.
     for t in [
+        "e2e_note",
         "fz_post_tags",
         "fz_post",
         "fz_tag",
         "fz_author",
+        "rangoli_api_token",
+        "rangoli_login_failure",
         "rangoli_session",
         "rangoli_admin_log",
         "rangoli_task",
@@ -250,6 +264,9 @@ async fn the_framework_never_takes_the_server_down() {
         author_id: author.id.unwrap(),
         status: Status::Published,
         published_at: None,
+        due: None,
+        price: None,
+        ref_id: Uuid::NIL,
         extra: None,
         created_at: DateTime::now(),
     };
@@ -263,8 +280,24 @@ async fn the_framework_never_takes_the_server_down() {
             failures.push(format!("{status} for {what}: {}", body.chars().take(200).collect::<String>()));
         }
     };
-    const PARAMS: &[&str] =
-        &["q", "o", "p", "f.flag", "f.status", "f.author_id", "f.published_at", "f.created_at", "log", "warn", "deleted", "what", "nope"];
+    const PARAMS: &[&str] = &[
+        "q",
+        "o",
+        "p",
+        "f.flag",
+        "f.status",
+        "f.author_id",
+        "f.published_at",
+        "f.due",
+        "f.price",
+        "f.ref_id",
+        "f.created_at",
+        "log",
+        "warn",
+        "deleted",
+        "what",
+        "nope",
+    ];
     const API_PARAMS: &[&str] = &[
         "limit",
         "offset",
@@ -277,22 +310,49 @@ async fn the_framework_never_takes_the_server_down() {
         "score",
         "author_id",
         "published_at",
+        "due",
+        "price",
+        "ref_id",
         "extra",
         "nope",
     ];
-    const FIELDS: &[&str] =
-        &["title", "body", "views", "score", "flag", "author_id", "status", "published_at", "extra", "tags", "_save", "_continue", "csrf"];
+    const FIELDS: &[&str] = &[
+        "title",
+        "body",
+        "views",
+        "score",
+        "flag",
+        "author_id",
+        "status",
+        "published_at",
+        "due",
+        "price",
+        "ref_id",
+        "extra",
+        "tags",
+        "_save",
+        "_continue",
+        "csrf",
+    ];
 
     for i in 0..iters {
         // Admin changelist with random filters, search, sorting and paging.
         let qs: Vec<(String, String)> = (0..rng.below(5)).map(|_| (rng.pick(PARAMS).to_string(), rng.string())).collect();
         let uri = format!(
             "/admin/{}/?{}",
-            rng.pick(&["fz_post", "fz_author", "fz_tag", "rangoli_user", "rangoli_task"]),
+            rng.pick(&["fz_post", "fz_author", "fz_tag", "rangoli_user", "rangoli_task", "rangoli_api_token"]),
             serde_urlencoded::to_string(&qs).unwrap()
         );
         let (s, b) = send(get(uri.clone(), &cookie)).await;
         check(format!("GET {uri}"), s, &b);
+
+        // Random bearer tokens, sometimes shaped like real ones.
+        let token = if rng.chance(50) { format!("rgl_{}", rng.string()) } else { rng.string() };
+        if let Ok(v) = header::HeaderValue::from_str(&format!("Bearer {token}")) {
+            let req = Request::get("/api/fz_post/").header(header::AUTHORIZATION, v).body(Body::empty()).unwrap();
+            let (s, b) = send(req).await;
+            check(format!("GET /api/fz_post/ with token {token:?}"), s, &b);
+        }
 
         // Admin add / change forms with random fields.
         let form: Vec<(String, String)> = (0..rng.below(10)).map(|_| (rng.pick(FIELDS).to_string(), rng.string())).collect();
@@ -318,6 +378,22 @@ async fn the_framework_never_takes_the_server_down() {
         let (s, b) = send(get(uri.clone(), "")).await;
         check(format!("GET {uri}"), s, &b);
 
+        // MCP: random JSON-RPC, and real tool names with random arguments, as staff (cookie) or anonymous.
+        let tool = format!(
+            "{}_{}",
+            rng.pick(&["fz_post", "fz_author", "fz_tag", "nope"]),
+            rng.pick(&["list", "get", "create", "update", "delete", "x"])
+        );
+        let mcp_body = match rng.below(4) {
+            0 => rng.string(),
+            1 => rng.json(0).to_string(),
+            2 => serde_json::json!({ "jsonrpc": "2.0", "id": rng.json(2), "method": rng.pick(&["initialize", "tools/list", "ping", "tools/call", "x"]), "params": rng.json(0) }).to_string(),
+            _ => serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": tool, "arguments": rng.json(0) } }).to_string(),
+        };
+        let who = if rng.chance(50) { cookie.as_str() } else { "" };
+        let (s, b) = send(post("/mcp".into(), who, "application/json", mcp_body.clone())).await;
+        check(format!("POST /mcp {mcp_body}"), s, &b);
+
         // API writes with random JSON (sometimes not JSON at all).
         let body = if rng.chance(10) { rng.string() } else { rng.json(0).to_string() };
         let (method, uri) = match rng.below(3) {
@@ -337,8 +413,13 @@ async fn the_framework_never_takes_the_server_down() {
         check(format!("{method} {uri} {body}"), s, &b);
 
         // Bulk actions and login with garbage.
-        let form: Vec<(String, String)> =
+        let mut form: Vec<(String, String)> =
             (0..rng.below(6)).map(|_| (rng.pick(&["action", "_selected_action", "post", "index"]).to_string(), rng.string())).collect();
+        if rng.chance(50) {
+            // A real action on a mix of real and bogus ids.
+            form.push(("action".into(), rng.pick(&["flag", "delete_selected"]).to_string()));
+            form.push(("_selected_action".into(), if rng.chance(50) { pid.to_string() } else { rng.string() }));
+        }
         let (s, b) =
             send(post("/admin/fz_post/".into(), &cookie, "application/x-www-form-urlencoded", serde_urlencoded::to_string(&form).unwrap()))
                 .await;
@@ -352,6 +433,9 @@ async fn the_framework_never_takes_the_server_down() {
 
         // Parsers on their own.
         let _ = DateTime::parse(&rng.string());
+        let _ = Date::parse(&rng.string());
+        let _ = Decimal::<2>::parse(&rng.string());
+        let _ = Uuid::parse(&rng.string());
     }
 
     // Many requests at once, reads and writes mixed.

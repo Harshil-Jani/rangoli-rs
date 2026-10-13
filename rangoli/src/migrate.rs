@@ -236,6 +236,7 @@ pub fn diff(from: &State, to: &State) -> Vec<Op> {
                     // so use the moment the migration was made (Django's usual `timezone.now`).
                     let default = (!c.null).then(|| match c.ty {
                         FieldType::DateTime => Value::from(crate::DateTime::now()),
+                        FieldType::Date => Value::from(crate::Date::today()),
                         _ => zero(c.ty),
                     });
                     ops.push(Op::AddColumn { table: t.clone(), column: c.clone(), default });
@@ -260,10 +261,11 @@ pub fn diff(from: &State, to: &State) -> Vec<Op> {
 
 pub(crate) fn zero(ty: FieldType) -> Value {
     match ty {
-        FieldType::Int | FieldType::DateTime => Value::Int(0),
+        FieldType::Int | FieldType::DateTime | FieldType::Date | FieldType::Decimal(_) => Value::Int(0),
         FieldType::Float => Value::Float(0.0),
         FieldType::Bool => Value::Bool(false),
         FieldType::Varchar(_) | FieldType::Text => Value::Text(String::new()),
+        FieldType::Uuid => Value::from(crate::Uuid::NIL),
         FieldType::Json => Value::Text("null".into()),
     }
 }
@@ -277,26 +279,43 @@ pub fn builtin() -> Vec<Migration> {
         ("00000000000000_rangoli_builtin", include_str!("migrations/00000000000000_rangoli_builtin.json")),
         ("00000000000001_rangoli_admin_log", include_str!("migrations/00000000000001_rangoli_admin_log.json")),
         ("00000000000002_rangoli_tasks", include_str!("migrations/00000000000002_rangoli_tasks.json")),
+        ("00000000000003_rangoli_api_token", include_str!("migrations/00000000000003_rangoli_api_token.json")),
+        ("00000000000004_rangoli_task_dedup", include_str!("migrations/00000000000004_rangoli_task_dedup.json")),
+        ("00000000000005_rangoli_login_failure", include_str!("migrations/00000000000005_rangoli_login_failure.json")),
     ]
     .into_iter()
     .map(|(name, json)| Migration { name: name.into(), ..serde_json::from_str(json).expect("built-in migration") })
     .collect()
 }
 
-/// Built-in migrations followed by `dir/*.json` in name order.
+static EMBEDDED: std::sync::OnceLock<&'static [(&'static str, &'static str)]> = std::sync::OnceLock::new();
+
+/// Migrations compiled into the binary (`rangoli::migrations!()`); `App::embed_migrations` sets them.
+pub fn embed(files: &'static [(&'static str, &'static str)]) {
+    let _ = EMBEDDED.set(files);
+}
+
+/// Built-in migrations, then the app's in name order: embedded ones plus `dir/*.json`.
+/// A file on disk wins over an embedded one of the same name, so a fresh `makemigrations`
+/// works before the next build, and a binary with no directory beside it still has them all.
 pub fn load(dir: &Path) -> Result<Vec<Migration>> {
-    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
+    let files: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "json")).collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
         Err(e) => return Err(e.into()),
     };
-    files.sort();
-    let mut out = builtin();
+    let mut app: BTreeMap<String, (String, String)> = BTreeMap::new(); // name -> (source, json)
+    for (name, json) in EMBEDDED.get().copied().unwrap_or_default() {
+        app.insert(name.to_string(), (format!("embedded {name}.json"), json.to_string()));
+    }
     for path in files {
-        let text = std::fs::read_to_string(&path)?;
-        let mut m: Migration = serde_json::from_str(&text).map_err(|e| Error::Migration(format!("{}: {e}", path.display())))?;
-        m.name = path.file_stem().unwrap().to_string_lossy().into_owned();
-        out.push(m);
+        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+        app.insert(name, (path.display().to_string(), std::fs::read_to_string(&path)?));
+    }
+    let mut out = builtin();
+    for (name, (source, json)) in app {
+        let m: Migration = serde_json::from_str(&json).map_err(|e| Error::Migration(format!("{source}: {e}")))?;
+        out.push(Migration { name, ..m });
     }
     Ok(out)
 }
@@ -333,9 +352,57 @@ fn target(op: &Op) -> Option<String> {
     }
 }
 
+/// What an integer column's numbers mean. Changing it in place would silently reinterpret
+/// every stored value (19.99 as `Decimal<2>` is 1999; read as `Decimal<3>` it is 1.999).
+fn int_meaning(ty: FieldType) -> Option<String> {
+    match ty {
+        FieldType::Int => Some("whole numbers".into()),
+        FieldType::Decimal(p) => Some(format!("units of 10^-{p} (Decimal<{p}>)")),
+        FieldType::DateTime => Some("Unix seconds (DateTime)".into()),
+        FieldType::Date => Some("days since 1970-01-01 (Date)".into()),
+        _ => None,
+    }
+}
+
+/// Refuse to generate an `alter_column` that would reinterpret stored integers.
+fn refuse_reinterpreting(old: &State, ops: &[Op]) -> Result<()> {
+    for op in ops {
+        let Op::AlterColumn { table, column } = op else { continue };
+        let Some(prev) = old.get(table).and_then(|t| t.columns.iter().find(|c| c.name == column.name)) else { continue };
+        if let (Some(from), Some(to)) = (int_meaning(prev.ty), int_meaning(column.ty)) {
+            if from != to {
+                let hint = match (prev.ty, column.ty) {
+                    (FieldType::Decimal(a), FieldType::Decimal(b)) if b > a => {
+                        format!(
+                            " To keep the values, add an `sql` operation: UPDATE {table} SET {c} = {c} * {}",
+                            10i64.pow(b - a),
+                            c = column.name
+                        )
+                    }
+                    (FieldType::Int, FieldType::Decimal(b)) => {
+                        format!(
+                            " To keep the values, add an `sql` operation: UPDATE {table} SET {c} = {c} * {}",
+                            10i64.pow(b),
+                            c = column.name
+                        )
+                    }
+                    _ => String::new(),
+                };
+                return Err(Error::Migration(format!(
+                    "`{table}.{}` would change from {from} to {to}, which reinterprets every stored value. Write this migration by hand: alter_column plus an `sql` operation that converts the data.{hint}",
+                    column.name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Write a migration for model changes; `Ok(None)` when already up to date.
 pub fn make(dir: &Path, models: &[&'static ModelMeta], name: Option<&str>) -> Result<Option<PathBuf>> {
-    let mut ops = diff(&replay(&load(dir)?)?, &model_state(models));
+    let old = replay(&load(dir)?)?;
+    let mut ops = diff(&old, &model_state(models));
+    refuse_reinterpreting(&old, &ops)?;
     // A model's `default` is what existing rows should get when the column is added.
     for op in &mut ops {
         if let Op::AddColumn { table, column, default } = op {
@@ -376,8 +443,8 @@ pub fn utc_stamp(secs: u64) -> String {
 
 fn col_type(d: Dialect, ty: FieldType) -> String {
     match (ty, d) {
-        (FieldType::Int | FieldType::DateTime, Dialect::Sqlite) => "INTEGER".into(),
-        (FieldType::Int | FieldType::DateTime, _) => "BIGINT".into(),
+        (FieldType::Int | FieldType::DateTime | FieldType::Date | FieldType::Decimal(_), Dialect::Sqlite) => "INTEGER".into(),
+        (FieldType::Int | FieldType::DateTime | FieldType::Date | FieldType::Decimal(_), _) => "BIGINT".into(),
         (FieldType::Float, Dialect::Postgres) => "DOUBLE PRECISION".into(),
         (FieldType::Float, Dialect::Mysql) => "DOUBLE".into(),
         (FieldType::Float, Dialect::Sqlite) => "REAL".into(),
@@ -386,6 +453,8 @@ fn col_type(d: Dialect, ty: FieldType) -> String {
         (FieldType::Bool, Dialect::Mysql) => "SMALLINT".into(),
         (FieldType::Bool, Dialect::Postgres) => "BOOLEAN".into(),
         (FieldType::Varchar(n), _) => format!("VARCHAR({n})"),
+        // VARCHAR, not CHAR: sqlx's Any driver can't decode Postgres `bpchar`.
+        (FieldType::Uuid, _) => "VARCHAR(36)".into(),
         (FieldType::Text | FieldType::Json, _) => "TEXT".into(),
     }
 }
@@ -417,6 +486,19 @@ fn col_def(d: Dialect, c: &Column, default: Option<&Value>) -> String {
         s.push_str(" UNIQUE");
     }
     s
+}
+
+/// A fresh UUID per row, computed by the database. Any version parses as a `Uuid`.
+fn uuid_sql(d: Dialect) -> &'static str {
+    match d {
+        Dialect::Postgres => "gen_random_uuid()::text", // v4, built in since Postgres 13
+        Dialect::Mysql => "UUID()",                     // v1
+        // v4 from 16 random bytes, with the version and variant nibbles set.
+        Dialect::Sqlite => {
+            "lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' \
+             || substr('89ab', 1 + abs(random()) % 4, 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))"
+        }
+    }
 }
 
 fn on_delete(c: &Column) -> &'static str {
@@ -492,6 +574,32 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
             Dialect::Mysql => vec![format!("DROP INDEX {} ON {}", q(name), q(table))],
             _ => vec![format!("DROP INDEX {}", q(name))],
         },
+        // A UUID column's existing rows each need their own UUID: one shared default would break a
+        // unique one (Django needs three hand-written migrations for this) and leave an `auto` one
+        // all-zero forever. Add it nullable, give every row its own UUID, then tighten it.
+        Op::AddColumn { table, column, .. } if column.ty == FieldType::Uuid && !column.null => {
+            let loose = Column { null: true, unique: false, ..column.clone() };
+            let (t, c) = (q(table), q(&column.name));
+            let mut sql =
+                vec![format!("ALTER TABLE {t} ADD COLUMN {}", col_def(d, &loose, None)), format!("UPDATE {t} SET {c} = {}", uuid_sql(d))];
+            match d {
+                Dialect::Postgres => {
+                    sql.push(format!("ALTER TABLE {t} ALTER COLUMN {c} SET NOT NULL"));
+                    if column.unique {
+                        sql.push(format!("ALTER TABLE {t} ADD UNIQUE ({c})"));
+                    }
+                }
+                Dialect::Mysql => sql.push(format!("ALTER TABLE {t} MODIFY {}", col_def(d, column, None))),
+                Dialect::Sqlite => {
+                    let old = &state[table];
+                    let (mut mid, mut new) = (old.columns.clone(), old.columns.clone());
+                    mid.push(loose);
+                    new.push(column.clone());
+                    sql.extend(sqlite_rebuild(table, &mid, &new, &old.indexes, &none));
+                }
+            }
+            sql
+        }
         Op::AddColumn { table, column, default } => {
             let defaults: BTreeMap<&str, &Value> = default.iter().map(|v| (column.name.as_str(), v)).collect();
             match d {
@@ -637,10 +745,53 @@ mod tests {
 
     #[test]
     fn builtin_migrations_match_framework_models() {
-        use crate::orm::Model;
-        let models =
-            [crate::auth::User::meta(), crate::auth::Session::meta(), crate::admin::LogEntry::meta(), crate::tasks::TaskRecord::meta()];
+        // Every table `App::new()` brings, so a new framework model can't skip this check.
+        let models = crate::App::new().models;
         assert_eq!(replay(&builtin()).unwrap(), model_state(&models), "add a new built-in migration file for this change");
+    }
+
+    #[test]
+    fn embedded_and_disk_migrations_merge_by_name() {
+        static FILES: [(&str, &str); 2] = [
+            ("20260101000000_a", r#"{"operations": [{"op": "sql", "sql": "-- embedded a"}]}"#),
+            ("20260102000000_b", r#"{"operations": [{"op": "sql", "sql": "-- embedded b"}]}"#),
+        ];
+        embed(&FILES);
+        let dir = std::env::temp_dir().join(format!("rangoli-embed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("20260102000000_b.json"), r#"{"operations": [{"op": "sql", "sql": "-- disk b"}]}"#).unwrap();
+        std::fs::write(dir.join("20260103000000_c.json"), r#"{"operations": [{"op": "sql", "sql": "-- disk c"}]}"#).unwrap();
+        let app: Vec<(String, String)> = load(&dir)
+            .unwrap()
+            .into_iter()
+            .skip(builtin().len())
+            .map(|m| {
+                (
+                    m.name,
+                    match &m.operations[0] {
+                        Op::Sql { sql } => sql.clone(),
+                        _ => unreachable!(),
+                    },
+                )
+            })
+            .collect();
+        let want = [("20260101000000_a", "-- embedded a"), ("20260102000000_b", "-- disk b"), ("20260103000000_c", "-- disk c")];
+        assert_eq!(app, want.map(|(n, s)| (n.to_string(), s.to_string())), "in name order; disk wins a clash");
+        assert_eq!(load(Path::new("/nonexistent/rangoli")).unwrap().len(), builtin().len() + 2, "no directory: embedded only");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_changes_that_reinterpret_stored_numbers() {
+        let state = |ty| -> State { [("shop".to_string(), Table { columns: vec![col("price", ty)], indexes: vec![] })].into() };
+        let alter = |ty| vec![Op::AlterColumn { table: "shop".into(), column: col("price", ty) }];
+        let err = refuse_reinterpreting(&state(FieldType::Decimal(2)), &alter(FieldType::Decimal(3))).unwrap_err().to_string();
+        assert!(err.contains("UPDATE shop SET price = price * 10"), "{err}");
+        let err = refuse_reinterpreting(&state(FieldType::Int), &alter(FieldType::Decimal(2))).unwrap_err().to_string();
+        assert!(err.contains("price * 100"), "{err}");
+        assert!(refuse_reinterpreting(&state(FieldType::DateTime), &alter(FieldType::Date)).is_err());
+        assert!(refuse_reinterpreting(&state(FieldType::Decimal(2)), &alter(FieldType::Decimal(2))).is_ok());
+        assert!(refuse_reinterpreting(&state(FieldType::Varchar(10)), &alter(FieldType::Varchar(20))).is_ok(), "widening text is fine");
     }
 
     #[test]

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block crumbs %}<span aria-hidden="true">›</span>AI agents{% endblock %}
+{% block content %}
+<p class="intro">Let Claude, Cursor or any assistant that speaks MCP read and update your data. It works as you, with your permissions, and every change it makes shows up in History as “via MCP”.</p>
+{% if token %}
+<p class="message success" role="status">Token “{{ name }}” created. Copy it now: it won't be shown again.</p>
+<section class="panel fields agent-setup">
+  <div class="field"><span class="field-label">Server address</span><div class="field-control"><code>{{ url }}</code></div></div>
+  <div class="field"><span class="field-label">Token</span><div class="field-control"><code>{{ token }}</code></div></div>
+  <div class="field"><span class="field-label">Claude Code</span><div class="field-control"><pre><code>claude mcp add --transport http {{ server }} {{ url }} --header "Authorization: Bearer {{ token }}"</code></pre></div></div>
+  <div class="field"><span class="field-label">Cursor</span><div class="field-control"><p class="help">Add to <code>.cursor/mcp.json</code>:</p><pre><code>{ "mcpServers": { "{{ server }}": { "url": "{{ url }}", "headers": { "Authorization": "Bearer {{ token }}" } } } }</code></pre></div></div>
+  <div class="field"><span class="field-label">Anything else</span><div class="field-control"><p class="help">Streamable HTTP at the address above, with the header <code>Authorization: Bearer &lt;token&gt;</code>.</p></div></div>
+</section>
+{% endif %}
+<form method="post" novalidate>
+  {% if error %}<p class="message error" role="alert">{{ error }}</p>{% endif %}
+  <fieldset class="panel fields">
+    <legend class="sr">Connect a new agent</legend>
+    <div class="field">
+      <label class="field-label required" for="id_name">Name</label>
+      <div class="field-control"><input type="text" name="name" id="id_name" maxlength="100" placeholder="Claude on my laptop" required><p class="help">So you can tell your agents apart later.</p></div>
+    </div>
+    <div class="field">
+      <label class="field-label" for="id_days">Stops working after</label>
+      <div class="field-control"><select name="days" id="id_days">
+        <option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option><option value="0">Never</option>
+      </select></div>
+    </div>
+  </fieldset>
+  <div class="submit-row"><button type="submit" class="btn primary">Connect an agent</button></div>
+</form>
+{% if tokens %}
+<table class="panel">
+  <caption>Your agents</caption>
+  <thead><tr><th scope="col">Name</th><th scope="col">Token starts with</th><th scope="col">Last used</th><th scope="col">Stops working</th></tr></thead>
+  <tbody>
+  {% for t in tokens %}<tr><th scope="row"><a href="/admin/rangoli_api_token/{{ t.id }}/">{{ t.name }}</a></th><td><code>{{ t.prefix }}</code></td><td>{{ t.used }}</td><td>{{ t.expires }}</td></tr>{% endfor %}
+  </tbody>
+</table>
+<p class="help">To disconnect an agent, open it and delete it.</p>
+{% endif %}
+{% endblock %}

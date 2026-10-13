@@ -42,7 +42,7 @@
         </select>
         {% else %}
         <input id="id_{{ f.name }}" name="{{ f.name }}"
-          {% if f.kind == "password" %}type="password" autocomplete="new-password"{% elif f.kind == "number" %}type="number" class="narrow" value="{{ f.value }}"{% elif f.kind == "float" %}type="number" step="any" class="narrow" value="{{ f.value }}"{% elif f.kind == "datetime" %}type="datetime-local" class="narrow" value="{{ f.value }}"{% else %}type="text" value="{{ f.value }}"{% endif %}
+          {% if f.kind == "password" %}type="password" autocomplete="new-password"{% elif f.kind == "number" %}type="number" class="narrow" value="{{ f.value }}"{% elif f.kind == "float" %}type="number" step="any" class="narrow" value="{{ f.value }}"{% elif f.kind == "datetime" %}type="datetime-local" class="narrow" value="{{ f.value }}"{% elif f.kind == "decimal" %}type="text" inputmode="decimal" class="narrow" value="{{ f.value }}"{% elif f.kind == "date" %}type="date" class="narrow" value="{{ f.value }}"{% else %}type="text" value="{{ f.value }}"{% endif %}
           {% if f.maxlength %}maxlength="{{ f.maxlength }}"{% endif %}{% if f.required %} required{% endif %}{% if f.error %} aria-invalid="true" aria-describedby="id_{{ f.name }}_error"{% endif %}>
         {% endif %}
         {% if f.error %}<p class="field-error" id="id_{{ f.name }}_error">{{ f.error }}</p>{% endif %}
@@ -55,7 +55,7 @@
   <div class="submit-row">
     <button type="submit" class="btn primary" name="_save" value="1">Save</button>
     <button type="submit" class="btn" name="_continue" value="1">Save and continue editing</button>
-    <button type="submit" class="btn" name="_addanother" value="1">Save and add another</button>
+    {% if can_add %}<button type="submit" class="btn" name="_addanother" value="1">Save and add another</button>{% endif %}
     {% if not is_add %}<a href="/admin/{{ table }}/{{ id }}/delete" class="btn danger-outline">Delete</a>{% endif %}
   </div>
 </form>

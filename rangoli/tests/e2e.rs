@@ -11,7 +11,7 @@ use rangoli::orm;
 use rangoli::orm::Choice;
 use rangoli::tasks::{self, Task, TaskRecord, TaskStatus};
 use rangoli::web::ModelForm;
-use rangoli::{migrate, App, Choices, DateTime, Error, Json, Model};
+use rangoli::{migrate, App, Choices, Date, DateTime, Decimal, Error, Json, Model, Uuid};
 use tower::ServiceExt;
 
 #[derive(Model, Clone, Debug, PartialEq)]
@@ -36,6 +36,17 @@ struct Post {
     #[field(fk = Author)]
     author_id: i64,
     rating: Option<f64>,
+}
+
+/// Owned rows for the per-object API permissions test.
+#[derive(Model, Clone, Debug)]
+#[model(table = "e2e_note", display = "title")]
+struct Note {
+    id: Option<i64>,
+    #[field(max_length = 100)]
+    title: String,
+    #[field(fk = rangoli::auth::User, cascade)]
+    owner_id: i64,
 }
 
 #[derive(Choices, Clone, Copy, Debug, PartialEq)]
@@ -73,6 +84,12 @@ struct PostV2 {
     #[field(auto_now)]
     updated_at: DateTime,
     publish_at: Option<DateTime>,
+    due: Option<Date>,
+    price: Decimal<2>, // non-null: existing rows get 0.00 when the column is added
+    #[field(auto, unique)]
+    public_id: Uuid, // added to a table with rows: each existing row needs its own
+    #[field(auto)]
+    trace_id: Uuid, // not unique, but existing rows still get their own, not all-zero
     #[field(choices, default = "draft")]
     status: Status,
     meta: Option<Json>,
@@ -132,6 +149,9 @@ async fn reset(db: &orm::Db) {
         "blog_post_tags",
         "blog_tag",
         "blog_post",
+        "e2e_note",
+        "rangoli_api_token",
+        "rangoli_login_failure",
         "rangoli_session",
         "rangoli_admin_log",
         "rangoli_task",
@@ -159,12 +179,13 @@ async fn full_stack() {
     let v1 = App::new().admin::<Author>().admin::<Post>();
     let file = migrate::make(&migrations, v1.models(), None).unwrap().expect("first migration");
     assert!(file.file_name().unwrap().to_str().unwrap().ends_with("_create_blog_author.json"));
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("rangoli_"), "framework tables come from built-in migrations, not yours");
     assert!(migrate::make(&migrations, v1.models(), None).unwrap().is_none(), "no changes the second time");
 
     let db = orm::connect(&url).await.unwrap();
     reset(db).await;
     let applied = migrate::run(&migrations).await.unwrap();
-    assert_eq!(applied.len(), 4, "three built-in + app: {applied:?}");
+    assert_eq!(applied.len(), migrate::builtin().len() + 1, "built-in + app: {applied:?}");
     assert!(migrate::run(&migrations).await.unwrap().is_empty());
 
     // ---- ORM
@@ -213,6 +234,36 @@ async fn full_stack() {
     assert_eq!(authors.len(), 2);
     assert_eq!(authors[&ada.id.unwrap()], ada);
 
+    // ---- foreign keys: forward, batch, reverse; query counts don't grow with the rows
+    let posts = Post::objects().order_by(Post::ID.asc()).all().await.unwrap();
+    assert_eq!(posts[0].author().await.unwrap(), ada, "post.author()");
+    let (by_id, queries) = orm::count_queries(Post::AUTHOR.load(&posts)).await;
+    let by_id = by_id.unwrap();
+    assert_eq!(queries, 1, "select_related: one query for {} posts", posts.len());
+    assert!(posts.iter().all(|p| by_id[&p.author_id].id == Some(p.author_id)));
+    assert_eq!(Post::AUTHOR.reverse(&ada).count().await.unwrap(), 2, "author.post_set");
+    let joined_q = || Post::objects().filter(Post::PUBLISHED.eq(true)).order_by(Post::ID.desc()).limit(2);
+    let (joined, queries) = orm::count_queries(joined_q().select_related(Post::AUTHOR)).await;
+    let joined = joined.unwrap();
+    assert_eq!(queries, 1, "select_related is one query (a JOIN)");
+    let plain = joined_q().all().await.unwrap();
+    assert_eq!(
+        joined.iter().map(|(p, _)| p.id).collect::<Vec<_>>(),
+        plain.iter().map(|p| p.id).collect::<Vec<_>>(),
+        "same rows, same order, same limit"
+    );
+    for (p, a) in &joined {
+        assert_eq!(a.as_ref(), Some(&by_id[&p.author_id]), "each with its author, as Fk::load finds it");
+    }
+    let everyone = Author::objects().all().await.unwrap();
+    let (per_author, queries) = orm::count_queries(Post::AUTHOR.prefetch_reverse(&everyone)).await;
+    let per_author = per_author.unwrap();
+    assert_eq!(queries, 1, "reverse prefetch: one query for {} authors", everyone.len());
+    for a in &everyone {
+        let one_by_one: Vec<_> = Post::AUTHOR.reverse(a).order_by(Post::ID.asc()).all().await.unwrap().into_iter().map(|p| p.id).collect();
+        assert_eq!(per_author[&a.id.unwrap()].iter().map(|p| p.id).collect::<Vec<_>>(), one_by_one, "prefetch matches per-object access");
+    }
+
     // ---- model forms
     let pairs = |kv: &[(&str, &str)]| kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
     let errs = ModelForm::<Author>::new().validate(&pairs(&[("name", "Form Author"), ("email", "")])).await.unwrap_err();
@@ -236,16 +287,34 @@ async fn full_stack() {
     let temp = |n: &str| Author { id: None, name: n.into(), email: format!("{n}@example.com") };
     let failed: rangoli::Result<()> = rangoli::atomic(async {
         temp("temp1").save_new().await?;
-        rangoli::atomic(async { temp("temp2").save_new().await }).await?; // nested joins the outer block
+        rangoli::atomic(async { temp("temp2").save_new().await }).await?; // a released savepoint
         assert_eq!(Author::objects().count().await?, before + 2, "writes are visible inside the transaction");
         Err(Error::NotFound)
     })
     .await;
-    assert!(matches!(failed, Err(Error::NotFound)));
+    assert!(matches!(failed, Err(Error::NotFound)), "{failed:?}");
     assert_eq!(Author::objects().count().await.unwrap(), before, "an Err rolls everything back");
     rangoli::atomic(async { temp("temp3").save_new().await }).await.unwrap();
     assert_eq!(Author::objects().filter(Author::NAME.eq("temp3")).count().await.unwrap(), 1, "an Ok commits");
     Author::objects().filter(Author::NAME.eq("temp3")).delete().await.unwrap();
+
+    // Savepoints: a failed nested block undoes only itself, even after a failed statement
+    // (which aborts the whole transaction on Postgres without one).
+    rangoli::atomic(async {
+        temp("keep").save_new().await?;
+        let inner = rangoli::atomic(async {
+            temp("gone").save_new().await?;
+            Author { id: None, name: "dup".into(), email: "ada@example.com".into() }.save_new().await
+        })
+        .await;
+        assert!(inner.unwrap_err().is_unique_violation());
+        temp("after").save_new().await // the transaction is still usable
+    })
+    .await
+    .unwrap();
+    let names = |n: &'static str| Author::objects().filter(Author::NAME.eq(n)).count();
+    assert_eq!((names("keep").await.unwrap(), names("gone").await.unwrap(), names("after").await.unwrap()), (1, 0, 1));
+    Author::objects().filter(Author::NAME.is_in(["keep".to_string(), "after".to_string()])).delete().await.unwrap();
 
     let dup = Author { id: None, name: "Copy".into(), email: "ada@example.com".into() }.save_new().await;
     assert!(dup.unwrap_err().is_unique_violation());
@@ -264,11 +333,21 @@ async fn full_stack() {
                 .list_filter([&PostV2::PUBLISHED, &PostV2::AUTHOR_ID, &PostV2::CREATED_AT, &PostV2::STATUS])
                 .ordering(PostV2::TITLE.asc())
                 .readonly_fields([&PostV2::VIEWS])
-                .list_per_page(2),
+                .list_per_page(2)
+                .action("publish", "Mark selected as published", |selected| async move {
+                    selected.update([PostV2::PUBLISHED.set(true)]).await.map(drop)
+                })
+                .action("explode", "Bump views, then fail", |selected| async move {
+                    selected.update([PostV2::VIEWS.set(123_456)]).await?;
+                    Err(Error::NotFound)
+                }),
         )
         .task::<Greet>()
+        .schedule("*/5 * * * *", Greet { name: "Beat".into() })
+        .schedule("*/5 * * * *", Greet { name: "Beat2".into() }) // same task and cron, other payload: its own schedule
         .task::<Flaky>()
         .task::<Explodes>()
+        .api::<Note>(Api::new().read(Access::Authenticated).write(Access::Public).owned_by(&Note::OWNER_ID))
         .api::<PostV2>(Api::new().read(Access::Public))
         .templates(dir.join("templates"))
         .static_files("/static", dir.join("static"))
@@ -287,6 +366,14 @@ async fn full_stack() {
     assert!(rows.iter().all(|p| p.status == Status::Draft && p.meta.is_none()), "existing rows get the model default");
     let made = DateTime::now().start_of_day();
     assert!(rows.iter().all(|p| p.created_at >= made), "existing rows get the time the migration was made, not the epoch");
+    let mut ids: Vec<Uuid> = rows.iter().map(|p| p.public_id).collect();
+    ids.sort();
+    ids.dedup();
+    assert!(ids.len() == 3 && !ids.contains(&Uuid::NIL), "a new unique UUID column gives every existing row its own: {ids:?}");
+    let mut traces: Vec<Uuid> = rows.iter().map(|p| p.trace_id).collect();
+    traces.sort();
+    traces.dedup();
+    assert!(traces.len() == 3 && !traces.contains(&Uuid::NIL), "so does a non-unique one (found by review): {traces:?}");
     let epoch = DateTime::from_unix(0);
     let mut long = PostV2 {
         id: None,
@@ -298,6 +385,10 @@ async fn full_stack() {
         created_at: epoch,
         updated_at: epoch,
         publish_at: DateTime::parse("2026-01-02T03:04"),
+        due: Date::parse("1969-07-20"), // before the epoch: stored negative
+        price: Decimal::parse("19.99").unwrap(),
+        public_id: Uuid::NIL, // `auto` fills it on insert
+        trace_id: Uuid::NIL,
         status: Status::Published,
         meta: Some(Json(serde_json::json!({ "source": "e2e", "tags": [1, 2] }))),
     };
@@ -318,6 +409,26 @@ async fn full_stack() {
     assert_eq!(PostV2::objects().filter(PostV2::PUBLISH_AT.gte(jan1)).count().await.unwrap(), 1, "datetimes compare in SQL");
     assert_eq!(PostV2::objects().filter(PostV2::PUBLISH_AT.lt(jan1)).count().await.unwrap(), 0);
     assert_eq!(PostV2::objects().filter(PostV2::PUBLISH_AT.is_null()).count().await.unwrap(), 3);
+    assert_eq!(fresh.due.unwrap().to_string(), "1969-07-20", "dates round-trip");
+    assert_eq!(fresh.price.to_string(), "19.99", "decimals round-trip exactly");
+    assert_eq!((fresh.public_id, fresh.public_id.version()), (long.public_id, 7), "auto fills a v7 UUID on insert");
+    assert_eq!(PostV2::objects().filter(PostV2::PUBLIC_ID.eq(long.public_id)).get().await.unwrap().id, long.id, "lookup by UUID");
+    let chosen = Uuid::new_v4();
+    let mut own = PostV2 { id: None, public_id: chosen, title: "own id".into(), ..fresh.clone() };
+    own.save().await.unwrap();
+    assert_eq!(PostV2::get(own.id.unwrap()).await.unwrap().public_id, chosen, "a UUID set by the caller is kept");
+    let mut dup = PostV2 { id: None, title: "dup id".into(), ..own.clone() };
+    assert!(dup.save().await.unwrap_err().is_unique_violation(), "the UUID column is unique");
+    own.delete().await.unwrap();
+    let cents = |s: &str| Decimal::<2>::parse(s).unwrap();
+    assert_eq!(PostV2::objects().filter(PostV2::PRICE.eq(cents("19.99"))).count().await.unwrap(), 1, "exact equality in SQL");
+    assert_eq!(PostV2::objects().filter(PostV2::PRICE.gt(cents("19.98"))).count().await.unwrap(), 1, "one cent apart compares");
+    assert_eq!(PostV2::objects().filter(PostV2::PRICE.eq(cents("0"))).count().await.unwrap(), 3, "existing rows got 0.00");
+    assert_eq!(
+        PostV2::objects().filter(PostV2::DUE.lt(Date::from_ymd(1970, 1, 1).unwrap())).count().await.unwrap(),
+        1,
+        "dates compare in SQL"
+    );
     assert!(migrate::make(&migrations, v2.models(), None).unwrap().is_none(), "indexes and join tables round-trip");
 
     // ---- choices and JSON
@@ -482,15 +593,19 @@ async fn full_stack() {
     let post_url = format!("/admin/blog_post/{}/", long.id.unwrap());
     let (_, _, body) = send(get(&post_url, &cookie)).await;
     assert!(body.contains("<div class=\"readonly\">7</div>") && !body.contains("name=\"views\""), "read-only field");
+    assert!(body.contains(r#"type="date" class="narrow" value="1969-07-20""#), "a native date picker");
+    assert!(body.contains(r#"inputmode="decimal" class="narrow" value="19.99""#), "a decimal input");
     let (status, _, body) =
-        send(form(&post_url, &cookie, &format!("title=x&body=b&author_id={}&status=bogus&meta=%7Bnope", alan.id.unwrap()))).await;
+        send(form(&post_url, &cookie, &format!("title=x&body=b&author_id={}&status=bogus&meta=%7Bnope&price=1.234", alan.id.unwrap())))
+            .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body.contains("Select a valid choice. bogus is not one of the available choices."), "choices are validated");
     assert!(body.contains("Enter valid JSON"), "JSON is validated");
+    assert!(body.contains("Enter a number with at most 2 decimal places."), "decimal places are validated");
     let (_, _, body) = send(get("/admin/blog_post/add", &cookie)).await;
     assert!(body.contains("<option value=\"draft\" selected>Draft</option>"), "new forms start from the default");
     let edit = format!(
-        "title=Long&body=b&published=on&author_id={}&views=999&tags={}&tags={}&status=published&meta=%7B%22a%22%3A1%7D",
+        "title=Long&body=b&published=on&author_id={}&views=999&tags={}&tags={}&status=published&meta=%7B%22a%22%3A1%7D&due=1969-07-20&price=19.99",
         alan.id.unwrap(),
         rust.id.unwrap(),
         web.id.unwrap()
@@ -504,6 +619,30 @@ async fn full_stack() {
     assert_eq!(PostV2::get(long.id.unwrap()).await.unwrap().meta, Some(Json(serde_json::json!({ "a": 1 }))));
     let (_, _, body) = send(get("/admin/blog_post/?f.status=old", &cookie)).await;
     assert!(body.contains("By status") && body.contains("Archived for good") && body.contains("0 results of"), "choice filter");
+
+    // ---- custom admin actions
+    let (_, _, body) = send(get("/admin/blog_post/", &cookie)).await;
+    assert!(body.contains(r#"<option value="publish">Mark selected as published</option>"#), "custom actions in the menu");
+    let drafts: Vec<i64> =
+        PostV2::objects().order_by(PostV2::ID.asc()).limit(2).all().await.unwrap().iter().map(|p| p.id.unwrap()).collect();
+    PostV2::objects().filter(PostV2::ID.is_in(drafts.clone())).update([PostV2::PUBLISHED.set(false)]).await.unwrap();
+    let picked = format!("action=publish&_selected_action={}&_selected_action={}", drafts[0], drafts[1]);
+    let (status, headers, _) = send(form("/admin/blog_post/", &cookie, &picked)).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (_, _, body) = send(get(headers[header::LOCATION].to_str().unwrap(), &cookie)).await;
+    assert!(body.contains("Applied “Mark selected as published” to 2 post v2s."), "the admin reports what happened");
+    assert!(PostV2::get(drafts[0]).await.unwrap().published && PostV2::get(drafts[1]).await.unwrap().published);
+    let (_, _, body) = send(get(&format!("/admin/blog_post/{}/history", drafts[0]), &cookie)).await;
+    assert!(body.contains("Ran the “Mark selected as published” action."), "each row's history records the action");
+    let views_before = PostV2::get(drafts[0]).await.unwrap().views;
+    let (_, headers, _) = send(form("/admin/blog_post/", &cookie, &format!("action=explode&_selected_action={}", drafts[0]))).await;
+    let (_, _, body) = send(get(headers[header::LOCATION].to_str().unwrap(), &cookie)).await;
+    assert!(body.contains("The “Bump views, then fail” action failed, so nothing was changed."));
+    assert_eq!(PostV2::get(drafts[0]).await.unwrap().views, views_before, "a failing action is rolled back");
+    let (_, _, body) = send(get("/admin/blog_post/?applied=Your+account+is+locked&n=1", &cookie)).await;
+    assert!(!body.contains("account is locked") && !body.contains("Applied"), "a crafted link can't inject a message");
+    let (_, headers, _) = send(form("/admin/blog_post/", &cookie, &format!("action=nope&_selected_action={}", drafts[0]))).await;
+    assert!(headers[header::LOCATION].to_str().unwrap().ends_with("warn=noaction"), "unknown actions do nothing");
 
     let (_, _, body) = send(get("/admin/blog_post/?f.created_at=today", &cookie)).await;
     assert!(body.contains("By created at") && body.contains("Past 7 days") && body.contains("4 results of"), "date filter");
@@ -582,22 +721,44 @@ async fn full_stack() {
     assert_eq!((status, json(&body)["detail"].as_str()), (StatusCode::NOT_FOUND, Some("Not found.")));
 
     let new_post = format!(
-        r#"{{"title": "From the API", "body": "b", "author_id": {}, "views": 1, "publish_at": "2026-05-01T10:00:00Z"}}"#,
+        r#"{{"title": "From the API", "body": "b", "author_id": {}, "views": 1, "publish_at": "2026-05-01T10:00:00Z", "due": "2028-02-29", "price": "0.1"}}"#,
         alan.id.unwrap()
     );
     assert_eq!(send(api("POST", "/api/blog_post/", "", &new_post)).await.0, StatusCode::UNAUTHORIZED, "writes need staff");
-    let (status, _, body) = send(api("POST", "/api/blog_post/", &cookie, r#"{"title": "", "views": "many", "bogus": 1}"#)).await;
+    let (status, _, body) = send(api(
+        "POST",
+        "/api/blog_post/",
+        &cookie,
+        r#"{"title": "", "views": "many", "bogus": 1, "due": "2027-02-29", "price": "1.005"}"#,
+    ))
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let errs = json(&body);
     assert_eq!(errs["title"][0], "This field may not be blank.");
     assert_eq!(errs["views"][0], "A valid integer is required.");
     assert_eq!(errs["author_id"][0], "This field is required.");
     assert_eq!(errs["bogus"][0], "Unknown field.");
+    assert_eq!(errs["due"][0], "Date has wrong format. Use YYYY-MM-DD.", "2027 is not a leap year");
+    assert_eq!(errs["price"][0], "A valid number with at most 2 decimal places is required.", "no silent rounding");
     let (status, _, body) = send(api("POST", "/api/blog_post/", &cookie, &new_post)).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let created = json(&body);
     let new_id = created["id"].as_i64().unwrap();
     assert_eq!(created["publish_at"], "2026-05-01T10:00:00Z");
+    assert_eq!(created["due"], "2028-02-29");
+    assert_eq!(created["price"], "0.10", "a decimal string in, an exact string out (like DRF)");
+    let float = new_post.replace(r#""price": "0.1""#, r#""price": 0.1"#);
+    let (status, _, body) = send(api("POST", "/api/blog_post/", &cookie, &float)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a fractional JSON number is a float, so it's refused: {body}");
+    let public_id = created["public_id"].as_str().and_then(Uuid::parse).expect("API objects carry their UUID");
+    let (_, _, body) = send(get(&format!("/api/blog_post/?public_id={public_id}"), "")).await;
+    assert_eq!(json(&body)["count"], 1, "filter by UUID");
+    let (status, _, body) = send(get("/api/blog_post/?public_id=not-a-uuid", "")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a malformed UUID filter is a 400: {body}");
+    let (_, _, body) = send(get("/api/blog_post/?price=0.1", "")).await;
+    assert_eq!(json(&body)["count"], 1, "filter by decimal");
+    let (_, _, body) = send(get("/api/blog_post/?due=2028-02-29", "")).await;
+    assert_eq!(json(&body)["count"], 1, "filter by date");
     assert_eq!(created["tags"], serde_json::json!([]));
     assert_eq!(created["status"], "draft", "missing fields take the model default");
     let bad = format!(r#"{{"title": "t", "body": "b", "author_id": {}, "views": 0, "status": "nope"}}"#, alan.id.unwrap());
@@ -627,7 +788,7 @@ async fn full_stack() {
         send(api("POST", "/api/blog_post/", &cookie, r#"{"title": "a\u0000b", "body": "b", "author_id": 1, "views": 0}"#)).await;
     assert_eq!((status, json(&body)["title"][0].as_str()), (StatusCode::BAD_REQUEST, Some("Null characters are not allowed.")));
     assert_eq!(send(get("/api/blog_post/?title=a%00b", "")).await.0, StatusCode::BAD_REQUEST, "NUL in an exact filter is a 400");
-    let orphan = r#"{"title": "x", "body": "b", "author_id": 424242, "views": 0}"#;
+    let orphan = r#"{"title": "x", "body": "b", "author_id": 424242, "views": 0, "price": "1"}"#;
     let (status, _, body) = send(api("POST", "/api/blog_post/", &cookie, orphan)).await;
     assert!(status == StatusCode::BAD_REQUEST && body.contains("non_field_errors"), "foreign key errors are 400s: {body}");
     assert_eq!(send(api("DELETE", &format!("/api/blog_post/{new_id}"), &cookie, "")).await.0, StatusCode::NO_CONTENT);
@@ -640,12 +801,287 @@ async fn full_stack() {
     assert_eq!(send(api("POST", "/api/blog_author/", &cookie, "{}")).await.0, StatusCode::METHOD_NOT_ALLOWED, "write(Access::Nobody)");
     assert_eq!(send(get("/api/rangoli_user/", &cookie)).await.0, StatusCode::NOT_FOUND, "only exposed models are served");
 
+    // ---- API tokens: what a script or mobile app uses (no cookie, no browser headers)
+    use rangoli::auth::{self, ApiToken};
+    let bearer = |method: &str, uri: &str, token: &str, body: &str| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let root = auth::User::objects().filter(auth::User::USERNAME.eq("root")).get().await.unwrap();
+    let (row, token) = auth::create_token(&root, "deploy bot", None).await.unwrap();
+    assert!(token.starts_with("rgl_") && token.len() == 44 && row.prefix == token[..12]);
+    let stored = serde_json::to_string(&ApiToken::objects().all().await.unwrap().iter().map(|t| t.values()).collect::<Vec<_>>()).unwrap();
+    assert!(!stored.contains(&token[4..]), "the token itself is never stored, only its hash");
+    let mut by_token = new_post.replace("From the API", "By token");
+    by_token = by_token.replace(r#""price": "0.1""#, r#""price": "2.50""#);
+    let (status, _, body) = send(bearer("POST", "/api/blog_post/", &token, &by_token)).await;
+    assert_eq!(status, StatusCode::CREATED, "a staff token can write without a session: {body}");
+    let made = json(&body)["id"].as_i64().unwrap();
+    assert_eq!(send(bearer("GET", "/api/blog_author/", &token, "")).await.0, StatusCode::OK, "and read authenticated-only models");
+    let (status, headers, body) = send(bearer("GET", "/api/blog_post/", "rgl_0000000000000000000000000000000000000000", "")).await;
+    assert_eq!((status, json(&body)["detail"].as_str()), (StatusCode::UNAUTHORIZED, Some("Invalid token.")), "a wrong token is a 401");
+    assert_eq!(headers[header::WWW_AUTHENTICATE], "Bearer");
+    assert_eq!(
+        send(bearer("GET", "/api/blog_post/", "rgl_garbage", "")).await.0,
+        StatusCode::UNAUTHORIZED,
+        "even on public endpoints, like DRF"
+    );
+    assert_eq!(
+        send(bearer("GET", "/api/blog_post/", "eyJhbGciOi.app-own-jwt", "")).await.0,
+        StatusCode::OK,
+        "other bearer schemes pass through to the app"
+    );
+    let used = ApiToken::get(row.id.unwrap()).await.unwrap().last_used_at;
+    assert!(used.is_some(), "last_used_at is recorded");
+    let (_, queries) = orm::count_queries(auth::token_user(&token)).await;
+    assert_eq!(queries, 2, "within a minute of the last use, checking a token writes nothing (token + user lookups)");
+    let (_, short) = auth::create_token(&root, "expired", Some(std::time::Duration::ZERO)).await.unwrap();
+    assert_eq!(send(bearer("GET", "/api/blog_post/", &short, "")).await.0, StatusCode::UNAUTHORIZED, "expired tokens stop working");
+    let (_, other) = auth::create_token(&root, "to revoke", None).await.unwrap();
+    assert_eq!(send(bearer("GET", "/api/blog_author/", &other, "")).await.0, StatusCode::OK);
+    ApiToken::objects().filter(ApiToken::NAME.eq("to revoke")).delete().await.unwrap();
+    assert_eq!(send(bearer("GET", "/api/blog_author/", &other, "")).await.0, StatusCode::UNAUTHORIZED, "deleting the row revokes it");
+    let mut plain = auth::create_user("plain", "correct horse", false).await.unwrap();
+    let (_, weak) = auth::create_token(&plain, "weak", None).await.unwrap();
+    assert_eq!(
+        send(bearer("DELETE", &format!("/api/blog_post/{made}"), &weak, "")).await.0,
+        StatusCode::FORBIDDEN,
+        "a token has its user's rights"
+    );
+    plain.is_active = false;
+    plain.save().await.unwrap();
+    assert_eq!(
+        send(bearer("GET", "/api/blog_author/", &weak, "")).await.0,
+        StatusCode::UNAUTHORIZED,
+        "deactivating the user disables their tokens"
+    );
+    assert_eq!(send(bearer("DELETE", &format!("/api/blog_post/{made}"), &token, "")).await.0, StatusCode::NO_CONTENT);
+
+    // ---- login lockout: counted in the database, so every instance shares it
+    use rangoli::auth::LoginFailure;
+    auth::create_user("victim", "correct horse", false).await.unwrap();
+    for _ in 0..5 {
+        assert!(auth::authenticate("victim", "wrong").await.unwrap().is_none());
+    }
+    assert!(
+        matches!(auth::authenticate("victim", "correct horse").await, Err(Error::Locked)),
+        "locked after 5, even with the right password"
+    );
+    let fails = LoginFailure::objects().filter(LoginFailure::USERNAME.eq("victim")).get().await.unwrap();
+    assert_eq!(fails.failures, 6, "the count is a database row (5 failures, then the refused attempt)");
+    let (status, _, body) = send(form("/admin/login", "", "username=victim&password=correct+horse")).await;
+    assert!(status != StatusCode::SEE_OTHER && body.contains("too many failed logins"), "the login page says so");
+    LoginFailure::objects().filter(LoginFailure::USERNAME.eq("victim")).update([LoginFailure::LOCKED_UNTIL.set(0)]).await.unwrap();
+    assert!(auth::authenticate("victim", "correct horse").await.unwrap().is_some(), "the lock lifts when its window ends");
+    assert_eq!(LoginFailure::objects().filter(LoginFailure::USERNAME.eq("victim")).count().await.unwrap(), 0, "and success clears it");
+    // A burst of 50 parallel guesses, as from many instances: each attempt is counted before its
+    // password is checked, so at most 5 ever reach the check. (Counting after the check let all 50 through.)
+    auth::create_user("burst", "correct horse", false).await.unwrap();
+    let racers: Vec<_> = (0..50).map(|_| tokio::spawn(async { auth::authenticate("burst", "wrong").await })).collect();
+    let mut checked = 0;
+    for r in racers {
+        match r.await.unwrap() {
+            Ok(None) => checked += 1,
+            Err(Error::Locked) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(checked <= 5, "only 5 of 50 parallel guesses reach the password check, got {checked}");
+    let fails = LoginFailure::objects().filter(LoginFailure::USERNAME.eq("burst")).get().await.unwrap();
+    assert_eq!(fails.failures, 50, "no lost updates: every attempt is counted");
+    assert!(matches!(auth::authenticate("burst", "correct horse").await, Err(Error::Locked)), "the right password is refused too");
+    for _ in 0..6 {
+        let _ = auth::authenticate("nobody-by-this-name", "x").await;
+    }
+    assert!(matches!(auth::authenticate("nobody-by-this-name", "x").await, Err(Error::Locked)), "unknown usernames lock like real ones");
+    let long = "x".repeat(400); // longer than any username column (found by the fuzzer: a 500 on Postgres and MySQL)
+    assert!(auth::authenticate(&long, "x").await.unwrap().is_none(), "an over-long username is a plain failure");
+
+    // ---- per-object permissions: owned_by
+    let alice = auth::create_user("alice", "correct horse", false).await.unwrap();
+    let bob = auth::create_user("bob", "correct horse", false).await.unwrap();
+    let (_, at) = auth::create_token(&alice, "a", None).await.unwrap();
+    let (_, bt) = auth::create_token(&bob, "b", None).await.unwrap();
+    let (aid, bid) = (alice.id.unwrap(), bob.id.unwrap());
+    let (status, _, body) = send(bearer("POST", "/api/e2e_note/", &at, &format!(r#"{{"title": "a1", "owner_id": {bid}}}"#))).await;
+    assert_eq!((status, json(&body)["owner_id"].as_i64()), (StatusCode::CREATED, Some(aid)), "a forged owner is overwritten");
+    let a1 = json(&body)["id"].as_i64().unwrap();
+    let (_, _, body) = send(bearer("POST", "/api/e2e_note/", &bt, r#"{"title": "b1"}"#)).await;
+    let b1 = json(&body)["id"].as_i64().unwrap();
+    assert_eq!(json(&body)["owner_id"], bid, "the owner is filled in");
+    let (_, _, body) = send(bearer("GET", "/api/e2e_note/", &at, "")).await;
+    assert_eq!((json(&body)["count"].as_i64(), json(&body)["results"][0]["id"].as_i64()), (Some(1), Some(a1)), "lists show only your rows");
+    let (_, _, body) = send(bearer("GET", &format!("/api/e2e_note/?owner_id={bid}"), &at, "")).await;
+    assert_eq!(json(&body)["count"], 0, "filters can't widen the scope");
+    for (method, body) in [("GET", ""), ("PATCH", r#"{"title": "mine now"}"#), ("PUT", r#"{"title": "mine now"}"#), ("DELETE", "")] {
+        let status = send(bearer(method, &format!("/api/e2e_note/{b1}"), &at, body)).await.0;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} on someone else's row is a 404, like a row that doesn't exist");
+    }
+    let still = Note::get(b1).await.unwrap();
+    assert_eq!((still.title.as_str(), still.owner_id), ("b1", bid), "and nothing changed");
+    let (_, _, body) = send(bearer("PATCH", &format!("/api/e2e_note/{a1}"), &at, &format!(r#"{{"owner_id": {bid}}}"#))).await;
+    assert_eq!(json(&body)["owner_id"], aid, "you can't give a row away to someone else");
+    assert_eq!(send(get("/api/e2e_note/", "")).await.0, StatusCode::UNAUTHORIZED);
+    let forged = format!(r#"{{"title": "forged", "owner_id": {aid}}}"#);
+    assert_eq!(
+        send(api("POST", "/api/e2e_note/", "", &forged)).await.0,
+        StatusCode::UNAUTHORIZED,
+        "anonymous can't create owned rows, even with write(Public)"
+    );
+    let wrong = std::panic::catch_unwind(|| Api::<Post>::new().owned_by(&Post::AUTHOR_ID));
+    assert!(wrong.is_err(), "owned_by on a column that isn't a user foreign key stops the app at startup");
+    let (_, _, body) = send(bearer("GET", "/api/e2e_note/", &token, "")).await;
+    assert_eq!(json(&body)["count"], 2, "staff see every row");
+    let (_, _, body) = send(bearer("PATCH", &format!("/api/e2e_note/{b1}"), &token, &format!(r#"{{"owner_id": {aid}}}"#))).await;
+    assert_eq!(json(&body)["owner_id"], aid, "staff can reassign");
+    assert_eq!(send(bearer("DELETE", &format!("/api/e2e_note/{b1}"), &at, "")).await.0, StatusCode::NO_CONTENT, "it's alice's now");
+
+    // ---- MCP: AI agents use the same API, as a token's user, through tools
+    let rpc = |method: &str, params: serde_json::Value| {
+        serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }).to_string()
+    };
+    let (status, _, body) = send(bearer(
+        "POST",
+        "/mcp",
+        &token,
+        &rpc(
+            "initialize",
+            serde_json::json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "1" } }),
+        ),
+    ))
+    .await;
+    assert_eq!((status, json(&body)["result"]["protocolVersion"].as_str()), (StatusCode::OK, Some("2025-06-18")), "{body}");
+    assert_eq!(json(&body)["result"]["serverInfo"]["name"], "rangoli");
+    let note = serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string();
+    assert_eq!(send(bearer("POST", "/mcp", &token, &note)).await.0, StatusCode::ACCEPTED, "notifications get 202, no body");
+    let names = |body: &str| -> Vec<String> {
+        json(body)["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+    };
+    let (_, _, body) = send(api("POST", "/mcp", "", &rpc("tools/list", serde_json::json!({})))).await;
+    let anon = names(&body);
+    assert!(
+        anon.contains(&"blog_post_list".to_string()) && !anon.contains(&"blog_post_create".to_string()),
+        "anonymous agents get the public read tools only: {anon:?}"
+    );
+    assert!(!anon.iter().any(|n| n.starts_with("e2e_note")), "and nothing they can't use");
+    let (_, _, body) = send(bearer("POST", "/mcp", &token, &rpc("tools/list", serde_json::json!({})))).await;
+    let staff_tools = names(&body);
+    assert!(
+        ["blog_post_create", "blog_post_update", "blog_post_delete", "e2e_note_list"].iter().all(|t| staff_tools.contains(&t.to_string())),
+        "{staff_tools:?}"
+    );
+    let create_tool = json(&body)["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "blog_post_create").unwrap().clone();
+    assert_eq!(create_tool["inputSchema"]["properties"]["price"]["format"], "decimal", "tool schemas come from the model");
+    assert_eq!(create_tool["inputSchema"]["properties"]["public_id"], serde_json::Value::Null, "auto fields aren't inputs");
+    let call = |name: &str, args: serde_json::Value| rpc("tools/call", serde_json::json!({ "name": name, "arguments": args }));
+    let args =
+        serde_json::json!({ "title": "Written by an agent", "body": "b", "author_id": alan.id.unwrap(), "views": 0, "price": "4.20" });
+    let (_, _, body) = send(bearer("POST", "/mcp", &token, &call("blog_post_create", args))).await;
+    let result = &json(&body)["result"];
+    assert_eq!(result["isError"], false, "{body}");
+    let agent_post = result["structuredContent"]["id"].as_i64().unwrap();
+    assert_eq!(result["structuredContent"]["price"], "4.20");
+    let (_, _, body) =
+        send(bearer("POST", "/mcp", &token, &call("blog_post_update", serde_json::json!({ "id": agent_post, "views": 9 })))).await;
+    assert_eq!(json(&body)["result"]["structuredContent"]["views"], 9);
+    let (_, _, body) =
+        send(bearer("POST", "/mcp", &token, &call("blog_post_list", serde_json::json!({ "search": "Written by an agent" })))).await;
+    assert_eq!(json(&body)["result"]["structuredContent"]["count"], 1);
+    let (_, _, body) = send(bearer("POST", "/mcp", &token, &call("blog_post_create", serde_json::json!({ "title": "" })))).await;
+    let bad = &json(&body)["result"];
+    assert!(
+        bad["isError"] == true && bad["structuredContent"]["error"]["title"][0] == "This field may not be blank.",
+        "validation errors reach the agent: {body}"
+    );
+    let (_, _, history) = send(get(&format!("/admin/blog_post/{agent_post}/history"), &cookie)).await;
+    assert!(history.contains("Added via MCP.") && history.contains("Changed via MCP."), "every agent change is in the admin History");
+    let (_, _, body) = send(bearer("POST", "/mcp", &token, &call("blog_post_delete", serde_json::json!({ "id": agent_post })))).await;
+    assert_eq!(json(&body)["result"]["structuredContent"]["deleted"], true);
+    let deleted = orm::count_queries(async {
+        rangoli::admin::LogEntry::objects()
+            .filter(rangoli::admin::LogEntry::OBJECT_ID.eq(agent_post) & rangoli::admin::LogEntry::ACTION.eq(3))
+            .count()
+            .await
+            .unwrap()
+    })
+    .await
+    .0;
+    assert_eq!(deleted, 1, "deletes are logged too");
+    // owned_by holds for agents: alice's agent sees and changes only alice's notes.
+    let (_, _, body) = send(bearer("POST", "/mcp", &at, &call("e2e_note_list", serde_json::json!({})))).await;
+    let mine = &json(&body)["result"]["structuredContent"];
+    assert!(mine["results"].as_array().unwrap().iter().all(|n| n["owner_id"] == aid), "{mine}");
+    let (_, _, body) = send(bearer("POST", "/mcp", &bt, &call("e2e_note_delete", serde_json::json!({ "id": a1 })))).await;
+    assert_eq!(
+        (json(&body)["result"]["isError"].as_bool(), json(&body)["result"]["structuredContent"]["status"].as_i64()),
+        (Some(true), Some(404)),
+        "bob's agent can't touch alice's note"
+    );
+    let (_, _, body) = send(bearer("POST", "/mcp", &token, &call("nope_list", serde_json::json!({})))).await;
+    assert_eq!(json(&body)["error"]["code"], -32602, "unknown tools are a JSON-RPC error");
+    let (_, _, body) = send(bearer("POST", "/mcp", &token, &rpc("bogus/method", serde_json::json!({})))).await;
+    assert_eq!(json(&body)["error"]["code"], -32601);
+
+    // ---- the admin's "Connect an AI agent" page: a token shown once, with client setup
+    let (status, _, page) = send(get("/admin/agents/", &cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, _, home) = send(get("/admin/", &cookie)).await;
+    assert!(home.contains("/admin/agents/"), "the dashboard links to it");
+    let (status, _, page2) = send(form("/admin/agents/", &cookie, "name=Claude+on+my+laptop&days=30")).await;
+    assert_eq!(status, StatusCode::OK);
+    let shown: String = page2.split("rgl_").nth(1).map(|t| format!("rgl_{}", &t[..40])).expect("token on the page");
+    assert!(
+        page2.contains("claude mcp add --transport http") && page2.contains("/mcp") && page2.contains("mcpServers"),
+        "setup for Claude Code and Cursor"
+    );
+    assert!(!page.contains(&shown), "a token appears only on the page that created it");
+    let (_, _, body) = send(bearer("POST", "/mcp", &shown, &rpc("tools/list", serde_json::json!({})))).await;
+    assert!(names(&body).contains(&"blog_post_create".to_string()), "and it works for an agent at once");
+    assert_eq!(send(form("/admin/agents/", &cookie, "name=")).await.1.get(header::LOCATION), None, "a name is required");
+    let (_, _, again) = send(get("/admin/agents/", &cookie)).await;
+    assert!(again.contains("Claude on my laptop") && !again.contains(&shown), "listed afterwards by name, never by token");
+    assert_eq!(send(get("/admin/agents/", "")).await.0, StatusCode::SEE_OTHER, "staff only");
+
+    // Tokens in the admin: listed and revocable, never created there (the plaintext couldn't be shown).
+    let (status, _, body) = send(get("/admin/rangoli_api_token/", &cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("deploy bot") && body.contains(&row.prefix), "tokens are listed by name and prefix");
+    assert!(!body.contains("/admin/rangoli_api_token/add"), "no Add button or sidebar link");
+    assert_eq!(send(get("/admin/rangoli_api_token/add", &cookie)).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(
+        send(form("/admin/rangoli_api_token/add", &cookie, "name=x")).await.0,
+        StatusCode::FORBIDDEN,
+        "no_add() is enforced, not just hidden"
+    );
+    let (_, _, index) = send(get("/admin/", &cookie)).await;
+    assert!(index.contains("/admin/blog_author/add") && !index.contains("/admin/rangoli_api_token/add"));
+    let token_url = format!("/admin/rangoli_api_token/{}/", row.id.unwrap());
+    let (_, _, page) = send(get(&token_url, &cookie)).await;
+    assert!(!page.contains("_addanother") && !page.contains(r#"name="key_hash""#), "hash is read-only, no add-another");
+    let (status, _, _) = send(form(&token_url, &cookie, "name=deploy+bot&expires_at=2001-01-01T00%3A00&key_hash=forged")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(ApiToken::get(row.id.unwrap()).await.unwrap().key_hash, row.key_hash, "posted read-only fields are ignored");
+    assert_eq!(
+        send(bearer("GET", "/api/blog_author/", &token, "")).await.0,
+        StatusCode::UNAUTHORIZED,
+        "an expiry set in the admin revokes it"
+    );
+
     let (_, _, body) = send(get("/api/schema.json", "")).await;
     let schema = json(&body);
     assert_eq!(schema["openapi"], "3.0.3");
     assert!(schema["paths"]["/api/blog_post/{id}"]["patch"].is_object());
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["publish_at"]["format"], "date-time");
+    assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["due"]["format"], "date");
+    assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["price"]["format"], "decimal");
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["created_at"]["readOnly"], true);
+    let uuid_schema = &schema["components"]["schemas"]["PostV2"]["properties"]["public_id"];
+    assert_eq!((uuid_schema["format"].as_str(), uuid_schema["readOnly"].as_bool()), (Some("uuid"), Some(true)));
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["tags"]["type"], "array");
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["status"]["enum"], serde_json::json!(["draft", "published", "old"]));
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["status"]["default"], "draft");
@@ -698,6 +1134,37 @@ async fn full_stack() {
     assert!(
         body.contains("Select task record to change") && body.contains("2 results of") && body.contains("By status"),
         "tasks in the admin"
+    );
+
+    // ---- schedules: 20 workers, each with its own memory (as if separate servers), see one tick
+    let tick = DateTime::parse("2030-01-01T00:05").unwrap();
+    let racers: Vec<_> =
+        (0..20).map(|_| tokio::spawn(async move { tasks::queue_schedules(tick, &mut Default::default()).await.unwrap() })).collect();
+    let mut queued = 0;
+    for r in racers {
+        queued += r.await.unwrap();
+    }
+    assert_eq!(queued, 2, "twenty racing workers queue each schedule's tick exactly once (two schedules)");
+    let ticks = TaskRecord::objects().filter(TaskRecord::DEDUP.is_not_null()).count().await.unwrap();
+    assert_eq!(ticks, 2);
+    let later = DateTime::from_unix(tick.unix() + 3 * 60);
+    assert_eq!(
+        tasks::queue_schedules(later, &mut Default::default()).await.unwrap(),
+        0,
+        "a worker starting minutes later doesn't requeue it"
+    );
+    tasks::run_due_at(later, 10).await.unwrap();
+    assert_eq!(GREETED.lock().unwrap().iter().filter(|n| *n == "Beat").count(), 1, "and it runs once");
+    assert_eq!(GREETED.lock().unwrap().iter().filter(|n| *n == "Beat2").count(), 1, "a second payload on the same cron runs too");
+    let next = DateTime::from_unix(tick.unix() + 5 * 60);
+    assert_eq!(tasks::queue_schedules(next, &mut Default::default()).await.unwrap(), 2, "the next tick is queued (both schedules)");
+    let stale = DateTime::from_unix(tick.unix() + 5 * 60 + 11 * 60 + 30);
+    let missed = TaskRecord::objects().filter(TaskRecord::DEDUP.is_not_null()).count().await.unwrap();
+    tasks::queue_schedules(stale, &mut Default::default()).await.unwrap();
+    assert_eq!(
+        TaskRecord::objects().filter(TaskRecord::DEDUP.is_not_null()).count().await.unwrap(),
+        missed + 2,
+        "only the latest tick catches up"
     );
 
     // Password change, then log in with the new password.

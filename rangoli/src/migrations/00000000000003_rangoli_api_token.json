@@ -1,0 +1,17 @@
+{
+  "operations": [
+    {
+      "op": "create_table",
+      "table": "rangoli_api_token",
+      "columns": [
+        { "name": "name", "type": { "varchar": 100 } },
+        { "name": "prefix", "type": { "varchar": 12 } },
+        { "name": "key_hash", "type": { "varchar": 64 }, "unique": true },
+        { "name": "user_id", "type": "int", "fk": "rangoli_user", "cascade": true },
+        { "name": "created_at", "type": "date_time" },
+        { "name": "last_used_at", "type": "date_time", "null": true },
+        { "name": "expires_at", "type": "date_time", "null": true }
+      ]
+    }
+  ]
+}

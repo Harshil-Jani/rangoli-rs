@@ -1,18 +1,16 @@
-//! Users, database-backed sessions and login throttling.
+//! Users, database-backed sessions, API tokens and login throttling.
 //!
 //! No SECRET_KEY exists anywhere: session keys are random and live in the
 //! database, so there is nothing to sign and nothing to leak.
 
 use crate::orm::Model;
-use crate::{Error, Result};
+use crate::{DateTime, Error, Result};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use axum::extract::{FromRequestParts, Request};
 use axum::http::request::Parts;
 use axum::middleware::Next;
 use axum::response::Response;
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(rangoli_macros::Model, Clone, Debug)]
@@ -37,6 +35,69 @@ pub struct Session {
     #[field(fk = User, cascade)]
     pub user_id: Option<i64>,
     pub expires_at: i64,
+}
+
+/// A bearer token for non-browser API clients (DRF's `authtoken`, but only a hash is stored).
+#[derive(rangoli_macros::Model, Clone, Debug)]
+#[model(table = "rangoli_api_token", display = "name")]
+pub struct ApiToken {
+    pub id: Option<i64>,
+    #[field(max_length = 100)]
+    pub name: String,
+    /// The first characters of the token (`rgl_1a2b3c4d`), to tell tokens apart; not a secret.
+    #[field(max_length = 12)]
+    pub prefix: String,
+    /// SHA-256 of the token. The token itself is shown once, at creation, and never stored.
+    #[field(max_length = 64, unique)]
+    pub key_hash: String,
+    #[field(fk = User, cascade)]
+    pub user_id: i64,
+    #[field(auto_now_add)]
+    pub created_at: DateTime,
+    pub last_used_at: Option<DateTime>,
+    pub expires_at: Option<DateTime>,
+}
+
+/// Every token starts with this, so secret scanners (and people) can recognise a leaked one.
+pub const TOKEN_PREFIX: &str = "rgl_";
+/// `last_used_at` is written at most this often per token, not on every request.
+const TOKEN_TOUCH_SECS: i64 = 60;
+
+fn token_digest(token: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Create a token for `user`. Returns the stored row and the token, which is never retrievable again.
+/// `valid_for: None` never expires; revoke by deleting the row.
+pub async fn create_token(user: &User, name: &str, valid_for: Option<std::time::Duration>) -> Result<(ApiToken, String)> {
+    let token = format!("{TOKEN_PREFIX}{}", random_hex(20)?); // 160 random bits
+    let mut row = ApiToken {
+        id: None,
+        name: name.into(),
+        prefix: token[..12].into(),
+        key_hash: token_digest(&token),
+        user_id: user.id.ok_or(Error::NotFound)?,
+        created_at: DateTime::now(),
+        last_used_at: None,
+        expires_at: valid_for.map(|d| DateTime::from_unix(now() + d.as_secs() as i64)),
+    };
+    row.save().await?;
+    Ok((row, token))
+}
+
+/// The active user a token belongs to; `None` for unknown, expired or malformed tokens.
+pub async fn token_user(token: &str) -> Result<Option<User>> {
+    if !token.starts_with(TOKEN_PREFIX) || token.len() != TOKEN_PREFIX.len() + 40 {
+        return Ok(None); // not ours: no query
+    }
+    let live = ApiToken::KEY_HASH.eq(token_digest(token)) & (ApiToken::EXPIRES_AT.is_null() | ApiToken::EXPIRES_AT.gt(DateTime::now()));
+    let Some(mut row) = ApiToken::objects().filter(live).first().await? else { return Ok(None) };
+    if row.last_used_at.is_none_or(|t| t.unix() < now() - TOKEN_TOUCH_SECS) {
+        row.last_used_at = Some(DateTime::now());
+        ApiToken::objects().filter(ApiToken::ID.eq(row.id.unwrap_or(-1))).update([ApiToken::LAST_USED_AT.set(DateTime::now())]).await?;
+    }
+    User::objects().filter(User::ID.eq(row.user_id) & User::IS_ACTIVE.eq(true)).first().await
 }
 
 pub const COOKIE: &str = "rangoli_sid";
@@ -77,13 +138,71 @@ pub async fn verify_password(raw: &str, hash: &str) -> bool {
     .unwrap_or(false)
 }
 
-/// A poisoned lock (a panic elsewhere while it was held) must not lock everyone out forever.
-fn failures() -> std::sync::MutexGuard<'static, HashMap<String, (u32, i64)>> {
-    FAILURES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+/// Failed logins per username, in the database so every instance shares one count
+/// (a per-process count gives an attacker 5 guesses per instance, and a restart resets it).
+#[derive(rangoli_macros::Model, Clone, Debug)]
+#[model(table = "rangoli_login_failure")]
+pub struct LoginFailure {
+    pub id: Option<i64>,
+    #[field(max_length = 150, unique)]
+    pub username: String,
+    pub failures: i64,
+    /// Unix seconds when the window closes; failures before it count towards a lockout.
+    pub locked_until: i64,
 }
 
-// ponytail: per-process lockout map; move to the database or Redis when running several instances.
-static FAILURES: LazyLock<Mutex<HashMap<String, (u32, i64)>>> = LazyLock::new(Default::default);
+/// The key a username's failures are counted under. Real usernames fit the column (150
+/// characters); a longer attempt can't match an account but is still counted, by its prefix.
+fn failure_key(username: &str) -> String {
+    username.chars().take(150).collect()
+}
+
+/// Count one more login attempt for `username` and return the count in the current window.
+/// The increment is one atomic UPDATE (the first attempt inserts the row), so concurrent
+/// attempts on any number of instances can't lose a count. The re-read can only see more
+/// attempts than this one's, never fewer, so a race errs on the side of locking.
+async fn record_attempt(username: &str) -> Result<i64> {
+    let username = &failure_key(username);
+    count_attempt(username).await?;
+    let row = LoginFailure::objects().filter(LoginFailure::USERNAME.eq(username.as_str())).first().await?;
+    Ok(row.map_or(i64::from(MAX_FAILURES) + 1, |r| r.failures)) // vanished: a racing success cleared it; fail closed
+}
+
+async fn count_attempt(username: &str) -> Result<()> {
+    let d = crate::orm::db().dialect;
+    let (t, f, u, n) = (d.quote(LoginFailure::TABLE), d.quote("failures"), d.quote("locked_until"), d.quote("username"));
+    let sql = format!(
+        "UPDATE {t} SET {f} = CASE WHEN {u} > {p1} THEN {f} + 1 ELSE 1 END, {u} = {p2} WHERE {n} = {p3}",
+        p1 = d.ph(1),
+        p2 = d.ph(2),
+        p3 = d.ph(3)
+    );
+    let int = |v: i64| (crate::orm::Value::Int(v), crate::orm::FieldType::Int);
+    let params = vec![int(now()), int(now() + LOCKOUT_SECS), (crate::orm::Value::Text(username.into()), crate::orm::FieldType::Text)];
+    let mut last = None;
+    for attempt in 0..5u64 {
+        let updated = match crate::orm::execute(&sql, &params).await {
+            Ok(r) => r.rows_affected() > 0,
+            Err(e) if e.is_retryable() => {
+                last = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(5 * (attempt + 1))).await;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        if updated {
+            return Ok(());
+        }
+        let mut row = LoginFailure { id: None, username: username.into(), failures: 1, locked_until: now() + LOCKOUT_SECS };
+        match row.save().await {
+            Ok(()) => return Ok(()),
+            // Another instance inserted it first, or InnoDB picked this insert as a deadlock victim: go again.
+            Err(e) if e.is_unique_violation() || e.is_retryable() => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or(Error::Locked))
+}
 
 /// Check credentials. Locks a username for 15 minutes after 5 failures
 /// (Django has no built-in brute-force protection).
@@ -92,26 +211,27 @@ pub async fn authenticate(username: &str, password: &str) -> Result<Option<User>
     if username.contains('\0') {
         return Ok(None);
     }
-    if let Some((n, until)) = failures().get(username) {
-        if *n >= MAX_FAILURES && *until > now() {
-            return Err(Error::Locked);
-        }
+    // Count the attempt before checking the password, so a burst of parallel guesses can't all
+    // pass a check that only sees failures recorded after the (slow) verification.
+    if record_attempt(username).await? > i64::from(MAX_FAILURES) {
+        return Err(Error::Locked);
     }
     let user = User::objects().filter(User::USERNAME.eq(username)).first().await?;
     // Hash even for unknown users so response time doesn't reveal which usernames exist.
     static DUMMY: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
     let dummy = DUMMY.get_or_init(|| async { hash_password("rangoli-timing-pad").await.unwrap_or_default() }).await;
     let ok = verify_password(password, user.as_ref().map_or(dummy, |u| &u.password)).await;
-    let mut failures = failures();
     match user {
         Some(u) if ok && u.is_active => {
-            failures.remove(username);
+            LoginFailure::objects().filter(LoginFailure::USERNAME.eq(failure_key(username))).delete().await?;
             Ok(Some(u))
         }
         _ => {
-            let e = failures.entry(username.to_owned()).or_insert((0, 0));
-            e.0 = if e.1 > now() { e.0 + 1 } else { 1 }; // failures count within a sliding 15 minute window
-            e.1 = now() + LOCKOUT_SECS;
+            // Already counted above; unknown usernames count too, so a lockout reveals nothing.
+            // Sweep expired rows. Best effort: on MySQL this range DELETE can lose a deadlock to a
+            // concurrent failure, which is harmless (the next sweep gets them), so errors are ignored.
+            // ponytail: swept on failures only; a background task if the table ever matters.
+            let _ = LoginFailure::objects().filter(LoginFailure::LOCKED_UNTIL.lt(now())).delete().await;
             Ok(None)
         }
     }
@@ -167,8 +287,29 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentUser {
     }
 }
 
-/// Middleware: resolve the session cookie to a `CurrentUser`.
+/// Middleware: resolve `Authorization: Bearer rgl_…` or the session cookie to a `CurrentUser`.
+/// A Rangoli token that doesn't check out is a 401, like DRF. Other bearer tokens (an app's own
+/// JWT or OAuth, a webhook's secret) are left alone for the app's handlers to read.
 pub async fn session_middleware(mut req: Request, next: Next) -> Response {
+    use axum::response::IntoResponse;
+    let bearer = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|t| t.trim().starts_with(TOKEN_PREFIX));
+    if let Some(token) = bearer {
+        let user = match token_user(token.trim()).await {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                let body = axum::Json(serde_json::json!({ "detail": "Invalid token." }));
+                return (axum::http::StatusCode::UNAUTHORIZED, [(axum::http::header::WWW_AUTHENTICATE, "Bearer")], body).into_response();
+            }
+            Err(e) => return e.into_response(), // the database is down: 503, not "your token is bad"
+        };
+        req.extensions_mut().insert(CurrentUser(Some(user)));
+        return next.run(req).await;
+    }
     let key = req.headers().get(axum::http::header::COOKIE).and_then(|v| v.to_str().ok()).and_then(session_key).map(str::to_owned);
     let mut user = None;
     if let Some(key) = key {

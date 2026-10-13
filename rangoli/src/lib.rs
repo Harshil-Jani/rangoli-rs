@@ -16,20 +16,25 @@ pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod datetime;
+pub mod decimal;
 pub mod forms;
+pub mod mcp;
 pub mod migrate;
 pub mod orm;
 #[cfg(feature = "realtime")]
 pub mod realtime;
 pub mod tasks;
+pub mod uuid;
 #[cfg(feature = "web")]
 pub mod web;
 
 pub use axum;
-pub use datetime::DateTime;
+pub use datetime::{Date, DateTime};
+pub use decimal::Decimal;
 pub use orm::{atomic, Json, Model};
-pub use rangoli_macros::{Choices, Model};
+pub use rangoli_macros::{migrations, Choices, Model};
 pub use serde;
+pub use uuid::Uuid;
 
 pub mod prelude {
     pub use crate::admin::ModelAdmin;
@@ -39,7 +44,7 @@ pub mod prelude {
     pub use crate::tasks::Task;
     #[cfg(feature = "web")]
     pub use crate::web::{context, render};
-    pub use crate::{atomic, App, Choices, DateTime, Error, Json, Model, Result};
+    pub use crate::{atomic, App, Choices, Date, DateTime, Decimal, Error, Json, Model, Result, Uuid};
 }
 
 use axum::extract::Request;
@@ -116,6 +121,11 @@ impl Error {
     pub fn is_foreign_key_violation(&self) -> bool {
         matches!(self, Error::Db(e) if e.as_database_error().is_some_and(|d| d.is_foreign_key_violation()))
     }
+    /// A deadlock or serialization failure: the database chose this statement as the victim,
+    /// and running it again is the fix (SQLSTATE 40001/40P01; MySQL reports 1213 as 40001).
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Error::Db(e) if e.as_database_error().and_then(|d| d.code()).is_some_and(|c| c == "40001" || c == "40P01"))
+    }
 }
 
 impl IntoResponse for Error {
@@ -165,6 +175,16 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// On Postgres, let `realtime::publish` reach every instance. A failure only costs that.
+    async fn join_cluster(&self) {
+        #[cfg(all(feature = "realtime", feature = "postgres"))]
+        if orm::db().dialect == orm::Dialect::Postgres {
+            if let Err(e) = realtime::join_cluster(&self.database_url).await {
+                eprintln!("warning: realtime stays on this instance: {e}");
+            }
+        }
+    }
+
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         Settings {
@@ -248,9 +268,38 @@ impl App {
     pub fn new() -> Self {
         use orm::Model;
         App {
-            models: vec![auth::User::meta(), auth::Session::meta(), admin::LogEntry::meta(), tasks::TaskRecord::meta()],
+            models: vec![
+                auth::User::meta(),
+                auth::Session::meta(),
+                auth::ApiToken::meta(),
+                auth::LoginFailure::meta(),
+                admin::LogEntry::meta(),
+                tasks::TaskRecord::meta(),
+            ],
             admin: vec![
                 (auth::User::meta(), admin::Options::default()),
+                (
+                    auth::ApiToken::meta(),
+                    // Made with `createtoken` or `auth::create_token`, which show the token once.
+                    // Here: see them, rename, set an expiry, delete to revoke.
+                    admin::ModelAdmin::<auth::ApiToken>::new()
+                        .list_display([
+                            &auth::ApiToken::NAME,
+                            &auth::ApiToken::PREFIX,
+                            &auth::ApiToken::USER_ID,
+                            &auth::ApiToken::LAST_USED_AT,
+                            &auth::ApiToken::EXPIRES_AT,
+                        ])
+                        .list_filter([&auth::ApiToken::USER_ID, &auth::ApiToken::LAST_USED_AT])
+                        .readonly_fields([
+                            &auth::ApiToken::PREFIX,
+                            &auth::ApiToken::KEY_HASH,
+                            &auth::ApiToken::USER_ID,
+                            &auth::ApiToken::LAST_USED_AT,
+                        ])
+                        .no_add()
+                        .opts,
+                ),
                 (
                     tasks::TaskRecord::meta(),
                     admin::ModelAdmin::<tasks::TaskRecord>::new()
@@ -270,6 +319,13 @@ impl App {
             request_timeout: None,
             routes: Router::new(),
         }
+    }
+
+    /// Compile the app's migrations into the binary: `.embed_migrations(rangoli::migrations!())`.
+    /// Deploy the binary alone; `migrate` finds them without a `migrations/` directory.
+    pub fn embed_migrations(self, files: &'static [(&'static str, &'static str)]) -> Self {
+        migrate::embed(files);
+        self
     }
 
     /// Track a model in migrations.
@@ -311,6 +367,16 @@ impl App {
     }
 
     /// Register a background task so workers in this process can run it.
+    /// Run `task` on a UTC cron schedule (`"*/5 * * * *"`, `"0 3 * * 1-5"`, `"@daily"`), with no
+    /// separate beat process: workers queue each tick exactly once between them.
+    /// Panics at startup on an invalid expression.
+    pub fn schedule<T: tasks::Task>(self, cron: &str, task: T) -> Self {
+        if let Err(e) = tasks::schedule(cron, &task) {
+            panic!("rangoli: {e}");
+        }
+        self
+    }
+
     pub fn task<T: tasks::Task>(self) -> Self {
         tasks::register::<T>();
         self
@@ -348,6 +414,7 @@ impl App {
         let routes = routes.merge(admin::router(self.admin.clone(), self.models.clone()));
         routes
             .merge(api::router(self.api.clone()))
+            .merge(mcp::router(self.api.clone()))
             .layer(from_fn(auth::session_middleware))
             .layer(from_fn(security_middleware))
             .layer(tower_http::timeout::TimeoutLayer::with_status_code(
@@ -383,7 +450,7 @@ impl App {
         }
         if matches!(cmd, "help" | "--help" | "-h") {
             println!(
-                "commands:\n  runserver [addr]            serve the app (default {})\n  migrate [--check]           apply pending migrations\n  makemigrations [name] [--check]\n  createsuperuser [username]  password from RANGOLI_PASSWORD or a prompt\n  worker                      run background tasks (RANGOLI_WORKERS loops)",
+                "commands:\n  runserver [addr]            serve the app (default {})\n  migrate [--check]           apply pending migrations\n  makemigrations [name] [--check]\n  createsuperuser [username]  password from RANGOLI_PASSWORD or a prompt\n  createtoken <username> [name] [--days N]  print a new API token (shown once)\n  worker                      run background tasks (RANGOLI_WORKERS loops)",
                 s.bind
             );
             return Ok(());
@@ -404,6 +471,16 @@ impl App {
                 if done.is_empty() {
                     println!("No migrations to apply.");
                 }
+                // Like Django's warning. Also catches a binary built before its newest migration
+                // file existed (cargo doesn't notice new files in an embedded directory).
+                let ahead = migrate::diff(&migrate::replay(&migrate::load(&s.migrations)?)?, &migrate::model_state(&self.models));
+                if !ahead.is_empty() {
+                    eprintln!(
+                        "warning: {} model change(s) have no migration in this binary or {}; run `makemigrations`, then rebuild",
+                        ahead.len(),
+                        s.migrations.display()
+                    );
+                }
             }
             "createsuperuser" => {
                 let username = match positional {
@@ -420,11 +497,26 @@ impl App {
                 auth::create_user(&username, &password, true).await?;
                 println!("Superuser `{username}` created.");
             }
+            "createtoken" => {
+                let username = positional.ok_or_else(|| Error::Config("usage: createtoken <username> [name] [--days N]".into()))?;
+                let user = auth::User::objects().filter(auth::User::USERNAME.eq(username)).get().await?;
+                let args: Vec<String> = std::env::args().collect();
+                let after = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).cloned();
+                let days =
+                    after("--days").map(|d| d.parse::<u64>().map_err(|_| Error::Config("--days takes a number".into()))).transpose()?;
+                let name =
+                    args.iter().skip_while(|a| *a != username).nth(1).filter(|a| !a.starts_with("--")).cloned().unwrap_or("cli".into());
+                let (_, token) = auth::create_token(&user, &name, days.map(|d| std::time::Duration::from_secs(d * 86_400))).await?;
+                println!("{token}");
+                eprintln!("Token `{name}` for `{username}`. Store it now: only its hash is kept.");
+            }
             "worker" => {
+                s.join_cluster().await;
                 println!("Rangoli worker running {} task loop(s)", s.workers.max(1));
                 tasks::work(s.workers).await;
             }
             "runserver" => {
+                s.join_cluster().await;
                 if s.workers > 0 {
                     tokio::spawn(tasks::work(s.workers));
                 }

@@ -30,7 +30,7 @@ impl DateTime {
     }
 
     pub fn from_parts(y: i64, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> Option<Self> {
-        let valid = (1..=12).contains(&m) && d >= 1 && d <= days_in_month(y, m) && hh < 24 && mm < 60 && ss < 60;
+        let valid = (1..=9999).contains(&y) && (1..=12).contains(&m) && d >= 1 && d <= days_in_month(y, m) && hh < 24 && mm < 60 && ss < 60;
         valid.then(|| DateTime(days_from_civil(y, m, d) * 86_400 + i64::from(hh * 3600 + mm * 60 + ss)))
     }
 
@@ -93,6 +93,64 @@ impl<'de> Deserialize<'de> for DateTime {
     }
 }
 
+/// A calendar date with no time or timezone, stored as days since 1970-01-01 (`BIGINT`),
+/// so it sorts and compares in SQL and round-trips identically on every database.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Date(i64);
+
+impl Date {
+    /// Today in UTC.
+    pub fn today() -> Self {
+        Date(DateTime::now().unix().div_euclid(86_400))
+    }
+
+    pub const fn from_days(days: i64) -> Self {
+        Date(days)
+    }
+
+    /// Days since 1970-01-01.
+    pub fn days(self) -> i64 {
+        self.0
+    }
+
+    pub fn from_ymd(y: i64, m: u32, d: u32) -> Option<Self> {
+        // Years 1 to 9999, like ISO 8601 and Python's datetime; huge years overflowed the day count.
+        ((1..=9999).contains(&y) && (1..=12).contains(&m) && d >= 1 && d <= days_in_month(y, m)).then(|| Date(days_from_civil(y, m, d)))
+    }
+
+    pub fn ymd(self) -> (i64, u32, u32) {
+        civil_from_days(self.0)
+    }
+
+    /// Exactly `YYYY-MM-DD`.
+    pub fn parse(s: &str) -> Option<Self> {
+        let mut d = s.trim().splitn(3, '-').map(str::parse::<i64>);
+        let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
+        Self::from_ymd(y, u32::try_from(m).ok()?, u32::try_from(day).ok()?)
+    }
+}
+
+/// ISO 8601: `2026-10-07`.
+impl fmt::Display for Date {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (y, m, d) = self.ymd();
+        write!(f, "{y:04}-{m:02}-{d:02}")
+    }
+}
+
+impl Serialize for Date {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Date {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Date::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("invalid date `{s}`")))
+    }
+}
+
 fn days_in_month(y: i64, m: u32) -> u32 {
     match m {
         2 if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
@@ -138,9 +196,24 @@ mod tests {
         assert_eq!(DateTime::parse("2000-02-29"), Some(DateTime::from_unix(951_782_400)));
         assert_eq!(DateTime::parse("1969-12-31 23:59:59"), Some(DateTime::from_unix(-1)));
         assert_eq!(t.human(), "2023-11-14 22:13 UTC");
-        for bad in ["2023-02-29", "2023-13-01", "2023-11-14T24:00", "yesterday", "2023-11"] {
+        for bad in ["2023-02-29", "2023-13-01", "2023-11-14T24:00", "yesterday", "2023-11", "99999999999999999-01-01T00:00"] {
             assert_eq!(DateTime::parse(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn dates() {
+        let d = Date::parse("2024-02-29").unwrap();
+        assert_eq!((d.to_string(), d.ymd()), ("2024-02-29".into(), (2024, 2, 29)));
+        assert_eq!(Date::parse("1970-01-01"), Some(Date::from_days(0)));
+        assert_eq!(Date::parse("1969-12-31"), Some(Date::from_days(-1)));
+        assert!(Date::parse("2024-12-31").unwrap() > d, "orders like the calendar");
+        for bad in
+            ["2023-02-29", "2023-00-10", "2023-11-14T10:00", "2023-11", "", "x-y-z", "99999999999999999-01-01", "10000-01-01", "0000-01-01"]
+        {
+            assert_eq!(Date::parse(bad), None, "{bad}");
+        }
+        assert_eq!(serde_json::to_string(&d).unwrap(), "\"2024-02-29\"");
     }
 
     #[test]

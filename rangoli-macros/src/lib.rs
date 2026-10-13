@@ -66,7 +66,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
 
         let (mut max_length, mut text, mut unique, mut password, mut cascade, mut fk) =
             (None::<u32>, false, false, false, false, None::<syn::Path>);
-        let (mut auto_now, mut auto_now_add, mut index, mut choices) = (false, false, false, false);
+        let (mut auto_now, mut auto_now_add, mut auto, mut index, mut choices) = (false, false, false, false, false);
         let mut default: Option<Tokens> = None;
         for attr in f.attrs.iter().filter(|a| a.path().is_ident("field")) {
             attr.parse_nested_meta(|m| {
@@ -103,13 +103,15 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     auto_now = true;
                 } else if m.path.is_ident("auto_now_add") {
                     auto_now_add = true;
+                } else if m.path.is_ident("auto") {
+                    auto = true;
                 } else if m.path.is_ident("cascade") {
                     cascade = true;
                 } else if m.path.is_ident("fk") {
                     fk = Some(m.value()?.parse()?);
                 } else {
                     return Err(m.error(
-                        "expected `max_length`, `text`, `unique`, `password`, `fk`, `cascade`, `index`, `choices`, `default`, `auto_now` or `auto_now_add`",
+                        "expected `max_length`, `text`, `unique`, `password`, `fk`, `cascade`, `index`, `choices`, `default`, `auto`, `auto_now` or `auto_now_add`",
                     ));
                 }
                 Ok(())
@@ -131,6 +133,14 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
         if (auto_now || auto_now_add) && (base != "DateTime" || null) {
             return Err(syn::Error::new_spanned(&f.ty, "`auto_now` and `auto_now_add` need a `DateTime` field (not an Option)"));
         }
+        if auto && (base != "Uuid" || null) {
+            return Err(syn::Error::new_spanned(&f.ty, "`auto` needs a `Uuid` field (not an Option)"));
+        }
+        if auto {
+            // Filled with a v7 on insert unless the caller set one; shown read-only like auto_now_add.
+            touches.push(quote!(if adding && self.#name == ::rangoli::Uuid::NIL { self.#name = ::rangoli::Uuid::new_v7(); }));
+        }
+        let framework_fills = auto_now_add || auto;
         if auto_now {
             touches.push(quote!(self.#name = ::rangoli::DateTime::now();));
         } else if auto_now_add {
@@ -149,6 +159,10 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
             "f64" => quote!(Float),
             "bool" => quote!(Bool),
             "DateTime" => quote!(DateTime),
+            "Date" => quote!(Date),
+            "Uuid" => quote!(Uuid),
+            // The scale lives in the type (`Decimal<2>`), so ask it.
+            "Decimal" => quote!(Decimal(<#inner as ::rangoli::orm::Kind>::KIND.decimal_places())),
             "Json" => quote!(Json),
             "choices" => {
                 let n = max_length.unwrap_or(32);
@@ -185,7 +199,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
             ::rangoli::orm::FieldMeta {
                 name: #name_s, ty: ::rangoli::orm::FieldType::#ty, null: #null,
                 unique: #unique, password: #password, fk: #fk_tokens, cascade: #cascade,
-                auto_now: #auto_now, auto_now_add: #auto_now_add, index: #index,
+                auto_now: #auto_now, auto_now_add: #framework_fills, index: #index,
                 choices: #choices_tokens, default: #default_tokens,
             }
         });
@@ -198,6 +212,20 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
         values.push(quote!(::rangoli::orm::Value::from(::core::clone::Clone::clone(&self.#name))));
         let col = format_ident!("{}", name_s.to_uppercase());
         cols.push(quote!(pub const #col: ::rangoli::orm::Col<Self, #inner> = ::rangoli::orm::Col::new(#name_s);));
+        if let Some(target) = &fk {
+            // `author_id` -> `Post::AUTHOR` and `post.author()`; a field without `_id` gets `<NAME>_REL`.
+            let (konst, method) = match name_s.strip_suffix("_id") {
+                Some(base) => (format_ident!("{}", base.to_uppercase()), format_ident!("{}", base)),
+                None => (format_ident!("{}_REL", name_s.to_uppercase()), name.clone()),
+            };
+            cols.push(quote! {
+                pub const #konst: ::rangoli::orm::Fk<Self, #target> = ::rangoli::orm::Fk::new(#name_s);
+                /// The related row (one query); `Error::NotFound` if the key is null.
+                pub fn #method(&self) -> impl ::core::future::Future<Output = ::rangoli::Result<#target>> + Send {
+                    Self::#konst.get(self)
+                }
+            });
+        }
     }
     if !has_id {
         return Err(syn::Error::new_spanned(ident, "a Model needs `pub id: Option<i64>`"));
@@ -283,14 +311,14 @@ fn unwrap_option(ty: &Type) -> (&Type, bool) {
 fn base_type(ty: &Type) -> syn::Result<&'static str> {
     if let Type::Path(p) = ty {
         if let Some(seg) = p.path.segments.last() {
-            for t in ["i64", "f64", "bool", "String", "DateTime", "Json"] {
+            for t in ["i64", "f64", "bool", "String", "DateTime", "Date", "Decimal", "Uuid", "Json"] {
                 if seg.ident == t {
                     return Ok(t);
                 }
             }
         }
     }
-    Err(syn::Error::new_spanned(ty, "supported field types: i64, f64, bool, String, DateTime, Json, or a Choices enum with #[field(choices)] (optionally wrapped in Option)"))
+    Err(syn::Error::new_spanned(ty, "supported field types: i64, f64, bool, String, DateTime, Date, Decimal<P>, Uuid, Json, or a Choices enum with #[field(choices)] (optionally wrapped in Option)"))
 }
 
 /// `#[derive(Choices)]` on a fieldless enum: stored as a short string, shown with a label.
@@ -394,4 +422,31 @@ fn sentence(words: &[String]) -> String {
     let s = words.join(" ").to_lowercase();
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
+/// Embed `migrations/*.json` (or the directory given, relative to the crate) in the binary:
+/// `App::new().embed_migrations(rangoli::migrations!())`. Files are read at compile time, so
+/// the deployed binary needs no migrations directory next to it.
+#[proc_macro]
+pub fn migrations(input: TokenStream) -> TokenStream {
+    let dir = if input.is_empty() {
+        "migrations".to_string()
+    } else {
+        match syn::parse::<syn::LitStr>(input) {
+            Ok(l) => l.value(),
+            Err(e) => return e.to_compile_error().into(),
+        }
+    };
+    let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default()).join(dir);
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&root)
+        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "json")).collect())
+        .unwrap_or_default();
+    files.sort();
+    let pairs = files.iter().map(|p| {
+        let name = p.file_stem().unwrap().to_string_lossy().into_owned();
+        let path = p.to_string_lossy().into_owned();
+        // include_str! makes cargo rebuild when an embedded file changes.
+        quote!((#name, include_str!(#path)))
+    });
+    quote!(&[#(#pairs),*] as &'static [(&'static str, &'static str)]).into()
 }

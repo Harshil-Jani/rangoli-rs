@@ -35,7 +35,7 @@
         {% for m in a.models %}
         <li{% if m.current %} class="current"{% endif %}>
           <a href="/admin/{{ m.table }}/"{% if m.current %} aria-current="page"{% endif %}>{{ m.plural }}</a>
-          <a href="/admin/{{ m.table }}/add" class="side-add" aria-label="Add {{ m.plural|lower }}">Add</a>
+          {% if m.can_add %}<a href="/admin/{{ m.table }}/add" class="side-add" aria-label="Add {{ m.plural|lower }}">Add</a>{% endif %}
         </li>
         {% endfor %}
       </ul>

@@ -87,3 +87,60 @@ async fn websockets_and_server_sent_events() {
     }
     assert!(seen.contains("text/event-stream"));
 }
+
+/// Postgres only: two instances joined through LISTEN/NOTIFY. A raw connection plays the
+/// other instance. Skipped unless `RANGOLI_TEST_DATABASE_URL` is a Postgres URL.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn publishes_cross_instances_on_postgres() {
+    use sqlx::postgres::PgListener;
+    let Some(url) = std::env::var("RANGOLI_TEST_DATABASE_URL").ok().filter(|u| u.starts_with("postgres")) else {
+        eprintln!("skipped: set RANGOLI_TEST_DATABASE_URL to a Postgres URL");
+        return;
+    };
+    rangoli::orm::connect(&url).await.unwrap();
+    realtime::join_cluster(&url).await.unwrap();
+    let mut other = PgListener::connect(&url).await.unwrap();
+    other.listen("rangoli_realtime").await.unwrap();
+
+    // Out: 200 publishes here reach the other instance, in order.
+    for i in 0..200 {
+        realtime::publish("t:out", format!("m{i}"));
+    }
+    // The other test in this binary publishes too (it shares the cluster), so look at t:out only.
+    let mut got = vec![];
+    while got.len() < 200 {
+        let n = tokio::time::timeout(Duration::from_secs(5), other.recv()).await.expect("NOTIFY within 5s").unwrap();
+        let env: serde_json::Value = serde_json::from_str(n.payload()).unwrap();
+        if env["group"] == "t:out" {
+            got.push(env["message"].as_str().unwrap().to_string());
+        }
+    }
+    assert_eq!(got, (0..200).map(|i| format!("m{i}")).collect::<Vec<_>>(), "in order");
+
+    // In: what the other instance publishes reaches subscribers here.
+    let mut rx = realtime::subscribe("t:in");
+    let notify = |payload: String| {
+        let url = url.clone();
+        async move {
+            let mut c = <sqlx::PgConnection as sqlx::Connection>::connect(&url).await.unwrap();
+            sqlx::query("SELECT pg_notify('rangoli_realtime', $1)").bind(payload).execute(&mut c).await.unwrap();
+        }
+    };
+    notify(r#"{"from": "elsewhere", "group": "t:in", "message": "from afar"}"#.into()).await;
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap(), "from afar");
+    notify("not json at all".into()).await; // garbage on the channel is ignored, not fatal
+    notify(r#"{"from": "elsewhere", "group": "t:in", "message": "still listening"}"#.into()).await;
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap(), "still listening");
+
+    // No echo: our own publish is delivered here once, not again when its NOTIFY comes back.
+    let mut echo = realtime::subscribe("t:echo");
+    realtime::publish("t:echo", "once");
+    assert_eq!(echo.recv().await.unwrap(), "once");
+    assert!(tokio::time::timeout(Duration::from_millis(500), echo.recv()).await.is_err(), "delivered exactly once");
+
+    // Too big for NOTIFY: still delivered locally.
+    let mut big = realtime::subscribe("t:big");
+    assert_eq!(realtime::publish("t:big", "x".repeat(10_000)), 1);
+    assert_eq!(big.recv().await.unwrap().len(), 10_000);
+}

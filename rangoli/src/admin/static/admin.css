@@ -422,3 +422,9 @@ fieldset { margin: 0; padding: 0; min-width: 0; }
 }
 
 .prose .submit-row { padding: 0; background: none; border: 0; }
+
+/* AI agents page */
+.agents-cta { padding: 12px 16px; margin-bottom: 16px; }
+.agents-cta h2 { margin: 0 0 6px; }
+.agent-setup pre { margin: 0; padding: 8px 10px; background: var(--surface-2); overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-setup code { font-size: 13px; overflow-wrap: anywhere; }

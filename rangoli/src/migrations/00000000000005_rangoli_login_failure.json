@@ -1,0 +1,13 @@
+{
+  "operations": [
+    {
+      "op": "create_table",
+      "table": "rangoli_login_failure",
+      "columns": [
+        { "name": "username", "type": { "varchar": 150 }, "unique": true },
+        { "name": "failures", "type": "int" },
+        { "name": "locked_until", "type": "int" }
+      ]
+    }
+  ]
+}

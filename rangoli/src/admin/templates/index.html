@@ -13,7 +13,7 @@
       {% for m in a.models %}
       <tr>
         <th scope="row"><a href="/admin/{{ m.table }}/">{{ m.plural }}</a></th>
-        <td class="shrink"><a href="/admin/{{ m.table }}/add" class="addlink">Add</a></td>
+        <td class="shrink">{% if m.can_add %}<a href="/admin/{{ m.table }}/add" class="addlink">Add</a>{% endif %}</td>
         <td class="shrink"><a href="/admin/{{ m.table }}/" class="changelink">Change</a></td>
       </tr>
       {% endfor %}
@@ -21,6 +21,12 @@
     </table>
     {% endfor %}
   </div>
+  <div>
+  <section class="panel agents-cta" aria-labelledby="agents-title">
+    <h2 id="agents-title">AI agents</h2>
+    <p>Let Claude, Cursor or another assistant work with this data, as you.</p>
+    <p><a href="/admin/agents/" class="btn primary">Connect an AI agent</a></p>
+  </section>
   <section class="panel recent" aria-labelledby="recent-title">
     <h2 id="recent-title">Recent actions</h2>
     {% if recent %}
@@ -33,5 +39,6 @@
     <p class="empty">Nothing yet. Changes you make in the admin appear here.</p>
     {% endif %}
   </section>
+  </div>
 </div>
 {% endblock %}

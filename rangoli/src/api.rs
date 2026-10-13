@@ -46,7 +46,7 @@ pub enum Access {
 }
 
 impl Access {
-    fn allows(self, user: &CurrentUser) -> bool {
+    pub(crate) fn allows(self, user: &CurrentUser) -> bool {
         match self {
             Access::Public => true,
             Access::Authenticated => user.0.is_some(),
@@ -64,8 +64,10 @@ pub struct Api<M> {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
-    read: Access,
-    write: Access,
+    pub(crate) read: Access,
+    pub(crate) write: Access,
+    /// A foreign key to the user: non-staff users only ever see and change their own rows.
+    pub(crate) owner: Option<&'static str>,
 }
 
 impl<M: Model> Default for Api<M> {
@@ -77,7 +79,7 @@ impl<M: Model> Default for Api<M> {
 impl<M: Model> Api<M> {
     /// Staff-only reads and writes until you say otherwise.
     pub fn new() -> Self {
-        Api { opts: Options { read: Access::Staff, write: Access::Staff }, _m: PhantomData }
+        Api { opts: Options { read: Access::Staff, write: Access::Staff, owner: None }, _m: PhantomData }
     }
     /// Who may list and fetch.
     pub fn read(mut self, access: Access) -> Self {
@@ -89,6 +91,39 @@ impl<M: Model> Api<M> {
         self.opts.write = access;
         self
     }
+    /// Rows belong to the user in `owner` (a foreign key to the user model), DRF's `IsOwner`
+    /// plus `get_queryset` plus `perform_create` in one line. Non-staff users list, read,
+    /// update and delete only their own rows (anyone else's is a 404, so ids reveal nothing),
+    /// and every row they create or update is theirs whatever the body says. Staff see all.
+    /// Panics at startup if `owner` isn't a foreign key to the user model.
+    pub fn owned_by(mut self, owner: &crate::orm::Col<M, i64>) -> Self {
+        let name = owner.name();
+        let is_user_fk = M::meta().field(name).is_some_and(|f| f.fk == Some(crate::auth::User::TABLE));
+        assert!(is_user_fk, "rangoli api: owned_by(`{name}`) on {} needs `#[field(fk = User)]`", M::TABLE);
+        self.opts.owner = Some(name);
+        self
+    }
+}
+
+/// The owner restriction for this user: `(column, user id)`, or `None` for staff and unowned models.
+fn ownership(opts: &Options, user: &CurrentUser) -> Option<(&'static str, i64)> {
+    let col = opts.owner?;
+    match &user.0 {
+        Some(u) if u.is_staff => None,
+        Some(u) => Some((col, u.id.unwrap_or(-1))),
+        None => Some((col, -1)), // a public read of an owned model shows nothing
+    }
+}
+
+/// Claim the row for the user: non-staff always own what they write; staff default to themselves.
+fn claim(opts: &Options, user: &CurrentUser, body: &JsonValue, adding: bool) -> JsonValue {
+    let mut body = body.clone();
+    if let (Some(col), Some(u), Some(obj)) = (opts.owner, &user.0, body.as_object_mut()) {
+        if !u.is_staff || (adding && !obj.contains_key(col)) {
+            obj.insert(col.into(), json!(u.id));
+        }
+    }
+    body
 }
 
 struct Site {
@@ -131,11 +166,11 @@ fn fail(e: Error) -> Response {
     }
 }
 
-fn endpoint(site: &Site, table: &str, user: &CurrentUser, write: bool) -> Result<&'static ModelMeta, Response> {
+fn endpoint<'a>(site: &'a Site, table: &str, user: &CurrentUser, write: bool) -> Result<(&'static ModelMeta, &'a Options), Response> {
     let (meta, opts) = site.models.get(table).ok_or_else(|| problem(StatusCode::NOT_FOUND, "Not found."))?;
     let access = if write { opts.write } else { opts.read };
     if access.allows(user) {
-        Ok(meta)
+        Ok((meta, opts))
     } else if access == Access::Nobody {
         Err(problem(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed."))
     } else if user.0.is_none() {
@@ -153,7 +188,11 @@ fn to_json(meta: &ModelMeta, id: i64, vals: &[Value]) -> JsonValue {
         let j = match v {
             Value::Null => JsonValue::Null,
             Value::Int(i) if f.ty == FieldType::DateTime => json!(DateTime::from_unix(*i).to_string()),
-            Value::Int(i) => json!(i),
+            Value::Int(i) if f.ty == FieldType::Date => json!(crate::Date::from_days(*i).to_string()),
+            Value::Int(i) => match f.ty {
+                FieldType::Decimal(p) => json!(crate::decimal::format_units(*i, p)),
+                _ => json!(i),
+            },
             Value::Float(x) => json!(x),
             Value::Bool(b) => json!(b),
             Value::Text(s) if f.ty == FieldType::Json => serde_json::from_str(s).unwrap_or(JsonValue::Null),
@@ -183,6 +222,20 @@ fn from_json(f: &FieldMeta, j: &JsonValue) -> Result<Value, String> {
             .and_then(DateTime::parse)
             .map(Value::from)
             .ok_or_else(|| "Datetime has wrong format. Use ISO 8601, e.g. 2026-10-07T02:15:00Z.".into()),
+        FieldType::Date => {
+            j.as_str().and_then(crate::Date::parse).map(Value::from).ok_or_else(|| "Date has wrong format. Use YYYY-MM-DD.".into())
+        }
+        // A fractional JSON number is a float by the time it is parsed (19.999999999999999 is
+        // already 20.0), so it can't be checked exactly: those must come as strings.
+        FieldType::Decimal(_) if j.is_f64() => Err("Send decimals with a fractional part as strings, e.g. \"19.99\".".into()),
+        FieldType::Decimal(p) => match j {
+            JsonValue::String(s) => Some(s.clone()),
+            JsonValue::Number(n) => Some(n.to_string()),
+            _ => None,
+        }
+        .and_then(|s| crate::decimal::parse_units(&s, p))
+        .map(Value::Int)
+        .ok_or_else(|| format!("A valid number with at most {p} decimal places is required.")),
         FieldType::Varchar(n) => match j.as_str() {
             Some(s) if s.chars().count() > n as usize => Err(format!("Ensure this field has no more than {n} characters.")),
             Some(s) if s.contains('\0') => Err("Null characters are not allowed.".into()),
@@ -192,6 +245,7 @@ fn from_json(f: &FieldMeta, j: &JsonValue) -> Result<Value, String> {
             None => Err("Not a valid string.".into()),
         },
         FieldType::Json => unreachable!("handled above"),
+        FieldType::Uuid => j.as_str().and_then(crate::Uuid::parse).map(Value::from).ok_or_else(|| "Must be a valid UUID.".into()),
         FieldType::Text => match j.as_str() {
             Some(s) if s.contains('\0') => Err("Null characters are not allowed.".into()),
             Some(s) if s.is_empty() && !f.null => Err("This field may not be blank.".into()),
@@ -264,7 +318,7 @@ async fn columns(
     for f in meta.fields {
         if f.is_auto() {
             if f.auto_now || adding {
-                cols.push((f.name, Value::from(DateTime::now()), f.ty));
+                cols.push((f.name, f.auto_value(), f.ty));
             }
             continue;
         }
@@ -297,14 +351,19 @@ async fn columns(
     }
 }
 
-async fn fetch(meta: &'static ModelMeta, id: i64) -> Result<JsonValue, Response> {
+async fn fetch(meta: &'static ModelMeta, id: i64, owner: Option<(&'static str, i64)>) -> Result<JsonValue, Response> {
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
+    q.filter.extend(owned(owner));
     let (id, vals) = q.rows().await.map_err(fail)?.pop().ok_or_else(|| fail(Error::NotFound))?;
     let mut obj = [to_json(meta, id, &vals)];
     attach_links(meta, &mut obj).await?;
     let [obj] = obj;
     Ok(obj)
+}
+
+fn owned(owner: Option<(&'static str, i64)>) -> Option<Node> {
+    owner.map(|(col, uid)| Node::Cmp(col, "=", Value::Int(uid), FieldType::Int))
 }
 
 fn param<'a>(p: &'a HashMap<String, String>, k: &str) -> Option<&'a str> {
@@ -314,8 +373,9 @@ fn param<'a>(p: &'a HashMap<String, String>, k: &str) -> Option<&'a str> {
 // ---------------------------------------------------------------- handlers
 
 async fn list(State(site): S, user: CurrentUser, Path(table): Path<String>, UrlQuery(p): UrlQuery<HashMap<String, String>>) -> Reply {
-    let meta = endpoint(&site, &table, &user, false)?;
+    let (meta, opts) = endpoint(&site, &table, &user, false)?;
     let mut q = Query::new(meta);
+    q.filter.extend(owned(ownership(opts, &user)));
     // `?field=value` filters on exact matches, typed by the field.
     for (k, raw) in &p {
         if matches!(k.as_str(), "limit" | "offset" | "ordering" | "search") {
@@ -324,7 +384,9 @@ async fn list(State(site): S, user: CurrentUser, Path(table): Path<String>, UrlQ
         let f = meta.field(k).filter(|f| !f.password).ok_or_else(|| problem(StatusCode::BAD_REQUEST, &format!("Unknown filter `{k}`.")))?;
         let j = match f.ty {
             FieldType::Json => return Err(problem(StatusCode::BAD_REQUEST, &format!("Cannot filter on JSON field `{k}`."))),
-            FieldType::Varchar(_) | FieldType::Text | FieldType::DateTime => json!(raw),
+            FieldType::Varchar(_) | FieldType::Text | FieldType::DateTime | FieldType::Date | FieldType::Decimal(_) | FieldType::Uuid => {
+                json!(raw)
+            }
             _ if raw == "null" => JsonValue::Null,
             _ => serde_json::from_str(raw).unwrap_or(JsonValue::String(raw.clone())),
         };
@@ -377,12 +439,54 @@ async fn list(State(site): S, user: CurrentUser, Path(table): Path<String>, UrlQ
 }
 
 async fn detail(State(site): S, user: CurrentUser, Path((table, id)): Path<(String, i64)>) -> Reply {
-    let meta = endpoint(&site, &table, &user, false)?;
-    Ok(Json(fetch(meta, id).await?).into_response())
+    let (meta, opts) = endpoint(&site, &table, &user, false)?;
+    Ok(Json(fetch(meta, id, ownership(opts, &user)).await?).into_response())
 }
 
-async fn create(State(site): S, user: CurrentUser, Path(table): Path<String>, Json(body): Json<JsonValue>) -> Reply {
-    let meta = endpoint(&site, &table, &user, true)?;
+/// How a write arrived, for the admin History. Set by the MCP server on its internal requests
+/// (a request extension, so no client can claim it); plain API calls have none.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Via(pub(crate) &'static str);
+
+type ViaExt = Option<axum::Extension<Via>>;
+
+/// The admin's name for a row: its display field, else "Post object (7)".
+async fn repr_of(meta: &'static ModelMeta, id: i64) -> crate::Result<String> {
+    let mut q = Query::new(meta);
+    q.filter.push(by_id(id));
+    let (_, vals) = q.rows().await?.pop().ok_or(Error::NotFound)?;
+    let shown = meta.display.and_then(|d| meta.fields.iter().position(|f| f.name == d)).and_then(|i| match &vals[i] {
+        Value::Text(s) => Some(s.clone()),
+        _ => None,
+    });
+    Ok(shown.unwrap_or_else(|| format!("{} object ({id})", meta.name)))
+}
+
+/// Record a write in the admin History, in the write's own transaction, so an app's or an AI
+/// agent's changes are reviewable next to the admin's. Anonymous writes have no user to name.
+async fn audit(user: &CurrentUser, meta: &'static ModelMeta, id: i64, action: i64, verb: &str, via: Option<Via>) -> crate::Result<()> {
+    let Some(user_id) = user.0.as_ref().and_then(|u| u.id) else { return Ok(()) };
+    let mut entry = crate::admin::LogEntry {
+        id: None,
+        user_id,
+        table_name: meta.table.into(),
+        object_id: id,
+        object_repr: repr_of(meta, id).await?.chars().take(200).collect(),
+        action,
+        message: format!("{verb} via {}.", via.map_or("the API", |v| v.0)),
+        at: auth::now(),
+    };
+    entry.save().await
+}
+
+async fn create(State(site): S, user: CurrentUser, via: ViaExt, Path(table): Path<String>, Json(body): Json<JsonValue>) -> Reply {
+    let via = via.map(|v| v.0);
+    let (meta, opts) = endpoint(&site, &table, &user, true)?;
+    if opts.owner.is_some() && user.0.is_none() {
+        // An owned row needs an owner; with `write(Access::Public)` the body could otherwise name anyone.
+        return Err(problem(StatusCode::UNAUTHORIZED, "Authentication credentials were not provided."));
+    }
+    let body = claim(opts, &user, &body, true);
     let cols = columns(meta, &body, true, false).await?;
     let links = body_links(meta, &body)?;
     let id = crate::atomic(async {
@@ -390,16 +494,18 @@ async fn create(State(site): S, user: CurrentUser, Path(table): Path<String>, Js
         for (through, ids) in &links {
             orm::set_links(through, id, ids.as_deref().unwrap_or_default()).await?;
         }
+        audit(&user, meta, id, 1, "Added", via).await?;
         Ok(id)
     })
     .await
     .map_err(fail)?;
-    Ok((StatusCode::CREATED, Json(fetch(meta, id).await?)).into_response())
+    Ok((StatusCode::CREATED, Json(fetch(meta, id, None).await?)).into_response())
 }
 
-async fn update(site: &Site, user: &CurrentUser, table: &str, id: i64, body: &JsonValue, partial: bool) -> Reply {
-    let meta = endpoint(site, table, user, true)?;
-    fetch(meta, id).await?; // 404 before validation, like DRF
+async fn update(site: &Site, user: &CurrentUser, via: Option<Via>, table: &str, id: i64, body: &JsonValue, partial: bool) -> Reply {
+    let (meta, opts) = endpoint(site, table, user, true)?;
+    fetch(meta, id, ownership(opts, user)).await?; // 404 before validation, like DRF (and for others' rows)
+    let body = &claim(opts, user, body, false);
     let cols = columns(meta, body, false, partial).await?;
     let links = body_links(meta, body)?;
     let mut q = Query::new(meta);
@@ -413,41 +519,65 @@ async fn update(site: &Site, user: &CurrentUser, table: &str, id: i64, body: &Js
                 None => {}
             }
         }
+        audit(user, meta, id, 2, "Changed", via).await?;
         Ok(())
     })
     .await
     .map_err(fail)?;
-    Ok(Json(fetch(meta, id).await?).into_response())
+    Ok(Json(fetch(meta, id, None).await?).into_response())
 }
 
-async fn replace(State(site): S, user: CurrentUser, Path((table, id)): Path<(String, i64)>, Json(body): Json<JsonValue>) -> Reply {
-    update(&site, &user, &table, id, &body, false).await
+async fn replace(
+    State(site): S,
+    user: CurrentUser,
+    via: ViaExt,
+    Path((table, id)): Path<(String, i64)>,
+    Json(body): Json<JsonValue>,
+) -> Reply {
+    update(&site, &user, via.map(|v| v.0), &table, id, &body, false).await
 }
 
-async fn patch(State(site): S, user: CurrentUser, Path((table, id)): Path<(String, i64)>, Json(body): Json<JsonValue>) -> Reply {
-    update(&site, &user, &table, id, &body, true).await
+async fn patch(
+    State(site): S,
+    user: CurrentUser,
+    via: ViaExt,
+    Path((table, id)): Path<(String, i64)>,
+    Json(body): Json<JsonValue>,
+) -> Reply {
+    update(&site, &user, via.map(|v| v.0), &table, id, &body, true).await
 }
 
-async fn remove(State(site): S, user: CurrentUser, Path((table, id)): Path<(String, i64)>) -> Reply {
-    let meta = endpoint(&site, &table, &user, true)?;
+async fn remove(State(site): S, user: CurrentUser, via: ViaExt, Path((table, id)): Path<(String, i64)>) -> Reply {
+    let (meta, opts) = endpoint(&site, &table, &user, true)?;
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
-    match q.delete().await.map_err(fail)? {
-        0 => Err(fail(Error::NotFound)),
-        _ => Ok(StatusCode::NO_CONTENT.into_response()),
-    }
+    q.filter.extend(owned(ownership(opts, &user)));
+    // Logged first (it needs the row's name); a delete that finds nothing rolls the entry back.
+    crate::atomic(async {
+        audit(&user, meta, id, 3, "Deleted", via.map(|v| v.0)).await?;
+        match q.delete().await? {
+            0 => Err(Error::NotFound),
+            _ => Ok(()),
+        }
+    })
+    .await
+    .map_err(fail)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 // ---------------------------------------------------------------- OpenAPI
 
-fn field_schema(f: &FieldMeta) -> JsonValue {
+pub(crate) fn field_schema(f: &FieldMeta) -> JsonValue {
     let mut s = match f.ty {
         FieldType::Int => json!({ "type": "integer", "format": "int64" }),
         FieldType::Float => json!({ "type": "number", "format": "double" }),
         FieldType::Bool => json!({ "type": "boolean" }),
         FieldType::Varchar(n) => json!({ "type": "string", "maxLength": n }),
         FieldType::Text => json!({ "type": "string" }),
+        FieldType::Uuid => json!({ "type": "string", "format": "uuid" }),
         FieldType::DateTime => json!({ "type": "string", "format": "date-time" }),
+        FieldType::Date => json!({ "type": "string", "format": "date" }),
+        FieldType::Decimal(p) => json!({ "type": "string", "format": "decimal", "pattern": format!(r"^-?\d*(\.\d{{0,{p}}})?$") }),
         FieldType::Json => json!({ "description": "Any JSON value" }),
     };
     if let Some(choices) = f.choices {

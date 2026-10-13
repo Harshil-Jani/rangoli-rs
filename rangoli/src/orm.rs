@@ -26,6 +26,12 @@ pub enum FieldType {
     Text,
     /// `crate::DateTime`, stored as Unix seconds.
     DateTime,
+    /// `crate::Date`, stored as days since 1970-01-01.
+    Date,
+    /// `crate::Decimal<P>`, stored as an integer count of 10^-P units.
+    Decimal(u32),
+    /// `crate::Uuid`, stored as canonical lowercase text (`VARCHAR(36)`).
+    Uuid,
     /// `crate::Json`, stored as text.
     Json,
 }
@@ -122,10 +128,28 @@ impl From<serde_json::Value> for Json {
     }
 }
 
+impl FieldType {
+    /// The `P` of a `Decimal<P>` column (0 for anything else); lets the derive read it in a const.
+    pub const fn decimal_places(self) -> u32 {
+        match self {
+            FieldType::Decimal(p) => p,
+            _ => 0,
+        }
+    }
+}
+
 impl FieldMeta {
     /// Filled in by the framework, never by forms.
     pub fn is_auto(&self) -> bool {
         self.auto_now || self.auto_now_add
+    }
+
+    /// What the framework writes into an auto field: a fresh v7 for a UUID, else the time.
+    pub fn auto_value(&self) -> Value {
+        match self.ty {
+            FieldType::Uuid => Value::from(crate::Uuid::new_v7()),
+            _ => Value::from(crate::DateTime::now()),
+        }
     }
 }
 
@@ -204,6 +228,21 @@ impl From<crate::DateTime> for Value {
         Value::Int(v.unix())
     }
 }
+impl From<crate::Date> for Value {
+    fn from(v: crate::Date) -> Self {
+        Value::Int(v.days())
+    }
+}
+impl<const P: u32> From<crate::Decimal<P>> for Value {
+    fn from(v: crate::Decimal<P>) -> Self {
+        Value::Int(v.units())
+    }
+}
+impl From<crate::Uuid> for Value {
+    fn from(v: crate::Uuid) -> Self {
+        Value::Text(v.to_string())
+    }
+}
 impl<T: Into<Value>> From<Option<T>> for Value {
     fn from(v: Option<T>) -> Self {
         v.map_or(Value::Null, Into::into)
@@ -268,6 +307,30 @@ impl FromValue for crate::DateTime {
         }
     }
 }
+impl FromValue for crate::Date {
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::Int(i) => Ok(crate::Date::from_days(i)),
+            v => mismatch(v, "date"),
+        }
+    }
+}
+impl<const P: u32> FromValue for crate::Decimal<P> {
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::Int(i) => Ok(crate::Decimal::from_units(i)),
+            v => mismatch(v, "decimal"),
+        }
+    }
+}
+impl FromValue for crate::Uuid {
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::Text(s) => crate::Uuid::parse(&s).ok_or_else(|| Error::Decode(format!("stored UUID is invalid: {s}"))),
+            v => mismatch(v, "uuid"),
+        }
+    }
+}
 impl<T: FromValue> FromValue for Option<T> {
     fn from_value(v: Value) -> Result<Self> {
         match v {
@@ -295,6 +358,15 @@ impl Kind for String {
 }
 impl Kind for crate::DateTime {
     const KIND: FieldType = FieldType::DateTime;
+}
+impl Kind for crate::Date {
+    const KIND: FieldType = FieldType::Date;
+}
+impl<const P: u32> Kind for crate::Decimal<P> {
+    const KIND: FieldType = FieldType::Decimal(P);
+}
+impl Kind for crate::Uuid {
+    const KIND: FieldType = FieldType::Uuid;
 }
 impl Kind for Json {
     const KIND: FieldType = FieldType::Json;
@@ -398,10 +470,10 @@ type AnyQuery<'q> = sqlx::query::Query<'q, Any, AnyArguments<'q>>;
 fn bind<'q>(q: AnyQuery<'q>, v: &Value, ty: FieldType) -> AnyQuery<'q> {
     match v {
         Value::Null => match ty {
-            FieldType::Int | FieldType::DateTime => q.bind(None::<i64>),
+            FieldType::Int | FieldType::DateTime | FieldType::Date | FieldType::Decimal(_) => q.bind(None::<i64>),
             FieldType::Float => q.bind(None::<f64>),
             FieldType::Bool => q.bind(None::<bool>),
-            FieldType::Varchar(_) | FieldType::Text | FieldType::Json => q.bind(None::<String>),
+            FieldType::Varchar(_) | FieldType::Text | FieldType::Json | FieldType::Uuid => q.bind(None::<String>),
         },
         Value::Bool(b) => q.bind(*b),
         Value::Int(i) => q.bind(*i),
@@ -424,8 +496,11 @@ tokio::task_local! {
 /// Run `body` in one database transaction, like Django's `transaction.atomic`.
 ///
 /// Every ORM call inside it (in this task) uses the transaction automatically.
-/// `Ok` commits, `Err` rolls back. A nested `atomic` joins the outer one.
-/// Work spawned onto other tasks does not inherit the transaction.
+/// `Ok` commits, `Err` rolls back. A nested `atomic` is a savepoint: its `Err` undoes only
+/// its own writes, and the outer block can carry on (even on Postgres, after a failed statement).
+/// Work spawned onto other tasks does not inherit the transaction. Nest blocks one after
+/// another, not concurrently: savepoints are a stack, so two nested blocks running at once in
+/// one task (`join!`) can roll back each other's work.
 ///
 /// ```ignore
 /// rangoli::atomic(async {
@@ -435,9 +510,14 @@ tokio::task_local! {
 /// }).await?;
 /// ```
 pub async fn atomic<T, F: Future<Output = Result<T>>>(body: F) -> Result<T> {
-    // ponytail: nested blocks join the outer transaction; add savepoints if partial rollback is needed.
     if TX.try_with(|_| ()).is_ok() {
-        return body.await;
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sp = format!("rangoli_sp{}", N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        raw(format!("SAVEPOINT {sp}")).await?;
+        let out = body.await;
+        let end = if out.is_ok() { "RELEASE SAVEPOINT" } else { "ROLLBACK TO SAVEPOINT" };
+        raw(format!("{end} {sp}")).await?;
+        return out;
     }
     let tx: SharedTx = Arc::new(tokio::sync::Mutex::new(db().pool.begin().await?));
     let out = TX.scope(tx.clone(), body).await;
@@ -452,6 +532,16 @@ pub async fn atomic<T, F: Future<Output = Result<T>>>(body: F) -> Result<T> {
             Err(e)
         }
     }
+}
+
+/// Run a statement unprepared in the current transaction: MySQL refuses SAVEPOINT in the
+/// prepared-statement protocol (error 1295).
+async fn raw(sql: String) -> Result<()> {
+    note_query();
+    let tx = TX.with(Arc::clone);
+    let mut conn = tx.lock().await;
+    sqlx::Executor::execute(&mut **conn, sql.as_str()).await?; // no arguments: text protocol
+    Ok(())
 }
 
 tokio::task_local! {
@@ -502,7 +592,7 @@ pub fn read(row: &AnyRow, col: &str, ty: FieldType) -> Result<Value> {
         Ok(row.try_get::<Option<i16>, _>(col)?.map(i64::from))
     }
     Ok(match ty {
-        FieldType::Int | FieldType::DateTime => int(row, col)?.map_or(Value::Null, Value::Int),
+        FieldType::Int | FieldType::DateTime | FieldType::Date | FieldType::Decimal(_) => int(row, col)?.map_or(Value::Null, Value::Int),
         FieldType::Float => match row.try_get::<Option<f64>, _>(col) {
             Ok(v) => v.map_or(Value::Null, Value::Float),
             Err(_) => int(row, col)?.map_or(Value::Null, |i| Value::Float(i as f64)),
@@ -511,7 +601,7 @@ pub fn read(row: &AnyRow, col: &str, ty: FieldType) -> Result<Value> {
             Ok(v) => v.map_or(Value::Null, Value::Bool),
             Err(_) => int(row, col)?.map_or(Value::Null, |i| Value::Bool(i != 0)),
         },
-        FieldType::Varchar(_) | FieldType::Text | FieldType::Json => match row.try_get::<Option<String>, _>(col) {
+        FieldType::Varchar(_) | FieldType::Text | FieldType::Json | FieldType::Uuid => match row.try_get::<Option<String>, _>(col) {
             Ok(v) => v.map_or(Value::Null, Value::Text),
             // MySQL TEXT columns surface as BLOB through the Any driver.
             Err(_) => match row.try_get::<Option<Vec<u8>>, _>(col)? {
@@ -939,6 +1029,58 @@ impl<M: Model> QuerySet<M> {
     pub async fn all(self) -> Result<Vec<M>> {
         self.q.fetch().await?.iter().map(M::from_row).collect()
     }
+
+    /// Each row with the row its foreign key points at, in one query (Django's `select_related`):
+    /// `Post::objects().filter(..).select_related(Post::AUTHOR).await?` gives `Vec<(Post, Option<Author>)>`
+    /// (`None` only for a null key). Filters, ordering and limits apply to `M` as usual.
+    pub async fn select_related<T: Model>(self, fk: Fk<M, T>) -> Result<Vec<(M, Option<T>)>> {
+        let d = db().dialect;
+        let mut p = vec![];
+        // The filtered, ordered, limited query is reused as-is, so its unqualified columns stay unambiguous.
+        let inner = self.q.select_sql(d, &mut p);
+        let target = T::meta();
+        let mut cols = vec![format!("{}.*", d.quote("t"))];
+        for name in std::iter::once("id").chain(target.fields.iter().map(|f| f.name)) {
+            cols.push(format!("{}.{} AS {}", d.quote("r"), d.quote(name), d.quote(&format!("r__{name}"))));
+        }
+        let mut sql = format!(
+            "SELECT {} FROM ({inner}) {} LEFT JOIN {} {} ON {}.{} = {}.{}",
+            cols.join(", "),
+            d.quote("t"),
+            d.quote(target.table),
+            d.quote("r"),
+            d.quote("r"),
+            d.quote("id"),
+            d.quote("t"),
+            d.quote(fk.col)
+        );
+        // A subquery's order isn't kept by the join, so order the outside the same way.
+        if !self.q.order.is_empty() {
+            let parts: Vec<String> = self
+                .q
+                .order
+                .iter()
+                .map(|(c, desc)| format!("{}.{}{}", d.quote("t"), d.quote(c), if *desc { " DESC" } else { "" }))
+                .collect();
+            sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
+        }
+        let mut out = vec![];
+        for row in fetch_all(&sql, &p).await? {
+            let source = M::from_row(&row)?;
+            let related = match Option::<i64>::from_value(read(&row, "r__id", FieldType::Int)?)? {
+                None => None,
+                Some(id) => {
+                    let mut vals = vec![];
+                    for f in target.fields {
+                        vals.push(read(&row, &format!("r__{}", f.name), f.ty)?);
+                    }
+                    Some(T::from_values(Some(id), vals)?)
+                }
+            };
+            out.push((source, related));
+        }
+        Ok(out)
+    }
     pub async fn first(self) -> Result<Option<M>> {
         Ok(self.limit(1).all().await?.into_iter().next())
     }
@@ -1065,6 +1207,81 @@ impl<S: Model, T: Model> M2m<S, T> {
     /// The `S` rows related to one `T`: the reverse direction.
     pub fn reverse(self, target: &T) -> QuerySet<S> {
         S::objects().filter(self.has(target.pk().unwrap_or(-1)))
+    }
+}
+
+/// A foreign key from `S` to `T`, generated as `Post::AUTHOR` for `#[field(fk = Author)] author_id`.
+/// No lazy loading: each method is one explicit query, whatever the number of rows.
+pub struct Fk<S, T> {
+    col: &'static str,
+    _p: PhantomData<fn() -> (S, T)>,
+}
+
+impl<S, T> Clone for Fk<S, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<S, T> Copy for Fk<S, T> {}
+
+impl<S: Model, T: Model> Fk<S, T> {
+    pub const fn new(col: &'static str) -> Self {
+        Fk { col, _p: PhantomData }
+    }
+
+    fn key(self, source: &S) -> Option<i64> {
+        let i = S::meta().fields.iter().position(|f| f.name == self.col)?;
+        match source.values().swap_remove(i) {
+            Value::Int(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The row one `S` points at: `post.author()`.
+    pub fn get(self, source: &S) -> impl Future<Output = Result<T>> + Send + 'static {
+        let id = self.key(source);
+        async move { T::get(id.ok_or(Error::NotFound)?).await }
+    }
+
+    /// The rows many `S`s point at, in one query (what Django's `select_related` is for):
+    /// `let authors = Post::AUTHOR.load(&posts).await?; authors[&post.author_id]`.
+    pub fn load(self, sources: &[S]) -> impl Future<Output = Result<HashMap<i64, T>>> + Send + 'static {
+        let mut ids: Vec<i64> = sources.iter().filter_map(|s| self.key(s)).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        async move {
+            if ids.is_empty() {
+                return Ok(HashMap::new());
+            }
+            T::in_bulk(ids).await
+        }
+    }
+
+    /// The `S`s pointing at one `T` (Django's `author.post_set`), as a queryset to refine.
+    pub fn reverse(self, target: &T) -> QuerySet<S> {
+        let mut qs = S::objects();
+        qs.q.filter.push(Node::Cmp(self.col, "=", Value::Int(target.pk().unwrap_or(-1)), FieldType::Int));
+        qs
+    }
+
+    /// The `S`s pointing at each of many `T`s, in one query (`prefetch_related("post_set")`):
+    /// target id -> its rows, ordered by id. Targets without any map to an empty list.
+    pub fn prefetch_reverse(self, targets: &[T]) -> impl Future<Output = Result<HashMap<i64, Vec<S>>>> + Send + 'static {
+        let ids: Vec<i64> = targets.iter().filter_map(Model::pk).collect();
+        async move {
+            let mut out: HashMap<i64, Vec<S>> = ids.iter().map(|id| (*id, vec![])).collect();
+            if ids.is_empty() {
+                return Ok(out);
+            }
+            let mut qs = S::objects().order_by(Order("id", false, PhantomData));
+            qs.q.filter.push(Node::In(self.col, ids.into_iter().map(Value::Int).collect(), FieldType::Int));
+            for s in qs.all().await? {
+                if let Some(list) = self.key(&s).and_then(|k| out.get_mut(&k)) {
+                    list.push(s);
+                }
+            }
+            Ok(out)
+        }
     }
 }
 

@@ -2,8 +2,11 @@
 //! are always available (the tables exist whichever features an app enables, so
 //! switching a feature never changes the schema); the pages need the `admin` feature.
 
-use crate::orm::{FieldType, Model};
+use crate::orm::{FieldType, Model, QuerySet};
+use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
+use std::sync::Arc;
 
 #[cfg(feature = "admin")]
 mod views;
@@ -69,6 +72,24 @@ pub struct Options {
     pub(crate) ordering: Option<(&'static str, bool)>,
     pub(crate) readonly_fields: Vec<&'static str>,
     pub(crate) list_per_page: Option<u64>,
+    pub(crate) no_add: bool,
+    pub(crate) actions: Vec<Action>,
+}
+
+type ActionFn = dyn Fn(Vec<i64>) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send>> + Send + Sync;
+
+/// A custom changelist action, type-erased: (name, label, run on the selected ids).
+#[derive(Clone)]
+pub(crate) struct Action {
+    pub(crate) name: &'static str,
+    pub(crate) label: &'static str,
+    pub(crate) run: Arc<ActionFn>,
+}
+
+impl std::fmt::Debug for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Action({})", self.name)
+    }
 }
 
 impl<M: Model> Default for ModelAdmin<M> {
@@ -116,6 +137,37 @@ impl<M: Model> ModelAdmin<M> {
         self
     }
 
+    /// A changelist action, Django's `ModelAdmin.actions`: `run` gets a queryset of the selected
+    /// rows. It runs in one transaction (an `Err` undoes it), each row gets a History entry, and
+    /// the admin says "Applied “label” to N posts.". `name` is the form value, so keep it stable.
+    ///
+    /// ```ignore
+    /// .action("publish", "Mark selected as published", |selected| async move {
+    ///     selected.update([Post::PUBLISHED.set(true)]).await.map(drop)
+    /// })
+    /// ```
+    pub fn action<F, Fut>(mut self, name: &'static str, label: &'static str, run: F) -> Self
+    where
+        F: Fn(QuerySet<M>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = crate::Result<()>> + Send + 'static,
+    {
+        let run = Arc::new(run);
+        let erased: Arc<ActionFn> = Arc::new(move |ids: Vec<i64>| {
+            let run = run.clone();
+            Box::pin(async move { run(M::objects().filter(crate::orm::Col::<M, i64>::new("id").is_in(ids))).await })
+        });
+        self.opts.actions.retain(|a| a.name != name);
+        self.opts.actions.push(Action { name, label, run: erased });
+        self
+    }
+
+    /// No "Add" in the admin (Django's `has_add_permission` returning False), for rows made
+    /// elsewhere: API tokens, task runs, imports. Change and delete still work.
+    pub fn no_add(mut self) -> Self {
+        self.opts.no_add = true;
+        self
+    }
+
     pub fn list_per_page(mut self, n: u64) -> Self {
         self.opts.list_per_page = Some(n.max(1));
         self
@@ -131,7 +183,9 @@ impl<M: Model> ModelAdmin<M> {
             }
         }
         for n in self.opts.list_filter.iter().flatten() {
-            if !field(n).is_some_and(|f| matches!(f.ty, FieldType::Bool | FieldType::DateTime) || f.fk.is_some() || f.choices.is_some()) {
+            if !field(n).is_some_and(|f| {
+                matches!(f.ty, FieldType::Bool | FieldType::DateTime | FieldType::Date) || f.fk.is_some() || f.choices.is_some()
+            }) {
                 return Err(format!("{}: list_filter supports boolean, date, choice and foreign key columns, not `{n}`", meta.name));
             }
         }

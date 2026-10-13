@@ -18,12 +18,16 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 minijinja = { version = "2", features = ["loader"], optional = true }
 argon2 = "0.5"
 getrandom = "0.3"
+# Already compiled in through sqlx; hashes API tokens.
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_urlencoded = "0.7"
 rpassword = "7"
 futures-util = { version = "0.3", default-features = false, optional = true }
 tower-http = { version = "0.6", features = ["catch-panic", "timeout"] }
+# Already in the tree through axum; the MCP server calls the JSON API router with it.
+tower = { version = "0.5", features = ["util"] }
 # The SQLite sqlx already links; used only to switch off its global memory statistics.
 libsqlite3-sys = { version = "0.30", optional = true }
 

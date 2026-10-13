@@ -12,8 +12,11 @@
 //! realtime::publish("chat:lobby", "deploy finished"); // from any view or background task
 //! ```
 //!
-//! Groups live in this process. ponytail: one instance; fan out through Postgres
-//! LISTEN/NOTIFY when an app runs several.
+//! On Postgres, `runserver` and `worker` also join every other instance through
+//! LISTEN/NOTIFY, so a publish from any process (a web server, a background worker) reaches
+//! subscribers on all of them, with no Redis. Delivery across instances is at most once,
+//! like Channels' Redis layer: a message sent while an instance's listener is reconnecting
+//! is not replayed. On MySQL and SQLite groups live in one process.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -38,9 +41,98 @@ fn sender(group: &str) -> broadcast::Sender<String> {
     groups.entry(group.to_string()).or_insert_with(|| broadcast::channel(BUFFER).0).clone()
 }
 
-/// Send `message` to everyone subscribed to `group`. Returns how many received it.
+/// Send `message` to everyone subscribed to `group`, in this process and (on Postgres) every
+/// other instance. Returns how many local subscribers received it.
 pub fn publish(group: &str, message: impl Into<String>) -> usize {
-    sender(group).send(message.into()).unwrap_or(0)
+    let message = message.into();
+    #[cfg(feature = "postgres")]
+    cluster::forward(group, &message);
+    sender(group).send(message).unwrap_or(0)
+}
+
+#[cfg(feature = "postgres")]
+pub use cluster::join_cluster;
+
+#[cfg(feature = "postgres")]
+mod cluster {
+    use std::sync::OnceLock;
+    use tokio::sync::mpsc;
+
+    pub(super) const CHANNEL: &str = "rangoli_realtime";
+    /// Postgres rejects NOTIFY payloads of 8000 bytes or more.
+    pub(super) const MAX_PAYLOAD: usize = 7900;
+    /// Publishes waiting for their NOTIFY; beyond this (database down) they stay local.
+    const QUEUE: usize = 4096;
+
+    static OUTBOX: OnceLock<mpsc::Sender<String>> = OnceLock::new();
+    pub(super) static INSTANCE: OnceLock<String> = OnceLock::new();
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub(super) struct Envelope {
+        pub(super) from: String,
+        pub(super) group: String,
+        pub(super) message: String,
+    }
+
+    pub(super) fn forward(group: &str, message: &str) {
+        let (Some(outbox), Some(from)) = (OUTBOX.get(), INSTANCE.get()) else { return };
+        let env = Envelope { from: from.clone(), group: group.into(), message: message.into() };
+        let Ok(payload) = serde_json::to_string(&env) else { return };
+        if payload.len() > MAX_PAYLOAD {
+            eprintln!(
+                "rangoli realtime: a {}-byte message to `{group}` is too big for NOTIFY; delivered on this instance only",
+                payload.len()
+            );
+        } else if outbox.try_send(payload).is_err() {
+            eprintln!("rangoli realtime: NOTIFY queue full (is the database down?); delivered on this instance only");
+        }
+    }
+
+    /// Fan publishes out to, and in from, every instance on this Postgres database.
+    /// `runserver` and `worker` call it; calling it again does nothing.
+    pub async fn join_cluster(database_url: &str) -> crate::Result<()> {
+        if INSTANCE.get().is_some() {
+            return Ok(());
+        }
+        let mut listener = sqlx::postgres::PgListener::connect(database_url).await?;
+        listener.listen(CHANNEL).await?;
+        let me = crate::auth::random_hex(8)?;
+        if INSTANCE.set(me.clone()).is_err() {
+            return Ok(());
+        }
+        // In: deliver what other instances published. PgListener reconnects by itself.
+        tokio::spawn(async move {
+            loop {
+                match listener.recv().await {
+                    Ok(n) => match serde_json::from_str::<Envelope>(n.payload()) {
+                        Ok(env) if env.from != me => {
+                            let _ = super::sender(&env.group).send(env.message);
+                        }
+                        _ => {}
+                    },
+                    Err(e) => {
+                        eprintln!("rangoli realtime: listener: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        });
+        // Out: one sender, so messages leave in the order they were published.
+        let (tx, mut rx) = mpsc::channel::<String>(QUEUE);
+        let _ = OUTBOX.set(tx);
+        tokio::spawn(async move {
+            while let Some(payload) = rx.recv().await {
+                let params = vec![
+                    (crate::orm::Value::Text(CHANNEL.into()), crate::orm::FieldType::Text),
+                    (crate::orm::Value::Text(payload), crate::orm::FieldType::Text),
+                ];
+                if let Err(e) = crate::orm::execute("SELECT pg_notify($1, $2)", &params).await {
+                    eprintln!("rangoli realtime: NOTIFY failed: {e}");
+                }
+            }
+        });
+        Ok(())
+    }
 }
 
 /// Subscribe to `group` yourself (for custom handlers).
