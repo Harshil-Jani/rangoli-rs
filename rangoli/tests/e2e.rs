@@ -278,6 +278,41 @@ async fn scenario() {
         assert_eq!(per_author[&a.id.unwrap()].iter().map(|p| p.id).collect::<Vec<_>>(), one_by_one, "prefetch matches per-object access");
     }
 
+    // ---- bulk_create and upsert
+    let mut many: Vec<Author> =
+        (0..250).map(|i| Author { id: None, name: format!("Bulk {i}"), email: format!("bulk{i}@example.com") }).collect();
+    let (res, queries) = orm::count_queries(Author::bulk_create(&mut many)).await;
+    res.unwrap();
+    assert_eq!(queries, 1, "250 rows, one INSERT");
+    assert!(many.iter().all(|a| a.id.is_some()), "every row gets its id");
+    assert_eq!(Author::get(many[137].id.unwrap()).await.unwrap(), many[137], "ids match the stored rows");
+    let mut mixed = vec![
+        Author { id: None, name: "Renamed 0".into(), email: "bulk0@example.com".into() },
+        Author { id: None, name: "Brand new".into(), email: "new-one@example.com".into() },
+        Author { id: None, name: "Renamed 1".into(), email: "bulk1@example.com".into() },
+    ];
+    let (res, queries) = orm::count_queries(Author::bulk_upsert(&mut mixed, Author::EMAIL)).await;
+    res.unwrap();
+    assert!(queries <= 2, "one statement (plus an id lookup on MySQL): {queries}");
+    assert_eq!((mixed[0].id, mixed[2].id), (many[0].id, many[1].id), "existing rows keep their id");
+    assert_eq!(Author::get(many[0].id.unwrap()).await.unwrap().name, "Renamed 0", "and get the new values");
+    assert_eq!(Author::get(mixed[1].id.unwrap()).await.unwrap().name, "Brand new", "new rows are inserted");
+    let mut one = Author { id: None, name: "Once more".into(), email: "bulk2@example.com".into() };
+    one.upsert(Author::EMAIL).await.unwrap();
+    assert_eq!(one.id, many[2].id, "upsert of one row");
+    assert!(matches!(one.upsert(Author::NAME).await, Err(Error::Config(_))), "only on a unique column");
+    Author::objects()
+        .filter(
+            Author::EMAIL.contains("example.com")
+                & (Author::NAME.starts_with("Bulk")
+                    | Author::NAME.starts_with("Renamed")
+                    | Author::NAME.eq("Brand new")
+                    | Author::NAME.eq("Once more")),
+        )
+        .delete()
+        .await
+        .unwrap();
+
     // ---- model forms
     let pairs = |kv: &[(&str, &str)]| kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
     let errs = ModelForm::<Author>::new().validate(&pairs(&[("name", "Form Author"), ("email", "")])).await.unwrap_err();
@@ -427,6 +462,14 @@ async fn scenario() {
     assert_eq!(fresh.price.to_string(), "19.99", "decimals round-trip exactly");
     assert_eq!((fresh.public_id, fresh.public_id.version()), (long.public_id, 7), "auto fills a v7 UUID on insert");
     assert_eq!(PostV2::objects().filter(PostV2::PUBLIC_ID.eq(long.public_id)).get().await.unwrap().id, long.id, "lookup by UUID");
+    let first_seen = fresh.created_at;
+    let mut again = PostV2 { id: None, title: "upserted".into(), created_at: DateTime::from_unix(0), ..fresh.clone() };
+    again.upsert(PostV2::PUBLIC_ID).await.unwrap();
+    let after = PostV2::get(fresh.id.unwrap()).await.unwrap();
+    assert_eq!((again.id, after.title.as_str(), after.created_at), (fresh.id, "upserted", first_seen), "an upsert keeps the creation time");
+    let mut fresh = after;
+    fresh.title = "x".repeat(300);
+    fresh.save().await.unwrap();
     let chosen = Uuid::new_v4();
     let mut own = PostV2 { id: None, public_id: chosen, title: "own id".into(), ..fresh.clone() };
     own.save().await.unwrap();

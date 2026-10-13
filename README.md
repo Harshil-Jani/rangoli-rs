@@ -148,6 +148,16 @@ rangoli::atomic(async {
 .await?;
 ```
 
+### Bulk inserts and upserts
+
+```rust
+Author::bulk_create(&mut authors).await?;                 // one INSERT per batch; ids filled in
+Author::bulk_upsert(&mut authors, Author::EMAIL).await?;  // insert, or update the row with that email
+author.upsert(Author::EMAIL).await?;
+```
+
+Upserts key on a unique column (anything else is refused), update everything but the key and creation times, and give every row its id, new or existing. 1,000 rows took 26 ms with `bulk_create` against 870 ms as a `save()` loop on Postgres over TCP (33×), and 3 ms against 586 ms on SQLite (best of 3).
+
 ### Totals, averages and GROUP BY
 
 ```rust

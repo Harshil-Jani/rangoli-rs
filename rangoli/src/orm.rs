@@ -960,6 +960,104 @@ pub(crate) async fn insert_row(table: &str, cols: &[(&str, Value, FieldType)]) -
     i64::from_value(read(rows.first().ok_or_else(|| Error::Decode("INSERT returned no id".into()))?, "id", FieldType::Int)?)
 }
 
+/// Insert many rows with as few statements as the database allows, and fill in their ids. With
+/// `conflict` (a unique column), a row whose value is already there updates it instead (upsert).
+async fn write_many<M: Model>(rows: &mut [M], conflict: Option<&'static str>) -> Result<()> {
+    let meta = M::meta();
+    if let Some(c) = conflict {
+        if !meta.field(c).is_some_and(|f| f.unique) {
+            return Err(Error::Config(format!("upsert on `{}.{c}` needs a unique column", meta.table)));
+        }
+    }
+    let d = db().dialect;
+    let names: Vec<&str> = meta.fields.iter().map(|f| f.name).collect();
+    // Placeholders per statement stay under every database's limit (SQLite's is 32766).
+    let per_batch = (30_000 / names.len().max(1)).clamp(1, 1000);
+    for batch in rows.chunks_mut(per_batch) {
+        let mut params: Params = vec![];
+        let mut tuples = vec![];
+        for row in batch.iter_mut() {
+            row.before_save(true);
+            let mut phs = vec![];
+            for (f, v) in meta.fields.iter().zip(row.values()) {
+                params.push((v, f.ty));
+                phs.push(d.ph(params.len()));
+            }
+            tuples.push(format!("({})", phs.join(", ")));
+        }
+        let cols: Vec<String> = names.iter().map(|n| d.quote(n)).collect();
+        let mut sql = format!("INSERT INTO {} ({}) VALUES {}", d.quote(meta.table), cols.join(", "), tuples.join(", "));
+        if let Some(c) = conflict {
+            // Everything but the key and the creation time; at least one column, so the existing
+            // row comes back from RETURNING.
+            let mut set: Vec<&str> = meta.fields.iter().filter(|f| f.name != c && !f.auto_now_add).map(|f| f.name).collect();
+            if set.is_empty() {
+                set.push(c);
+            }
+            let assign = |src: &str| set.iter().map(|n| format!("{q} = {src}.{q}", q = d.quote(n))).collect::<Vec<_>>().join(", ");
+            sql.push_str(&match d {
+                Dialect::Mysql => format!(" AS new ON DUPLICATE KEY UPDATE {}", assign("new")),
+                _ => format!(" ON CONFLICT ({}) DO UPDATE SET {}", d.quote(c), assign("EXCLUDED")),
+            });
+        }
+        let ids: Vec<i64> = match (d, conflict) {
+            (Dialect::Mysql, None) => {
+                // One multi-row INSERT gets consecutive ids, starting at LAST_INSERT_ID().
+                let first =
+                    execute(&sql, &params).await?.last_insert_id().ok_or_else(|| Error::Decode("MySQL returned no insert id".into()))?;
+                (first..first + batch.len() as i64).collect()
+            }
+            (Dialect::Mysql, Some(c)) => {
+                execute(&sql, &params).await?;
+                let keys: Vec<Value> = batch.iter().map(|r| key_of(meta, r, c)).collect();
+                let mut q = Query::new(meta);
+                q.filter.push(Node::In(c, keys.clone(), meta.field(c).map_or(FieldType::Text, |f| f.ty)));
+                ids_by_key(&q.rows().await?, meta, c, &keys)?
+            }
+            (_, None) => {
+                sql.push_str(&format!(" RETURNING {}", d.quote("id")));
+                let rows = fetch_all(&sql, &params).await?;
+                rows.iter().map(|r| i64::from_value(read(r, "id", FieldType::Int)?)).collect::<Result<_>>()?
+            }
+            (_, Some(c)) => {
+                sql.push_str(&format!(" RETURNING {}, {}", d.quote("id"), d.quote(c)));
+                let ty = meta.field(c).map_or(FieldType::Text, |f| f.ty);
+                let back: Vec<(i64, Value)> = fetch_all(&sql, &params)
+                    .await?
+                    .iter()
+                    .map(|r| Ok((i64::from_value(read(r, "id", FieldType::Int)?)?, read(r, c, ty)?)))
+                    .collect::<Result<_>>()?;
+                batch
+                    .iter()
+                    .map(|r| {
+                        let k = key_of(meta, r, c);
+                        back.iter().find(|(_, v)| *v == k).map(|(id, _)| *id).ok_or_else(|| Error::Decode("upsert lost a row".into()))
+                    })
+                    .collect::<Result<_>>()?
+            }
+        };
+        if ids.len() != batch.len() {
+            return Err(Error::Decode(format!("expected {} ids, got {}", batch.len(), ids.len())));
+        }
+        for (row, id) in batch.iter_mut().zip(ids) {
+            row.set_pk(id);
+        }
+    }
+    Ok(())
+}
+
+fn key_of<M: Model>(meta: &ModelMeta, row: &M, col: &str) -> Value {
+    let i = meta.fields.iter().position(|f| f.name == col).unwrap_or(0);
+    row.values().swap_remove(i)
+}
+
+fn ids_by_key(found: &[(i64, Vec<Value>)], meta: &ModelMeta, col: &str, keys: &[Value]) -> Result<Vec<i64>> {
+    let i = meta.fields.iter().position(|f| f.name == col).unwrap_or(0);
+    keys.iter()
+        .map(|k| found.iter().find(|(_, vals)| vals[i] == *k).map(|(id, _)| *id).ok_or_else(|| Error::Decode("upsert lost a row".into())))
+        .collect()
+}
+
 pub(crate) fn by_id(id: i64) -> Node {
     Node::Cmp("id", "=", Value::Int(id), FieldType::Int)
 }
@@ -996,6 +1094,22 @@ pub trait Model: Sized + Send + Sync + Unpin + 'static {
         let mut qs = Self::objects();
         qs.q.filter.push(Node::In("id", ids, FieldType::Int));
         async move { Ok(qs.all().await?.into_iter().map(|m| (m.pk().unwrap(), m)).collect()) }
+    }
+
+    /// Insert many rows in one statement per batch (Django's `bulk_create`) and fill in their ids.
+    fn bulk_create(rows: &mut [Self]) -> impl Future<Output = Result<()>> + Send {
+        write_many(rows, None)
+    }
+
+    /// Insert many rows, updating any whose `on` value (a unique column) already exists, in one
+    /// statement per batch; every row gets its id, new or existing. Creation times aren't touched.
+    fn bulk_upsert<T>(rows: &mut [Self], on: Col<Self, T>) -> impl Future<Output = Result<()>> + Send {
+        write_many(rows, Some(on.name))
+    }
+
+    /// Insert this row, or update the one that already has its `on` value (a unique column).
+    fn upsert<T>(&mut self, on: Col<Self, T>) -> impl Future<Output = Result<()>> + Send {
+        write_many(std::slice::from_mut(self), Some(on.name))
     }
 
     /// INSERT when unsaved (and set `id`), otherwise UPDATE every column.
