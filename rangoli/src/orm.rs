@@ -181,6 +181,8 @@ pub struct ModelMeta {
     pub m2m: &'static [M2mMeta],
     /// Composite indexes declared with `#[model(index(a, b))]`.
     pub indexes: &'static [&'static [&'static str]],
+    /// Text fields with a full-text index, from `#[model(search(title, body))]`.
+    pub search: &'static [&'static str],
 }
 
 #[derive(Debug)]
@@ -670,6 +672,41 @@ pub(crate) enum Node {
         from: &'static str,
         cond: Box<Node>,
     },
+    /// Full-text match over a model's `search(...)` fields: every word, as a prefix.
+    /// `few`: the caller counted few matches, so on Postgres look them up in the index first
+    /// (see `Query::few_search_matches`).
+    Search {
+        table: &'static str,
+        cols: &'static [&'static str],
+        words: Vec<String>,
+        few: bool,
+    },
+}
+
+/// The filter for a search of `meta`: full-text when the model has `search(...)`, otherwise a
+/// substring match on its text fields (every word somewhere in some field).
+pub(crate) fn search_node(meta: &'static ModelMeta, text: &str) -> Node {
+    let words = search_words(text);
+    if !meta.search.is_empty() {
+        return Node::Search { table: meta.table, cols: meta.search, words, few: false };
+    }
+    let texts: Vec<&'static str> = meta
+        .fields
+        .iter()
+        .filter(|f| matches!(f.ty, FieldType::Varchar(_) | FieldType::Text) && !f.private && !f.password)
+        .map(|f| f.name)
+        .collect();
+    Node::And(words.iter().map(|w| Node::Or(texts.iter().map(|c| Node::Like(c, format!("%{}%", like_escape(w)))).collect())).collect())
+}
+
+/// Search input as plain words: letters and digits only, lowercased, so no input can turn
+/// into search-engine syntax (or an error). Capped at 16 words of 64 characters.
+pub(crate) fn search_words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .take(16)
+        .map(|w| w.chars().take(64).collect::<String>().to_lowercase())
+        .collect()
 }
 
 impl Node {
@@ -723,6 +760,35 @@ impl Node {
                 cond.render(d, sql, p);
                 sql.push(')');
             }
+            Node::Search { words, .. } if words.is_empty() => sql.push_str("1=1"),
+            Node::Search { table, cols, words, few } => match d {
+                Dialect::Postgres => {
+                    let doc = crate::migrate::pg_search_doc(cols);
+                    if *few {
+                        let (id, t) = (d.quote("id"), d.quote(table));
+                        sql.push_str(&format!("{id} = ANY(ARRAY(SELECT {id} FROM {t} WHERE {doc} @@ to_tsquery('simple', "));
+                    } else {
+                        sql.push_str(&format!("{doc} @@ to_tsquery('simple', "));
+                    }
+                    let q = words.iter().map(|w| format!("{w}:*")).collect::<Vec<_>>().join(" & ");
+                    push(sql, Value::Text(q), FieldType::Text);
+                    sql.push_str(if *few { ")))" } else { ")" });
+                }
+                Dialect::Mysql => {
+                    let list: Vec<String> = cols.iter().map(|c| d.quote(c)).collect();
+                    sql.push_str(&format!("MATCH ({}) AGAINST (", list.join(", ")));
+                    let q = words.iter().map(|w| format!("+{w}*")).collect::<Vec<_>>().join(" ");
+                    push(sql, Value::Text(q), FieldType::Text);
+                    sql.push_str(" IN BOOLEAN MODE)");
+                }
+                Dialect::Sqlite => {
+                    let fts = d.quote(&crate::migrate::index_name(table, &["search"], false));
+                    sql.push_str(&format!("{} IN (SELECT rowid FROM {fts} WHERE {fts} MATCH ", d.quote("id")));
+                    let q = words.iter().map(|w| format!("\"{w}\"*")).collect::<Vec<_>>().join(" ");
+                    push(sql, Value::Text(q), FieldType::Text);
+                    sql.push(')');
+                }
+            },
         }
     }
 }
@@ -947,6 +1013,18 @@ impl Query {
                 Ok((id, vals))
             })
             .collect()
+    }
+
+    /// Tell searches in this query that `matches` rows were counted. On Postgres, ordering a
+    /// search by an indexed column lets the planner walk that index and test every row; with few
+    /// matches that's a full scan (1.1 s at 1M rows for one hit). Up to 5,000 matches, the ids
+    /// come from the full-text index first instead (0.1 ms); past that, the walk finds a page fast.
+    pub(crate) fn few_search_matches(&mut self, matches: i64) {
+        for n in &mut self.filter {
+            if let Node::Search { few, .. } = n {
+                *few = matches <= 5_000;
+            }
+        }
     }
 
     pub async fn count(&self) -> Result<i64> {
@@ -1337,6 +1415,14 @@ pub struct QuerySet<M> {
 impl<M: Model> QuerySet<M> {
     pub fn filter(mut self, e: Expr<M>) -> Self {
         self.q.filter.push(e.node);
+        self
+    }
+    /// Full-text search over the model's `#[model(search(...))]` fields: rows containing every
+    /// word (as a prefix: "rus" finds "Rust"), using the database's full-text index. Input is
+    /// reduced to plain words, so anything a user types is safe. Without `search(...)` on the
+    /// model it falls back to a case-insensitive substring match on its text fields.
+    pub fn search(mut self, text: &str) -> Self {
+        self.q.filter.push(search_node(M::meta(), text));
         self
     }
     pub fn exclude(mut self, e: Expr<M>) -> Self {

@@ -509,7 +509,9 @@ async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &st
         let v = from_json(f, &j).map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ k.clone(): [e] }))).into_response())?;
         q.filter.push(if v == Value::Null { Node::IsNull(f.name, false) } else { Node::Cmp(f.name, "=", v, f.ty) });
     }
-    if let Some(term) = param(&p, "search").filter(|s| !s.is_empty()) {
+    if let Some(term) = param(&p, "search").filter(|s| !s.is_empty() && !meta.search.is_empty()) {
+        q.filter.push(orm::search_node(meta, term)); // the model's full-text index
+    } else if let Some(term) = param(&p, "search").filter(|s| !s.is_empty()) {
         let pat = format!("%{}%", like_escape(term));
         let text: Vec<Node> = meta
             .fields
@@ -561,6 +563,7 @@ async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &st
     }
     let offset: u64 = param(&p, "offset").and_then(|v| v.parse().ok()).unwrap_or(0);
     let count = q.count().await.map_err(fail)? as u64;
+    q.few_search_matches(count as i64);
     q.limit = Some(limit);
     q.offset = Some(offset);
     let mut results: Vec<JsonValue> = q.rows().await.map_err(fail)?.iter().map(|(id, v)| to_json(meta, *id, v)).collect();

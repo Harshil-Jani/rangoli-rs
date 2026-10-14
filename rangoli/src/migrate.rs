@@ -40,6 +40,10 @@ pub struct Index {
     pub columns: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub unique: bool,
+    /// A full-text index over `columns` (`#[model(search(...))]`): GIN over `to_tsvector` on
+    /// Postgres, `FULLTEXT` on MySQL, an FTS5 table kept in sync by triggers on SQLite.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub fulltext: bool,
 }
 
 /// A table's schema: its columns (without the implicit `id`) and indexes.
@@ -124,7 +128,14 @@ fn indexes_of(meta: &ModelMeta) -> Vec<Index> {
             name: index_name(meta.table, cols, false),
             columns: cols.iter().map(|c| c.to_string()).collect(),
             unique: false,
+            fulltext: false,
         })
+        .chain((!meta.search.is_empty()).then(|| Index {
+            name: index_name(meta.table, &["search"], false),
+            columns: meta.search.iter().map(|c| c.to_string()).collect(),
+            unique: false,
+            fulltext: true,
+        }))
         .collect()
 }
 
@@ -140,7 +151,7 @@ pub fn through_table(source: &str, target: &str) -> Table {
     };
     Table {
         columns: vec![side("source_id", source), side("target_id", target)],
-        indexes: vec![Index { name: String::new(), columns: vec!["source_id".into(), "target_id".into()], unique: true }],
+        indexes: vec![Index { name: String::new(), columns: vec!["source_id".into(), "target_id".into()], unique: true, fulltext: false }],
     }
 }
 
@@ -575,7 +586,68 @@ fn concurrent_index(d: Dialect, before: &State, op: &Op) -> Option<(String, Stri
     Some((index.name.clone(), create_index(d, table, index).replacen("INDEX ", "INDEX CONCURRENTLY IF NOT EXISTS ", 1)))
 }
 
+/// The text a full-text index covers, as the same SQL expression the index and the search
+/// filter use (Postgres only matches an expression index on an identical expression).
+pub(crate) fn pg_search_doc(cols: &[impl AsRef<str>]) -> String {
+    let parts: Vec<String> = cols.iter().map(|c| format!("coalesce({}, '')", Dialect::Postgres.quote(c.as_ref()))).collect();
+    format!("to_tsvector('simple', {})", parts.join(" || ' ' || "))
+}
+
+/// The FTS5 table behind a SQLite full-text index, and the triggers that keep it in step with
+/// the table. Starts by dropping any old copy, so a table rebuild can recreate it.
+fn sqlite_fts(table: &str, ix: &Index) -> String {
+    let q = |s: &str| Dialect::Sqlite.quote(s);
+    let (n, t) = (q(&ix.name), q(table));
+    let cols: Vec<String> = ix.columns.iter().map(|c| q(c)).collect();
+    let (list, new, old) = (
+        cols.join(", "),
+        cols.iter().map(|c| format!("new.{c}")).collect::<Vec<_>>().join(", "),
+        cols.iter().map(|c| format!("old.{c}")).collect::<Vec<_>>().join(", "),
+    );
+    let trig = |s: &str| q(&format!("{}_{s}", ix.name));
+    [
+        sqlite_fts_drop(&ix.name),
+        format!("CREATE VIRTUAL TABLE {n} USING fts5({list}, content='{}', content_rowid='id')", table.replace('\'', "''")),
+        format!("CREATE TRIGGER {} AFTER INSERT ON {t} BEGIN INSERT INTO {n} (rowid, {list}) VALUES (new.\"id\", {new}); END", trig("ai")),
+        format!(
+            "CREATE TRIGGER {} AFTER DELETE ON {t} BEGIN INSERT INTO {n} ({n}, rowid, {list}) VALUES ('delete', old.\"id\", {old}); END",
+            trig("ad")
+        ),
+        format!(
+            "CREATE TRIGGER {} AFTER UPDATE ON {t} BEGIN INSERT INTO {n} ({n}, rowid, {list}) VALUES ('delete', old.\"id\", {old}); \
+             INSERT INTO {n} (rowid, {list}) VALUES (new.\"id\", {new}); END",
+            trig("au")
+        ),
+        format!("INSERT INTO {n} ({n}) VALUES ('rebuild')"),
+    ]
+    .join(";\n")
+}
+
+fn sqlite_fts_drop(name: &str) -> String {
+    let q = |s: &str| Dialect::Sqlite.quote(s);
+    ["ai", "ad", "au"]
+        .iter()
+        .map(|s| format!("DROP TRIGGER IF EXISTS {}", q(&format!("{name}_{s}"))))
+        .chain(std::iter::once(format!("DROP TABLE IF EXISTS {}", q(name))))
+        .collect::<Vec<_>>()
+        .join(";\n")
+}
+
 fn create_index(d: Dialect, table: &str, ix: &Index) -> String {
+    if ix.fulltext {
+        return match d {
+            Dialect::Postgres => {
+                format!("CREATE INDEX {} ON {} USING gin ({})", d.quote(&ix.name), d.quote(table), pg_search_doc(&ix.columns))
+            }
+            Dialect::Mysql => format!(
+                "CREATE FULLTEXT INDEX {} ON {} ({})",
+                d.quote(&ix.name),
+                d.quote(table),
+                ix.columns.iter().map(|c| d.quote(c)).collect::<Vec<_>>().join(", ")
+            ),
+            Dialect::Sqlite => sqlite_fts(table, ix),
+        };
+    }
     let cols: Vec<String> = ix.columns.iter().map(|c| d.quote(c)).collect();
     format!("CREATE {}INDEX {} ON {} ({})", if ix.unique { "UNIQUE " } else { "" }, d.quote(&ix.name), d.quote(table), cols.join(", "))
 }
@@ -586,11 +658,16 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
     let none = BTreeMap::new();
     Ok(match op {
         Op::CreateTable { table, columns } => vec![create_table(d, table, columns, &none)],
-        Op::DropTable { table } => vec![format!("DROP TABLE {}", q(table))],
+        Op::DropTable { table } => {
+            // SQLite's FTS tables aren't dropped with the table they index.
+            let fts = state.get(table).into_iter().flat_map(|t| &t.indexes).filter(|ix| d == Dialect::Sqlite && ix.fulltext);
+            fts.map(|ix| sqlite_fts_drop(&ix.name)).chain(std::iter::once(format!("DROP TABLE {}", q(table)))).collect()
+        }
         Op::Sql { sql } => vec![sql.clone()],
         Op::AddIndex { table, index } => {
             let cols = &state[table].columns;
             if d == Dialect::Mysql
+                && !index.fulltext
                 && index
                     .columns
                     .iter()
@@ -602,6 +679,9 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
         }
         Op::DropIndex { table, name } => match d {
             Dialect::Mysql => vec![format!("DROP INDEX {} ON {}", q(name), q(table))],
+            Dialect::Sqlite if state.get(table).is_some_and(|t| t.indexes.iter().any(|ix| &ix.name == name && ix.fulltext)) => {
+                vec![sqlite_fts_drop(name)]
+            }
             _ => vec![format!("DROP INDEX {}", q(name))],
         },
         // A UUID column's existing rows each need their own UUID: one shared default would break a
@@ -908,7 +988,7 @@ mod tests {
 
     #[test]
     fn indexes_diff_in_safe_order() {
-        let ix = Index { name: index_name("t", &["a"], false), columns: vec!["a".into()], unique: false };
+        let ix = Index { name: index_name("t", &["a"], false), columns: vec!["a".into()], unique: false, fulltext: false };
         let with = |cols: Vec<Column>, ixs: Vec<Index>| -> State { [("t".to_string(), Table { columns: cols, indexes: ixs })].into() };
         let before = with(vec![col("a", FieldType::Int)], vec![ix.clone()]);
         let after = with(vec![], vec![]);

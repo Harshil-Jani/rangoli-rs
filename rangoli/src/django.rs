@@ -271,6 +271,7 @@ pub async fn introspect() -> Result<Schema> {
             fields: Box::leak(fields.into_boxed_slice()),
             m2m: &[],
             indexes: &[],
+            search: &[],
         }));
         schema.models.push(meta);
     }

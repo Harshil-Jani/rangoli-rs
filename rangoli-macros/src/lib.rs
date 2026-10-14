@@ -22,6 +22,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
     let mut display: Option<String> = None;
     let mut m2m: Vec<(syn::Ident, syn::Path)> = vec![];
     let mut indexes: Vec<Vec<String>> = vec![];
+    let mut search: Vec<String> = vec![];
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("model")) {
         attr.parse_nested_meta(|m| {
             if m.path.is_ident("table") {
@@ -35,6 +36,11 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     Ok(())
                 })?;
                 indexes.push(cols);
+            } else if m.path.is_ident("search") {
+                m.parse_nested_meta(|col| {
+                    search.push(col.path.get_ident().ok_or_else(|| col.error("expected a field name"))?.to_string());
+                    Ok(())
+                })?;
             } else if m.path.is_ident("m2m") {
                 m.parse_nested_meta(|rel| {
                     let name = rel.path.get_ident().cloned().ok_or_else(|| rel.error("expected `name = Model`"))?;
@@ -42,7 +48,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     Ok(())
                 })?;
             } else {
-                return Err(m.error("expected `table`, `display`, `index(a, b)` or `m2m(name = Model)`"));
+                return Err(m.error("expected `table`, `display`, `index(a, b)`, `search(a, b)` or `m2m(name = Model)`"));
             }
             Ok(())
         })?;
@@ -260,6 +266,38 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
         }
     }
     let index_tokens = indexes.iter().map(|cols| quote!(&[#(#cols),*]));
+    for col in &search {
+        let text = fields.named.iter().find(|f| f.ident.as_ref().is_some_and(|i| i == col)).is_some_and(|f| {
+            let ty = &f.ty;
+            let s = quote!(#ty).to_string().replace(' ', "");
+            s == "String" || s == "Option<String>"
+        });
+        if !text {
+            return Err(syn::Error::new_spanned(ident, format!("search(...) needs text fields; `{col}` isn't a String field")));
+        }
+        let encrypted = fields
+            .named
+            .iter()
+            .find(|f| f.ident.as_ref().is_some_and(|i| i == col))
+            .is_some_and(|f| f.attrs.iter().any(|a| a.path().is_ident("field") && quote!(#a).to_string().contains("encrypted")));
+        if encrypted {
+            return Err(syn::Error::new_spanned(
+                ident,
+                format!("search(...) can't index `{col}`: it's encrypted, so the database only sees ciphertext"),
+            ));
+        }
+        let private = fields
+            .named
+            .iter()
+            .find(|f| f.ident.as_ref().is_some_and(|i| i == col))
+            .is_some_and(|f| f.attrs.iter().any(|a| a.path().is_ident("field") && quote!(#a).to_string().contains("private")));
+        if private {
+            return Err(syn::Error::new_spanned(
+                ident,
+                format!("search(...) can't include `{col}`: it's private, and search results would reveal it"),
+            ));
+        }
+    }
 
     let name_s = ident.to_string();
     let display = match display {
@@ -274,6 +312,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                 static META: ::rangoli::orm::ModelMeta = ::rangoli::orm::ModelMeta {
                     name: #name_s, table: #table, display: #display, fields: &[#(#metas),*], m2m: &[#(#m2m_metas),*],
                     indexes: &[#(#index_tokens),*],
+                    search: &[#(#search),*],
                 };
                 &META
             }

@@ -714,7 +714,9 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
 
     let mut query = Query::new(meta);
     query.filter.extend(row_filter(&site, meta, u));
-    if !q.is_empty() && !searchable.is_empty() {
+    if !q.is_empty() && !meta.search.is_empty() {
+        query.filter.push(orm::search_node(meta, &q)); // the model's full-text index
+    } else if !q.is_empty() && !searchable.is_empty() {
         let pat = format!("%{}%", like_escape(&q));
         query.filter.push(Node::Or(searchable.iter().map(|c| Node::Like(c, pat.clone())).collect()));
     }
@@ -744,6 +746,7 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
     let filtered = !query.filter.is_empty();
     let (full_count, estimated) = Query::new(meta).table_count().await.map_err(fail)?;
     let count = if filtered { query.count().await.map_err(fail)? } else { full_count };
+    query.few_search_matches(count);
     let pages = (count as u64).div_ceil(per_page).max(1);
     let page = page.min(pages);
     query.order = vec![(order_field, desc)];
@@ -846,7 +849,7 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
             messages => match action_message(&site, meta, &p) { Some(m) => Some(m), None => message(&p, u, "list").await },
             actions => options(&site, meta).actions.iter().map(|a| context! { name => a.name, label => a.label }).collect::<Vec<_>>(),
             q, keep, count, full_count, filtered, what, page_links, estimated,
-            columns => headers, rows, filters => filter_blocks, searchable => !searchable.is_empty(), clear_url => base.clone(),
+            columns => headers, rows, filters => filter_blocks, searchable => !searchable.is_empty() || !meta.search.is_empty(), clear_url => base.clone(),
             ..chrome(&site, u, Some(meta))
         },
     )
@@ -1788,7 +1791,7 @@ mod tests {
         }
         static FIELDS: [FieldMeta; 3] =
             [field("title", FieldType::Text), field("body", FieldType::Text), field("author_id", FieldType::Int)];
-        let meta = ModelMeta { name: "Post", table: "blog_post", display: None, fields: &FIELDS, m2m: &[], indexes: &[] };
+        let meta = ModelMeta { name: "Post", table: "blog_post", display: None, fields: &FIELDS, m2m: &[], indexes: &[], search: &[] };
         let old = [Value::Text("a".into()), Value::Text("b".into()), Value::Int(1)];
         let cols = |t: &str, b: &str, a: i64| {
             vec![
