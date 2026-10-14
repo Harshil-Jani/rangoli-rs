@@ -926,6 +926,34 @@ impl Query {
         i64::from_value(read(rows.first().ok_or_else(|| Error::Decode("COUNT returned no row".into()))?, "n", FieldType::Int)?)
     }
 
+    /// The whole table's row count without scanning it: on Postgres and MySQL the database's
+    /// own estimate once that is over 100,000 rows (`COUNT(*)` reads every row, which on a big
+    /// table takes seconds; Django's admin pays that on every changelist, Trac #8408). Smaller
+    /// tables, SQLite and any table without statistics get an exact count. `(rows, estimated)`.
+    pub async fn table_count(&self) -> Result<(i64, bool)> {
+        const ESTIMATE_ABOVE: i64 = 100_000;
+        let d = db().dialect;
+        let sql = match d {
+            Dialect::Postgres => "SELECT CAST(reltuples AS BIGINT) AS n FROM pg_class WHERE oid = to_regclass($1)",
+            Dialect::Mysql => {
+                "SELECT CAST(table_rows AS SIGNED) AS n FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"
+            }
+            Dialect::Sqlite => "",
+        };
+        if !sql.is_empty() {
+            let name = if d == Dialect::Postgres { d.quote(self.table) } else { self.table.to_string() };
+            let rows = fetch_all(sql, &vec![(Value::Text(name), FieldType::Varchar(200))]).await?;
+            if let Some(row) = rows.first() {
+                let n = i64::from_value(read(row, "n", FieldType::Int)?).unwrap_or(-1);
+                if n >= ESTIMATE_ABOVE {
+                    return Ok((n, true));
+                }
+            }
+        }
+        let all = Query { table: self.table, fields: self.fields, filter: vec![], order: vec![], limit: None, offset: None };
+        Ok((all.count().await?, false))
+    }
+
     pub async fn delete(&self) -> Result<u64> {
         let d = db().dialect;
         let (mut p, mut sql) = (vec![], format!("DELETE FROM {}", d.quote(self.table)));
@@ -1366,6 +1394,12 @@ impl<M: Model> QuerySet<M> {
     }
     pub async fn count(self) -> Result<i64> {
         self.q.count().await
+    }
+
+    /// Rows in the whole table, ignoring filters: an instant estimate past 100,000 rows on
+    /// Postgres and MySQL, exact otherwise. `(rows, estimated)`. For "about N" displays.
+    pub async fn table_count(self) -> Result<(i64, bool)> {
+        self.q.table_count().await
     }
 
     /// The total of a numeric column over the matching rows; `None` when there are none.

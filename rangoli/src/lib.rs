@@ -461,6 +461,9 @@ impl App {
         if let Err(e) = settings.check() {
             panic!("rangoli admin: {e}");
         }
+        for w in settings.warnings() {
+            eprintln!("rangoli admin warning: {w}");
+        }
         self.admin.retain(|(m, _)| m.table != M::TABLE);
         self.admin.push((M::meta(), settings.opts));
         self.model::<M>()

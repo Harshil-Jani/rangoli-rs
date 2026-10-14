@@ -82,4 +82,29 @@ async fn index_builds_on_live_tables_do_not_block_writes() {
     exec("DROP TABLE zd_item").await;
     exec("DELETE FROM rangoli_migrations WHERE name LIKE '2099%'").await;
     std::fs::remove_dir_all(&dir).ok();
+    big_tables_are_estimated_small_ones_counted().await;
+}
+
+#[derive(rangoli::Model, Clone, Debug)]
+#[model(table = "zd_big")]
+struct Big {
+    id: Option<i64>,
+    n: i64,
+}
+
+/// Big tables are counted from the planner's statistics instead of a full scan (the admin
+/// changelist's "About 1000000 posts"); small ones exactly. Called from the test above: the
+/// pool belongs to one test's runtime.
+async fn big_tables_are_estimated_small_ones_counted() {
+    use rangoli::orm::Model;
+    exec("DROP TABLE IF EXISTS zd_big").await;
+    exec("CREATE TABLE zd_big (id BIGSERIAL PRIMARY KEY, n BIGINT NOT NULL)").await;
+    exec("INSERT INTO zd_big (n) SELECT g FROM generate_series(1, 500) g").await;
+    exec("ANALYZE zd_big").await;
+    assert_eq!(Big::objects().table_count().await.unwrap(), (500, false), "small: exact");
+    exec("INSERT INTO zd_big (n) SELECT g FROM generate_series(1, 150000) g").await;
+    exec("ANALYZE zd_big").await;
+    let (n, estimated) = Big::objects().table_count().await.unwrap();
+    assert!(estimated && (140_000..=160_000).contains(&n), "big: the planner's estimate, close to 150,500: {n}");
+    exec("DROP TABLE zd_big").await;
 }

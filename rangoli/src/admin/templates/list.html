@@ -14,7 +14,7 @@
         hx-select-oob="#search-count,#changelist-filter" hx-push-url="true">
       {% for k, v in keep %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
       <button type="submit" class="btn">Search</button>
-      <span id="search-count" class="meta">{% if filtered %}{{ count }} result{% if count != 1 %}s{% endif %} of <a href="{{ clear_url }}">{{ full_count }} total</a>{% endif %}</span>
+      <span id="search-count" class="meta">{% if filtered %}{{ count }} result{% if count != 1 %}s{% endif %} of <a href="{{ clear_url }}">{% if estimated %}about {% endif %}{{ full_count }} total</a>{% endif %}</span>
     </form>
     {% endif %}
     <form id="changelist-form" method="post" action="/admin/{{ table }}/" novalidate>
@@ -52,7 +52,7 @@
       </div>
       <p class="paginator">
         {% if page_links|length > 1 %}{% for l in page_links %}{% if l.current %}<span class="this-page" aria-current="page">{{ l.n }}</span>{% else %}<a href="{{ l.url }}">{{ l.n }}</a>{% endif %}{% endfor %}{% endif %}
-        <span class="meta">{{ count }} {{ what }}</span>
+        <span class="meta">{% if estimated and not filtered %}About {% endif %}{{ count }} {{ what }}</span>
       </p>
     </form>
   </div>

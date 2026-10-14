@@ -741,8 +741,8 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
         query.filter.push(node);
     }
     let filtered = !query.filter.is_empty();
-    let count = query.count().await.map_err(fail)?;
-    let full_count = if filtered { Query::new(meta).count().await.map_err(fail)? } else { count };
+    let (full_count, estimated) = Query::new(meta).table_count().await.map_err(fail)?;
+    let count = if filtered { query.count().await.map_err(fail)? } else { full_count };
     let pages = (count as u64).div_ceil(per_page).max(1);
     let page = page.min(pages);
     query.order = vec![(order_field, desc)];
@@ -844,7 +844,7 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
             title => format!("Select {} to change", verbose(meta.name)),
             messages => match action_message(&site, meta, &p) { Some(m) => Some(m), None => message(&p, u, "list").await },
             actions => options(&site, meta).actions.iter().map(|a| context! { name => a.name, label => a.label }).collect::<Vec<_>>(),
-            q, keep, count, full_count, filtered, what, page_links,
+            q, keep, count, full_count, filtered, what, page_links, estimated,
             columns => headers, rows, filters => filter_blocks, searchable => !searchable.is_empty(), clear_url => base.clone(),
             ..chrome(&site, u, Some(meta))
         },
