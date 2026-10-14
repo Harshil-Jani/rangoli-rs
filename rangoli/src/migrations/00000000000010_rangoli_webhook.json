@@ -1,0 +1,16 @@
+{
+  "operations": [
+    {
+      "op": "create_table",
+      "table": "rangoli_webhook",
+      "columns": [
+        { "name": "name", "type": { "varchar": 100 } },
+        { "name": "url", "type": { "varchar": 500 } },
+        { "name": "table_name", "type": { "varchar": 100 } },
+        { "name": "events", "type": { "varchar": 50 } },
+        { "name": "secret", "type": { "varchar": 100 } },
+        { "name": "active", "type": "bool" }
+      ]
+    }
+  ]
+}

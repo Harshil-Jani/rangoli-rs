@@ -604,7 +604,8 @@ async fn audit(
         at: auth::now(),
         snapshot: before,
     };
-    entry.save().await
+    entry.save().await?;
+    crate::webhooks::fire(&entry).await
 }
 
 /// For a token that needs approval, store this (already validated) write as a pending change

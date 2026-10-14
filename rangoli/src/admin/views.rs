@@ -406,6 +406,7 @@ async fn log(u: &User, meta: &ModelMeta, object_id: i64, object_repr: &str, acti
         snapshot: None,
     };
     e.save().await?;
+    crate::webhooks::fire(&e).await?;
     Ok(e.id.unwrap())
 }
 

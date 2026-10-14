@@ -318,6 +318,10 @@ App::new()
 
 Standard five-field cron in UTC (`*`, ranges, steps, lists, `@daily` and friends; Vixie day-of-month/day-of-week semantics), checked at startup. Every worker loop, in every process, offers each tick to the queue under a unique key, and the database accepts exactly one. The e2e test races 20 workers with separate memory on one tick on all three databases: one run is queued and it runs once. With the unique key removed, the same test queues it 20 times. A tick missed while every worker was down runs once on restart if it is less than ten minutes old, and only the latest such tick runs. Scheduled runs are ordinary task runs, so they get retries, backoff and the admin view.
 
+## Webhooks
+
+Add a webhook under **Webhooks** in the admin (a URL, optionally one table, which events, a secret) and every add, change or delete made through the admin, the API or an AI agent is POSTed to it as JSON: `{"event": "changed", "table": "blog_post", "id": 7, "object": "Hello", "message": "Changed via MCP.", "user": "alice", "at": "..."}`. That's Slack, Zapier, n8n or your own service without code. Deliveries are queued in the change's own transaction (a rolled-back change sends nothing), signed with `X-Rangoli-Signature: sha256=<HMAC of the body>`, and retried with backoff by the task queue. The row's data isn't in the payload, so a webhook can't leak private or encrypted fields. Tested with a local receiver: the right webhooks fire, signatures verify, and a failed delivery is retried. (HTTPS uses rustls with the standard root certificates. CI can't reach outside, so that path was checked by hand: a delivery to a public HTTPS echo service succeeded, and one to a site with a self-signed certificate was refused, `UnknownIssuer`, and left queued for retry.)
+
 ## Real-time: WebSockets and Server-Sent Events
 
 Django needs Channels, a Redis channel layer and an ASGI server (daphne or uvicorn) for this, and moving a sync codebase onto them is a rewrite of its views. Rangoli is async throughout, so a socket is just another handler:

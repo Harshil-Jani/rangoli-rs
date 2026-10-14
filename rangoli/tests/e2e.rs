@@ -154,6 +154,7 @@ async fn reset(db: &orm::Db) {
         "blog_tag",
         "blog_post",
         "e2e_note",
+        "rangoli_webhook",
         "rangoli_pending_change",
         "rangoli_api_token",
         "rangoli_login_failure",
@@ -1716,6 +1717,77 @@ async fn scenario() {
             .await;
     assert!(page.contains("Two-factor sign-in is off"));
     assert_eq!(send(login_as("")).await.0, StatusCode::SEE_OTHER, "off again: the password is enough");
+
+    // ---- webhooks: changes POSTed to a URL, signed, retried by the task queue
+    let got: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = Default::default();
+    let fail_next = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let receiver = {
+        let (got, fail_next) = (got.clone(), fail_next.clone());
+        axum::Router::new().route(
+            "/hook",
+            axum::routing::post(move |headers: axum::http::HeaderMap, body: String| {
+                let (got, fail_next) = (got.clone(), fail_next.clone());
+                async move {
+                    if fail_next.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        return StatusCode::INTERNAL_SERVER_ERROR;
+                    }
+                    let sig = headers.get("x-rangoli-signature").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                    got.lock().unwrap().push((sig, body));
+                    StatusCode::OK
+                }
+            }),
+        )
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_url = format!("http://{}/hook", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
+    let add_hook = format!(
+        "name=Ops+channel&url={}&table_name=blog_post&events=added%2Cchanged%2Cdeleted&secret=s3cret&active=on",
+        hook_url.replace(':', "%3A").replace('/', "%2F")
+    );
+    assert_eq!(send(form("/admin/rangoli_webhook/add", &cookie, &add_hook)).await.0, StatusCode::SEE_OTHER, "added in the admin");
+    let other = format!(
+        "name=Elsewhere&url={}&table_name=blog_author&events=added&secret=x&active=on",
+        hook_url.replace(':', "%3A").replace('/', "%2F")
+    );
+    send(form("/admin/rangoli_webhook/add", &cookie, &other)).await;
+    let (_, hook_token) = auth::create_token(&root_user, "hooks", None).await.unwrap();
+    let (_, _, body) = send(bearer(
+        "POST",
+        "/api/blog_post/",
+        &hook_token,
+        &serde_json::json!({ "title": "Hooked", "body": "b", "author_id": alan.id.unwrap(), "views": 0, "price": "1" }).to_string(),
+    ))
+    .await;
+    let hooked = json(&body)["id"].as_i64().unwrap_or_else(|| panic!("create failed: {body}"));
+    tasks::run_due(50).await.unwrap();
+    let deliveries = got.lock().unwrap().clone();
+    assert_eq!(deliveries.len(), 1, "one delivery, from the matching webhook only: {deliveries:?}");
+    let (sig, payload) = &deliveries[0];
+    assert_eq!(sig, &rangoli::webhooks::signature("s3cret", payload), "signed with the webhook's secret");
+    let event = json(payload);
+    assert_eq!(
+        (event["event"].as_str(), event["table"].as_str(), event["id"].as_i64(), event["object"].as_str()),
+        (Some("added"), Some("blog_post"), Some(hooked), Some("Hooked"))
+    );
+    assert!(event.get("body").is_none() && !payload.contains("price"), "no row data in the payload, so nothing private leaks");
+    fail_next.store(true, std::sync::atomic::Ordering::SeqCst);
+    send(bearer("PATCH", &format!("/api/blog_post/{hooked}"), &hook_token, r#"{"views": 5}"#)).await;
+    tasks::run_due(50).await.unwrap();
+    assert_eq!(got.lock().unwrap().len(), 1, "the receiver failed once...");
+    let retry = TaskRecord::objects()
+        .filter(TaskRecord::NAME.eq("rangoli.webhook") & TaskRecord::STATUS.eq(TaskStatus::Queued))
+        .get()
+        .await
+        .unwrap();
+    assert!(
+        retry.attempts == 1 && retry.last_error.as_deref().unwrap_or("").contains("500"),
+        "...so the delivery waits to be retried: {retry:?}"
+    );
+    tasks::run_due_at(DateTime::from_unix(DateTime::now().unix() + 60), 50).await.unwrap();
+    assert_eq!(json(&got.lock().unwrap()[1].1)["event"], "changed", "and arrives on the retry");
+    rangoli::webhooks::Webhook::objects().update([rangoli::webhooks::Webhook::ACTIVE.set(false)]).await.unwrap();
+    PostV2::objects().filter(PostV2::ID.eq(hooked)).delete().await.unwrap();
 
     // Password change, then log in with the new password.
     let (status, _, body) =

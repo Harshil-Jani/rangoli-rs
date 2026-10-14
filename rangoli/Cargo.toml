@@ -22,6 +22,14 @@ getrandom = "0.3"
 sha2 = "0.10"
 # Already compiled in through rustls; AES-256-GCM for encrypted fields.
 ring = "0.17"
+# Outgoing webhooks over HTTPS: hyper, rustls and webpki-roots are already in the tree; only
+# tokio-rustls is new.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
+hyper = { version = "1", features = ["client", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+bytes = { version = "1", optional = true }
+webpki-roots = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_urlencoded = "0.7"
@@ -36,10 +44,11 @@ libsqlite3-sys = { version = "0.30", optional = true }
 [features]
 # Everything on by default; an API-only Postgres service can use
 # `default-features = false, features = ["postgres"]` and compile none of the rest.
-default = ["admin", "web", "realtime", "postgres", "mysql", "sqlite"]
+default = ["admin", "web", "realtime", "webhooks", "postgres", "mysql", "sqlite"]
 admin = ["dep:minijinja"]
 web = ["dep:minijinja", "tower-http/fs"]
 realtime = ["axum/ws", "dep:futures-util"]
+webhooks = ["dep:tokio-rustls", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes", "dep:webpki-roots"]
 postgres = ["sqlx/postgres"]
 mysql = ["sqlx/mysql"]
 sqlite = ["sqlx/sqlite", "dep:libsqlite3-sys"]

@@ -33,6 +33,7 @@ pub mod totp;
 pub mod uuid;
 #[cfg(feature = "web")]
 pub mod web;
+pub mod webhooks;
 
 pub use axum;
 pub use datetime::{Date, DateTime};
@@ -280,6 +281,7 @@ impl App {
     /// Starts with the built-in user and session models (users appear in the admin).
     pub fn new() -> Self {
         use orm::Model;
+        tasks::register::<webhooks::Delivery>();
         App {
             models: vec![
                 auth::User::meta(),
@@ -287,6 +289,7 @@ impl App {
                 auth::ApiToken::meta(),
                 auth::LoginFailure::meta(),
                 approvals::PendingChange::meta(),
+                webhooks::Webhook::meta(),
                 admin::LogEntry::meta(),
                 tasks::TaskRecord::meta(),
             ],
@@ -295,6 +298,19 @@ impl App {
                 (
                     auth::User::meta(),
                     admin::ModelAdmin::<auth::User>::new().exclude([&auth::User::TOTP_SECRET, &auth::User::TOTP_LAST_STEP]).opts,
+                ),
+                (
+                    webhooks::Webhook::meta(),
+                    // Where to POST changes: Slack, Zapier, n8n, your own service.
+                    admin::ModelAdmin::<webhooks::Webhook>::new()
+                        .list_display([
+                            &webhooks::Webhook::NAME,
+                            &webhooks::Webhook::URL,
+                            &webhooks::Webhook::TABLE_NAME,
+                            &webhooks::Webhook::ACTIVE,
+                        ])
+                        .list_filter([&webhooks::Webhook::ACTIVE])
+                        .opts,
                 ),
                 (
                     approvals::PendingChange::meta(),
