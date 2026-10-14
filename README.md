@@ -62,6 +62,16 @@ Describe your data once in Rust, and you get the admin for your team, a JSON API
 
 ![Every change an AI agent makes is in History](docs/agent-history.png)
 
+## Guides and examples
+
+- [Connect Claude to your Django database in five minutes](docs/howto/connect-django-to-claude.md)
+- [Let an AI agent change data, safely](docs/howto/safe-agent-writes.md)
+- [A JSON API where each user sees only their own data](docs/howto/per-user-api.md)
+- [Background jobs and schedules without Celery](docs/howto/jobs-and-schedules.md)
+- [A live dashboard with Server-Sent Events](docs/howto/live-dashboard.md)
+- [Keep personal data encrypted at rest](docs/howto/encrypt-personal-data.md)
+- Examples: [helpdesk](examples/helpdesk) (an AI agent on a support queue, safely), [blog](examples/blog), [api_only](examples/api_only), [rangoli-django](examples/django/src/main.rs)
+
 **Status: early.** The core works end to end and is tested on Postgres, MySQL and SQLite. Read [What's not done yet](#whats-not-done-yet) before building anything real on it.
 
 ---

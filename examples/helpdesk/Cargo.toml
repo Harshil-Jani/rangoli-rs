@@ -1,0 +1,10 @@
+[package]
+name = "helpdesk"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+description = "A support desk whose AI agent answers tickets safely: Rangoli's guardrails in one small app"
+
+[dependencies]
+rangoli = { path = "../../rangoli" }
+tokio = { version = "1", features = ["full"] }

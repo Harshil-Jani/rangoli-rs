@@ -1,0 +1,72 @@
+{
+  "operations": [
+    {
+      "op": "create_table",
+      "table": "desk_ticket",
+      "columns": [
+        {
+          "name": "subject",
+          "type": {
+            "varchar": 200
+          }
+        },
+        {
+          "name": "body",
+          "type": "text"
+        },
+        {
+          "name": "status",
+          "type": {
+            "varchar": 32
+          }
+        },
+        {
+          "name": "customer_id",
+          "type": "int",
+          "fk": "rangoli_user",
+          "cascade": true
+        },
+        {
+          "name": "internal_note",
+          "type": "text",
+          "null": true
+        },
+        {
+          "name": "opened_at",
+          "type": "date_time"
+        }
+      ]
+    },
+    {
+      "op": "create_table",
+      "table": "desk_reply",
+      "columns": [
+        {
+          "name": "ticket_id",
+          "type": "int",
+          "fk": "desk_ticket",
+          "cascade": true
+        },
+        {
+          "name": "body",
+          "type": "text"
+        },
+        {
+          "name": "sent_at",
+          "type": "date_time"
+        }
+      ]
+    },
+    {
+      "op": "add_index",
+      "table": "desk_ticket",
+      "index": {
+        "name": "desk_ticket_status_opened_at_idx",
+        "columns": [
+          "status",
+          "opened_at"
+        ]
+      }
+    }
+  ]
+}
