@@ -32,17 +32,24 @@ Rangoli is built by reading what Django developers keep asking for and shipping 
 | Zero-downtime indexes and unique changes | NF#124 | a write goes through during the build (asserted) |
 | Foreign keys indexed, as Django does | (gap found while profiling) | author filter on 1M rows: 35 → 9 ms |
 | JWT sign-in (HS256, RS256 + JWKS) | bolt#262, #264 | RFC 7515 vectors; alg-confusion refused |
+| S3 uploads (presigned POST/GET) | storages#165, #1481, NF#89 | live against SeaweedFS in CI; size/type/key/expiry refused |
+| Cache cleared on writes, across instances | NF#95 | 7 ms across instances via NOTIFY |
+| CSV export and import in the admin | import-export #2097, #445 | round trip unchanged; formulas defused |
+| Vector search, and semantic search for agents | NF#145 | recall@10 0.98 at 8 ms on pgvector; agents never see others' rows |
+| `unique(a, b)` (unique_together) | Django staple | refused pair, accepted parts, on 3 databases |
 | Webhooks, 2FA, inlines, QUERY, encrypted fields, undo, cursor paging, upsert, aggregates, approvals, scoped tokens, CORS, rate limits | NF#8 (73), NF#185 (41), Trac#9025, NF#12, Trac#8408, Trac#28919-adjacent, NF#204 | see README, each with its numbers |
 
 ## Next, in order
 
 | # | Build | Why (demand) | Proof |
 |---|---|---|---|
-| 1 | **File uploads to S3-compatible storage** (presigned, size and type limits) | storages#165 (26👍), #1481, NF#89 | a large upload never passes through the app; an expired URL gives 403 |
-| 2 | **Caching invalidated across instances** | NF#95 (19) | a save on one instance clears another's cache within 100 ms |
-| 3 | **Composite primary and foreign keys** | Trac#373 (41 CC); FKs still missing in Django (Trac#35956) | `(tenant_id, id)` keys through migrations, joins and admin URLs |
-| 4 | **Vector search** (pgvector) | NF#145 | an HNSW index by migration; recall@10 ≥ 0.95 against exact search |
-| 5 | **Postgres schemas / multi-tenancy** | Trac#6148 (22 CC, open since 2007) | a cross-tenant read returns nothing through every door |
+| 1 | **Embeddings computed for you** when rows change, through the task queue | follows from `App::embed` | a saved row is searchable by meaning without app code |
+| 2 | **An MCP tool that explains slow queries** to an agent | silk#80, debug-toolbar#2048 | an agent finds the N+1 in a sample app |
+
+## Decided against, with reasons
+
+- **Composite primary keys (Trac#373).** Every admin URL, API path and History entry is keyed by one id; changing that touches everything for a rare need. Most real cases want composite *uniqueness*, which is `#[model(unique(a, b))]`.
+- **A Postgres schema per tenant (Trac#6148).** Each migration would run once per customer. One table with a `tenant_id`, row-level permissions and `unique(tenant_id, ...)` does the job; see [the guide](howto/multi-tenant.md).
 
 Already covered, so not on this list:
 
