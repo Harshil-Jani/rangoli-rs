@@ -31,6 +31,7 @@ pub mod oauth;
 pub mod orm;
 #[cfg(feature = "realtime")]
 pub mod realtime;
+pub mod storage;
 pub mod tasks;
 pub mod totp;
 pub mod uuid;

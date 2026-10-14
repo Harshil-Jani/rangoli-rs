@@ -8,3 +8,4 @@ Short, task-first guides. Every API they use is exercised by the test suite on P
 - [Background jobs and schedules without Celery](jobs-and-schedules.md)
 - [A live dashboard with Server-Sent Events](live-dashboard.md)
 - [Keep personal data encrypted at rest](encrypt-personal-data.md)
+- [File uploads without the files touching your server](file-uploads.md)
