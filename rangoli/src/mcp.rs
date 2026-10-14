@@ -161,7 +161,7 @@ fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonV
                 "list" => (
                     format!("List {n} rows, newest last. Returns count and up to `limit` results."),
                     json!({ "type": "object", "properties": {
-                        "filters": { "type": "object", "description": "Exact matches, field name to value, e.g. {\"published\": true}", "additionalProperties": true },
+                        "filters": { "type": "object", "description": "Field name to value: exact matches like {\"published\": true}, or lookups like {\"price__gte\": 10, \"status__in\": \"draft,review\", \"title__contains\": \"rust\", \"closed_at__isnull\": true}. Lookups: exact, ne, gt, gte, lt, lte, in, contains, startswith, isnull", "additionalProperties": true },
                         "search": { "type": "string", "description": "Text to look for in the text fields" },
                         "ordering": { "type": "string", "description": "A field to sort by; prefix with - for descending" },
                         "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },

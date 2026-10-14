@@ -488,27 +488,74 @@ async fn query_method(
     list_rows(&site, &user, &scope, &table, p).await
 }
 
-async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &str, p: HashMap<String, String>) -> Reply {
-    let (meta, opts) = endpoint(site, table, user, scope, false)?;
-    let mut q = Query::new(meta);
-    q.filter.extend(restrict(opts, user));
-    // `?field=value` filters on exact matches, typed by the field.
-    for (k, raw) in &p {
-        if matches!(k.as_str(), "limit" | "offset" | "ordering" | "search" | "cursor") {
-            continue;
-        }
-        let f = meta.field(k).filter(|f| f.exposed()).ok_or_else(|| problem(StatusCode::BAD_REQUEST, &format!("Unknown filter `{k}`.")))?;
+const LOOKUPS: &str = "exact, ne, gt, gte, lt, lte, in, contains, startswith, isnull";
+
+/// One `?field__lookup=value` filter as a query node.
+fn lookup(meta: &'static ModelMeta, key: &str, raw: &str) -> Result<Node, Response> {
+    static ID: FieldMeta = orm::link_meta("id");
+    let (name, op) = key.split_once("__").unwrap_or((key, "exact"));
+    let bad = |msg: String| problem(StatusCode::BAD_REQUEST, &msg);
+    let f = if name == "id" { Some(&ID) } else { meta.field(name).filter(|f| f.exposed()) };
+    let f = f.ok_or_else(|| bad(format!("Unknown filter `{name}`.")))?;
+    match f.ty {
+        FieldType::Json => return Err(bad(format!("Cannot filter on JSON field `{name}`."))),
+        FieldType::Encrypted => return Err(bad(format!("Cannot filter on encrypted field `{name}`."))),
+        _ => {}
+    }
+    let typed = |raw: &str| {
         let j = match f.ty {
-            FieldType::Json => return Err(problem(StatusCode::BAD_REQUEST, &format!("Cannot filter on JSON field `{k}`."))),
-            FieldType::Encrypted => return Err(problem(StatusCode::BAD_REQUEST, &format!("Cannot filter on encrypted field `{k}`."))),
             FieldType::Varchar(_) | FieldType::Text | FieldType::DateTime | FieldType::Date | FieldType::Decimal(_) | FieldType::Uuid => {
                 json!(raw)
             }
             _ if raw == "null" => JsonValue::Null,
-            _ => serde_json::from_str(raw).unwrap_or(JsonValue::String(raw.clone())),
+            _ => serde_json::from_str(raw).unwrap_or(JsonValue::String(raw.to_string())),
         };
-        let v = from_json(f, &j).map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ k.clone(): [e] }))).into_response())?;
-        q.filter.push(if v == Value::Null { Node::IsNull(f.name, false) } else { Node::Cmp(f.name, "=", v, f.ty) });
+        from_json(f, &j).map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ key: [e] }))).into_response())
+    };
+    let text = matches!(f.ty, FieldType::Varchar(_) | FieldType::Text);
+    Ok(match op {
+        "exact" => match typed(raw)? {
+            Value::Null => Node::IsNull(f.name, false),
+            v => Node::Cmp(f.name, "=", v, f.ty),
+        },
+        "ne" => match typed(raw)? {
+            Value::Null => Node::IsNull(f.name, true),
+            v => Node::Not(Box::new(Node::Cmp(f.name, "=", v, f.ty))),
+        },
+        "gt" | "gte" | "lt" | "lte" if f.ty != FieldType::Bool => {
+            let sql_op = match op {
+                "gt" => ">",
+                "gte" => ">=",
+                "lt" => "<",
+                _ => "<=",
+            };
+            Node::Cmp(f.name, sql_op, typed(raw)?, f.ty)
+        }
+        "in" => {
+            let vals = raw.split(',').filter(|v| !v.is_empty()).take(1000).map(|v| typed(v.trim())).collect::<Result<Vec<_>, _>>()?;
+            Node::In(f.name, vals, f.ty)
+        }
+        "contains" | "icontains" if text => Node::Like(f.name, format!("%{}%", like_escape(raw))),
+        "startswith" | "istartswith" if text => Node::Like(f.name, format!("{}%", like_escape(raw))),
+        "isnull" => match raw {
+            "true" | "1" => Node::IsNull(f.name, false),
+            "false" | "0" => Node::IsNull(f.name, true),
+            _ => return Err(bad(format!("`{key}` takes true or false."))),
+        },
+        _ => return Err(bad(format!("`{op}` doesn't apply to `{name}`. Lookups: {LOOKUPS} (contains and startswith on text only)."))),
+    })
+}
+
+async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &str, p: HashMap<String, String>) -> Reply {
+    let (meta, opts) = endpoint(site, table, user, scope, false)?;
+    let mut q = Query::new(meta);
+    q.filter.extend(restrict(opts, user));
+    // `?field=value`, or `?field__lookup=value` (Django's lookups), each value typed by the field.
+    for (k, raw) in &p {
+        if matches!(k.as_str(), "limit" | "offset" | "ordering" | "search" | "cursor") {
+            continue;
+        }
+        q.filter.push(lookup(meta, k, raw)?);
     }
     if let Some(term) = param(&p, "search").filter(|s| !s.is_empty() && !meta.search.is_empty()) {
         q.filter.push(orm::search_node(meta, term)); // the model's full-text index

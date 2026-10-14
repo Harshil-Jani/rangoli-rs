@@ -1253,6 +1253,35 @@ async fn scenario() {
         "export → import changes nothing ({rows} lines): {page}"
     );
 
+    // ---- API filter lookups (and the same through MCP)
+    let n = |body: &str| json(body)["count"].as_i64().unwrap();
+    let team = |t: i64| async move { Doc::objects().filter(Doc::TEAM.eq(t)).count().await.unwrap() };
+    let (t1, t2, t3, all) = (team(1).await, team(2).await, team(3).await, Doc::objects().count().await.unwrap());
+    let list = |q: &str| send(bearer("GET", &format!("/api/e2e_doc/?{q}"), &token, ""));
+    assert_eq!(n(&list("team__in=1,2").await.2), t1 + t2, "in");
+    assert_eq!(n(&list("team__gte=3").await.2), t3, "gte");
+    assert_eq!(n(&list("team__ne=3").await.2), all - t3, "ne");
+    assert_eq!(n(&list("team__lt=2&team__gt=0").await.2), t1, "two lookups on one field");
+    assert_eq!(n(&list("title__contains=bulk%2024").await.2), 111, "contains: bulk 24, 240-249, 2400-2499");
+    assert_eq!(n(&list("title__startswith=BULK%2024").await.2), 111, "startswith, case-insensitive");
+    let first = Doc::objects().order_by(Doc::ID.asc()).first().await.unwrap().unwrap().id.unwrap();
+    assert_eq!(n(&list(&format!("id__lte={first}")).await.2), 1, "lookups on id");
+    for (q, why) in [("team__contains=1", "contains on a number"), ("team__bogus=1", "unknown lookup"), ("team__gte=abc", "a bad value")] {
+        assert_eq!(list(q).await.0, StatusCode::BAD_REQUEST, "{why}");
+    }
+    let (status, _, body) = send(bearer("GET", "/api/e2e_note/?secret__contains=a", &token, "")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "private fields can't be probed with lookups either: {body}");
+    let (status, _, _) = send(bearer("GET", "/api/e2e_note/?ssn__startswith=1", &token, "")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "nor encrypted ones");
+    let unset = PostV2::objects().filter(PostV2::PUBLISH_AT.is_null()).count().await.unwrap();
+    let (_, _, body) = send(get("/api/blog_post/?publish_at__isnull=true", "")).await;
+    assert_eq!(n(&body), unset, "isnull");
+    let mcp = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "e2e_doc_list", "arguments": { "filters": { "team__in": "1,2" }, "limit": 1 } } })
+    .to_string();
+    let (_, _, body) = send(bearer("POST", "/mcp", &token, &mcp)).await;
+    assert_eq!(json(&body)["result"]["structuredContent"]["count"], t1 + t2, "agents get the same lookups: {body}");
+
     let rjwt = jwt_auth.issue(&root, std::time::Duration::from_secs(900)).unwrap();
     assert_eq!(send(bearer("GET", "/admin/", &rjwt, "")).await.0, StatusCode::FORBIDDEN, "a JWT can't open the admin");
     let (_, _, body) = send(bearer("GET", &format!("/api/e2e_note/?owner_id={bid}"), &at, "")).await;
