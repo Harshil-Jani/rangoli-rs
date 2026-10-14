@@ -22,6 +22,7 @@ pub mod datetime;
 pub mod decimal;
 pub mod django;
 pub mod forms;
+mod health;
 mod limit;
 pub mod mcp;
 pub mod migrate;
@@ -540,6 +541,7 @@ impl App {
         // Approved changes replay through an un-limited copy of the API.
         approvals::set_api(api::router(self.api.clone()));
         let mut app = routes
+            .route("/-/health", axum::routing::get(health::health))
             .merge(limited(api::router(self.api.clone()), self.api_rate))
             .merge(limited(mcp::router(self.api.clone()), self.mcp_rate))
             .layer(from_fn(auth::session_middleware))

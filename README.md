@@ -316,7 +316,9 @@ App::new().task::<SendWelcome>();
 SendWelcome { user_id: 7 }.enqueue().await?;          // or .enqueue_in(Duration::from_secs(60))
 ```
 
-`runserver` runs `RANGOLI_WORKERS` task loops in-process (default 1, `0` turns them off); `cargo run -- worker` runs a dedicated worker. Runs are claimed with a compare-and-set update, so two workers never run the same one. Failures retry with exponential backoff (10s, 20s, 40s, up to an hour), panics are caught and recorded, and runs left `running` by a crashed worker are retried after a ten-minute lease. Every run is visible in the admin under **Task records**, filterable by status.
+`runserver` runs `RANGOLI_WORKERS` task loops in-process (default 1, `0` turns them off); `cargo run -- worker` runs a dedicated worker. Runs are claimed with a compare-and-set update, so two workers never run the same one. Failures retry with exponential backoff (10s, 20s, 40s, up to an hour), panics are caught and recorded, and runs left `running` by a crashed worker are retried after a ten-minute lease. Every run is visible in the admin under **Task records**, filterable by status, and failed runs can be retried from there.
+
+To make sure work isn't queued twice (a double click, a retried request, two servers), use `ReindexProduct { id: 7 }.enqueue_unique("product-7")`. It returns `None` while a run with that key is waiting or running. The database's unique index decides: in the test, 10 racing enqueues queue exactly one run, and the key frees when the run ends.
 
 Recurring work is Celery beat's job, which is a separate process: run two by accident and every job fires twice. Here it's one line, and no extra process:
 
@@ -495,6 +497,7 @@ The framework must never be the reason a backend goes down. What that means in p
 - **A panic in your handler costs one 500**, logged, and the server keeps serving (caught at the outermost layer).
 - **Hostile input never produces a server error.** [`tests/robustness.rs`](rangoli/tests/robustness.rs) is a deterministic fuzzer: SQL-injection strings, `%` and `_`, null bytes, `../`, `<script>`, emoji and right-to-left text, 10,000-character values, impossible dates, numbers too big for any column, and random JSON of every shape, thrown at the admin's lists, forms, bulk actions and paths, the JSON API, and login, plus 200 concurrent reads and writes. Any 5xx fails the build. It runs on SQLite, Postgres and MySQL on every push, and for 3,000 rounds (about 20,000 requests) in its own job.
 - **Database outages are outages, not crashes.** Requests that need the database fail within `RANGOLI_DB_TIMEOUT` (5 s) with `503` and `Retry-After`; everything else keeps working; when the database comes back, so does the app, without a restart. [`scripts/outage_check.sh`](scripts/outage_check.sh) proves it against real Postgres in CI: the database hangs (`docker pause`) and restarts under a running app.
+- **`GET /-/health` for load balancers and Kubernetes.** It answers `200 ok` when the database responds, `200 warn` when due background jobs have waited over five minutes (workers down), and `503 down` when the database doesn't answer within 2 s. It reveals no versions, hosts or errors. The outage check above asserts all three states.
 - **No request waits forever:** `RANGOLI_REQUEST_TIMEOUT` (30 s) answers with `503`. Bodies over 2 MB are refused with `413`.
 - **No lock can poison itself:** the login lockout and the task registry recover from a panic elsewhere instead of failing every later request.
 

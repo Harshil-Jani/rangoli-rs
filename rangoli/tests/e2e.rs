@@ -1674,6 +1674,22 @@ async fn scenario() {
         body.contains("Select task record to change") && body.contains("2 results of") && body.contains("By status"),
         "tasks in the admin"
     );
+    // Health: ok, then "warn" (still 200) once a due job has waited over five minutes.
+    let (status, _, body) = send(get("/-/health", "")).await;
+    assert_eq!((status.as_u16(), json(&body)["status"].as_str()), (200, Some("ok")), "{body}");
+    assert_eq!(json(&body)["tasks"]["waiting"], 0);
+    let backlog = Greet { name: "Backlog".into() }.enqueue().await.unwrap();
+    TaskRecord::objects()
+        .filter(TaskRecord::ID.eq(backlog))
+        .update([TaskRecord::RUN_AT.set(DateTime::from_unix(DateTime::now().unix() - 600))])
+        .await
+        .unwrap();
+    let (status, _, body) = send(get("/-/health", "")).await;
+    let h = json(&body);
+    assert_eq!((status.as_u16(), h["status"].as_str(), h["tasks"]["waiting"].as_i64()), (200, Some("warn"), Some(1)), "{body}");
+    assert!(h["tasks"]["oldest_wait_secs"].as_i64().unwrap() >= 600);
+    tasks::run_due(10).await.unwrap();
+
     let pick = format!("action=retry&_selected_action={boom}&_selected_action={greet}");
     let (_, headers, _) = send(form("/admin/rangoli_task/", &cookie, &pick)).await;
     assert!(headers.get("location").is_some(), "retry action redirects back");

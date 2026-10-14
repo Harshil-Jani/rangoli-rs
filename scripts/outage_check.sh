@@ -29,6 +29,7 @@ $BIN migrate >/dev/null
 $BIN runserver >/tmp/rangoli-outage.log 2>&1 & APP=$!
 wait_for /api/blog_post/ 200
 expect /api/blog_post/ 200 "database up"
+expect /-/health 200 "health check passes"
 
 echo "-- database hangs (docker pause)"
 docker pause $PG >/dev/null
@@ -38,10 +39,12 @@ took=$(( $(date +%s) - start ))
 [ "$took" -le 8 ] || { echo "FAIL: took ${took}s to give up"; exit 1; }
 echo "ok:   gave up after ${took}s, not hanging"
 expect /static/site.css 200 "pages without the database keep working"
+expect /-/health 503 "health check reports the database down"
 kill -0 $APP || { echo "FAIL: the app died"; exit 1; }
 docker unpause $PG >/dev/null
 wait_for /api/blog_post/ 200
 expect /api/blog_post/ 200 "recovered after the hang"
+expect /-/health 200 "health check recovers"
 
 echo "-- database restarts (all connections dropped)"
 docker restart $PG >/dev/null
