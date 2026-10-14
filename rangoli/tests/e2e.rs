@@ -799,6 +799,24 @@ async fn scenario() {
     assert_eq!(send(get("/api/blog_post/?cursor=abc", "")).await.0, StatusCode::BAD_REQUEST, "a bad cursor is a 400");
     assert_eq!(send(get("/api/blog_post/?cursor=&ordering=title", "")).await.0, StatusCode::BAD_REQUEST, "cursors follow the id order");
 
+    // The HTTP QUERY method: the same list, with its options in a JSON body.
+    let query = |body: &str| {
+        Request::builder()
+            .method("QUERY")
+            .uri("/api/blog_post/")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let (status, _, by_query) = send(query(r#"{"filters": {"published": true}, "ordering": "-id", "limit": 2}"#)).await;
+    let (_, _, by_get) = send(get("/api/blog_post/?published=true&ordering=-id&limit=2", "")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json(&by_query)["results"], json(&by_get)["results"], "QUERY returns what GET does");
+    assert_eq!(send(query(r#"{"filters": {"nope": 1}}"#)).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(send(query("not json")).await.0, StatusCode::BAD_REQUEST);
+    let purge = Request::builder().method("PURGE").uri("/api/blog_post/").body(Body::empty()).unwrap();
+    assert_eq!(send(purge).await.0, StatusCode::METHOD_NOT_ALLOWED, "other methods are still refused");
+
     let (status, _, body) = send(get("/api/blog_post/999999", "")).await;
     assert_eq!((status, json(&body)["detail"].as_str()), (StatusCode::NOT_FOUND, Some("Not found.")));
 

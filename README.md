@@ -355,6 +355,8 @@ App::new().api::<Post>(Api::new().read(Access::Public).write(Access::Staff))
 
 For big tables, `?cursor=` (empty for the first page) switches to keyset pagination: each page links the next with `cursor=<last id>`, and there is no `COUNT(*)` and no `OFFSET`, so page 10,000 costs what page 1 does (Django's admin and DRF count every row, Trac [#8408](https://code.djangoproject.com/ticket/8408)). On a 1,000,000-row Postgres table, the page at row 990,000 took 1.2 ms by cursor against 120 ms with offset and count (best of 5). MCP's list tools take the same `cursor`.
 
+Lists also answer the HTTP `QUERY` method ([new-features #185](https://github.com/django/new-features/issues/185)): the same options as a JSON body, `{"filters": {...}, "search": "...", "ordering": "-id", "limit": 20, "cursor": ""}`, for queries too long or too private to put in a URL. It returns exactly what the matching `GET` does.
+
 Validation uses the same rules as the admin and answers like DRF: `400 {"title": ["This field may not be blank."]}`. Access levels are `Public`, `Authenticated`, `Staff` (the default) and `Nobody`.
 
 Rows that belong to a user take one call instead of DRF's `IsOwner` permission class, a `get_queryset` override and a `perform_create` override:

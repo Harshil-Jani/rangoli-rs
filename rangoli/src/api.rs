@@ -140,7 +140,7 @@ pub(crate) fn router(exposed: Vec<(&'static ModelMeta, Options)>) -> Router {
     let site = Arc::new(Site { models: exposed.into_iter().map(|(m, o)| (m.table, (m, o))).collect() });
     Router::new()
         .route("/api/schema.json", get(schema))
-        .route("/api/{table}/", get(list).post(create))
+        .route("/api/{table}/", get(list).post(create).fallback(query_method))
         .route("/api/{table}/{id}", get(detail).put(replace).patch(patch).delete(remove))
         .with_state(site)
 }
@@ -415,9 +415,44 @@ async fn list(
     Path(table): Path<String>,
     UrlQuery(p): UrlQuery<HashMap<String, String>>,
 ) -> Reply {
-    let (meta, opts) = endpoint(&site, &table, &user, &scope, false)?;
+    list_rows(&site, &user, &scope, &table, p).await
+}
+
+/// The HTTP QUERY method (django/new-features #185): a list request whose options travel in a
+/// JSON body (`{"filters": {...}, "search", "ordering", "limit", "offset", "cursor"}`) instead of
+/// the URL, for queries too long or too private for a link. Safe and repeatable, like GET.
+async fn query_method(
+    State(site): S,
+    user: CurrentUser,
+    scope: ScopeExt,
+    method: axum::http::Method,
+    Path(table): Path<String>,
+    body: axum::body::Bytes,
+) -> Reply {
+    if method.as_str() != "QUERY" {
+        return Err(problem(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed."));
+    }
+    let body: JsonValue = serde_json::from_slice(&body).map_err(|_| problem(StatusCode::BAD_REQUEST, "Expected a JSON object."))?;
+    let Some(obj) = body.as_object() else { return Err(problem(StatusCode::BAD_REQUEST, "Expected a JSON object.")) };
+    let text = |v: &JsonValue| v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+    let mut p: HashMap<String, String> = HashMap::new();
+    if let Some(filters) = obj.get("filters").and_then(JsonValue::as_object) {
+        for (k, v) in filters {
+            p.insert(k.clone(), text(v));
+        }
+    }
+    for k in ["search", "ordering", "limit", "offset", "cursor"] {
+        if let Some(v) = obj.get(k).filter(|v| !v.is_null()) {
+            p.insert(k.into(), text(v));
+        }
+    }
+    list_rows(&site, &user, &scope, &table, p).await
+}
+
+async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &str, p: HashMap<String, String>) -> Reply {
+    let (meta, opts) = endpoint(site, table, user, scope, false)?;
     let mut q = Query::new(meta);
-    q.filter.extend(owned(ownership(opts, &user)));
+    q.filter.extend(owned(ownership(opts, user)));
     // `?field=value` filters on exact matches, typed by the field.
     for (k, raw) in &p {
         if matches!(k.as_str(), "limit" | "offset" | "ordering" | "search" | "cursor") {
