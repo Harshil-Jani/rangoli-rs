@@ -552,6 +552,19 @@ fn sqlite_rebuild(table: &str, old: &[Column], new: &[Column], indexes: &[Index]
     .collect()
 }
 
+/// On Postgres, an index on a table and columns that existed before this migration is built
+/// with `CREATE INDEX CONCURRENTLY`: writes keep flowing during the build instead of waiting for
+/// it (Django needs `AddIndexConcurrently` and `atomic = False` by hand). Returns the index name
+/// and its SQL, which must run outside a transaction.
+fn concurrent_index(d: Dialect, before: &State, op: &Op) -> Option<(String, String)> {
+    let Op::AddIndex { table, index } = op else { return None };
+    let existing = before.get(table)?;
+    if d != Dialect::Postgres || !index.columns.iter().all(|c| existing.columns.iter().any(|col| &col.name == c)) {
+        return None;
+    }
+    Some((index.name.clone(), create_index(d, table, index).replacen("INDEX ", "INDEX CONCURRENTLY IF NOT EXISTS ", 1)))
+}
+
 fn create_index(d: Dialect, table: &str, ix: &Index) -> String {
     let cols: Vec<String> = ix.columns.iter().map(|c| d.quote(c)).collect();
     format!("CREATE {}INDEX {} ON {} ({})", if ix.unique { "UNIQUE " } else { "" }, d.quote(&ix.name), d.quote(table), cols.join(", "))
@@ -705,13 +718,30 @@ pub async fn run(dir: &Path) -> Result<Vec<String>> {
     let mut done = vec![];
     let mut conn = db().pool.acquire().await?;
     for m in &migrations {
-        let mut sqls = vec![];
+        let (mut sqls, mut concurrent) = (vec![], vec![]);
+        let before = state.clone();
         for op in &m.operations {
-            sqls.extend(op_sql(d, &state, op)?);
+            match concurrent_index(d, &before, op) {
+                Some(build) => concurrent.push(build),
+                None => sqls.extend(op_sql(d, &state, op)?),
+            }
             apply(&mut state, op).map_err(Error::Migration)?;
         }
         if applied.contains(&m.name) {
             continue;
+        }
+        // Indexes on tables that already have rows are built without locking out writes, before
+        // the rest of the migration. IF NOT EXISTS makes a rerun after a later failure safe.
+        for (name, sql) in &concurrent {
+            let invalid = "SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = $1 AND NOT i.indisvalid";
+            if sqlx::query(invalid).bind(name.as_str()).fetch_optional(&mut *conn).await?.is_some() {
+                // Left INVALID by an interrupted build; IF NOT EXISTS would otherwise keep it forever.
+                sqlx::query(&format!("DROP INDEX CONCURRENTLY IF EXISTS {}", d.quote(name))).execute(&mut *conn).await?;
+            }
+            if let Err(e) = sqlx::query(sql).execute(&mut *conn).await {
+                sqlx::query(&format!("DROP INDEX CONCURRENTLY IF EXISTS {}", d.quote(name))).execute(&mut *conn).await.ok();
+                return Err(Error::Migration(format!("`{}`: {e}\n  while running: {sql}", m.name)));
+            }
         }
         // SQLite table rebuilds must not trip foreign keys mid-swap; this pragma is ignored inside transactions.
         if d == Dialect::Sqlite {
