@@ -1207,6 +1207,52 @@ async fn scenario() {
     let (_, _, page) = send(get("/admin/e2e_doc/?q=plan", &cookie)).await;
     assert!(page.replace("&#x2f;", "/").contains("/admin/e2e_doc/export.csv?q=plan"), "the link carries the current search");
 
+    // ---- CSV import: preview, then all or nothing
+    let import = |csv: &str, confirm: bool| {
+        let mut body = serde_urlencoded::to_string([("csv", csv)]).unwrap();
+        if confirm {
+            body.push_str("&confirm=1");
+        }
+        body
+    };
+    let before = Doc::objects().count().await.unwrap();
+    let csv = "title,team\nimported one,1\nimported two,1\n";
+    let (status, _, page) = send(form("/admin/e2e_doc/import", &ann_cookie, &import(csv, false))).await;
+    assert!(status == StatusCode::OK && page.contains("2 to add, 0 to change"), "a preview first: {page}");
+    assert_eq!(Doc::objects().count().await.unwrap(), before, "and nothing saved yet");
+    let (_, _, page) = send(form("/admin/e2e_doc/import", &ann_cookie, &import(csv, true))).await;
+    assert!(page.contains("Imported: 2 added"), "{page}");
+    assert_eq!(Doc::objects().count().await.unwrap(), before + 2);
+    let one = Doc::objects().filter(Doc::TITLE.eq("imported one")).first().await.unwrap().unwrap();
+    let (_, _, hist) = send(get(&format!("/admin/e2e_doc/{}/history", one.id.unwrap()), &ann_cookie)).await;
+    assert!(hist.contains("Added by CSV import."), "each row has its History entry");
+
+    let theirs = Doc::objects().filter(Doc::TEAM.eq(2)).first().await.unwrap().unwrap().id.unwrap();
+    let (_, _, page) =
+        send(form("/admin/e2e_doc/import", &ann_cookie, &import(&format!("id,title,team\n{theirs},mine now,1\n"), true))).await;
+    assert!(page.contains("isn&#x27;t one you may change") || page.contains("isn't one you may change"), "another team's row: {page}");
+    assert_ne!(Doc::get(theirs).await.unwrap().title, "mine now");
+    let mine = one.id.unwrap();
+    let bad = format!("id,title,team\n{mine},renamed,1\n,new row,abc\n");
+    let (_, _, page) = send(form("/admin/e2e_doc/import", &ann_cookie, &import(&bad, true))).await;
+    assert!(page.contains("1 with problems") && page.contains("team:"), "a bad value is reported by field: {page}");
+    assert_eq!(Doc::get(mine).await.unwrap().title, "imported one", "one bad row and nothing is imported, even with confirm");
+    let moving = format!("id,title,team\n{mine},renamed,1\n{},moved,2\n", mine);
+    let (_, _, page) = send(form("/admin/e2e_doc/import", &ann_cookie, &import(&moving, true))).await;
+    assert!(page.contains("Nothing was imported") && page.contains("outside the rows you may see"), "{page}");
+    assert_eq!(Doc::get(mine).await.unwrap().title, "imported one", "the good row was rolled back with the bad one");
+    let (_, _, page) = send(form("/admin/e2e_doc/import", &ann_cookie, &import("title,secret_column\nx,y\n", false))).await;
+    assert!(page.contains("no field called"), "unknown columns are refused: {page}");
+
+    // Round trip: an export imports back as all unchanged, formulas and line breaks included.
+    let (_, _, csv) = send(get("/admin/e2e_doc/export.csv?q=plan", &ann_cookie)).await;
+    let rows = csv.lines().count();
+    let (_, _, page) = send(form("/admin/e2e_doc/import", &ann_cookie, &import(&csv, false))).await;
+    assert!(
+        page.contains("0 to add, 0 to change") && page.contains("0 with problems"),
+        "export → import changes nothing ({rows} lines): {page}"
+    );
+
     let rjwt = jwt_auth.issue(&root, std::time::Duration::from_secs(900)).unwrap();
     assert_eq!(send(bearer("GET", "/admin/", &rjwt, "")).await.0, StatusCode::FORBIDDEN, "a JWT can't open the admin");
     let (_, _, body) = send(bearer("GET", &format!("/api/e2e_note/?owner_id={bid}"), &at, "")).await;

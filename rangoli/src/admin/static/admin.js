@@ -36,3 +36,13 @@ htmx.onLoad(() => {
   form.addEventListener("input", update);
   form.addEventListener("change", update);
 });
+
+// CSV import: read the chosen file into the textarea that gets posted.
+htmx.onLoad(() => {
+  for (const input of document.querySelectorAll("input[data-csv-into]")) {
+    input.onchange = async () => {
+      const file = input.files[0];
+      if (file) document.getElementById(input.dataset.csvInto).value = await file.text();
+    };
+  }
+});

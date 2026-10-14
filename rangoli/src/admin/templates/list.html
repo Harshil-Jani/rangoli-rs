@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block bodyclass %}change-list{% endblock %}
 {% block breadcrumbs %}<nav class="crumbs" aria-label="Breadcrumbs"><a href="/admin/">Home</a><span aria-hidden="true">›</span>{{ app }}<span aria-hidden="true">›</span>{{ plural }}</nav>{% endblock %}
-{% block tools %}<a href="{{ export_url }}" class="btn" hx-boost="false" download>Export CSV</a>{% if can_add %}<a href="/admin/{{ table }}/add" class="btn primary">Add {{ name }}</a>{% endif %}{% endblock %}
+{% block tools %}<a href="{{ export_url }}" class="btn" hx-boost="false" download>Export CSV</a>{% if can_add %}<a href="/admin/{{ table }}/import" class="btn">Import CSV</a>{% endif %}{% if can_add %}<a href="/admin/{{ table }}/add" class="btn primary">Add {{ name }}</a>{% endif %}{% endblock %}
 {% block content %}
 <div class="changelist{% if filters %} has-filters{% endif %}">
   <div class="changelist-main">

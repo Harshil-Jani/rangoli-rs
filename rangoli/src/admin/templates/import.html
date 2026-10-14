@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block crumbs %}<span aria-hidden="true">›</span>Import{% endblock %}
+{% block content %}
+{% if error %}<p class="message error" role="alert">{{ error }}</p>{% endif %}
+{% if done %}<p class="message success" role="status">{{ done }}</p>{% endif %}
+<form method="post" class="panel fields" novalidate>
+  {% if not plan %}
+  <p class="intro">Upload a CSV whose first row names the columns (an <a href="/admin/{{ table }}/export.csv" hx-boost="false">export</a> is a good template). Rows with an <code>id</code> change that row; rows without one are added. You'll see every change before anything is saved.</p>
+  <div class="field">
+    <label class="field-label" for="id_file">CSV file</label>
+    <div class="field-control"><input type="file" id="id_file" accept=".csv,text/csv" data-csv-into="id_csv"><p class="help">Or paste it below. Up to 1.5 MB.</p></div>
+  </div>
+  {% endif %}
+  <div class="field"{% if plan %} hidden{% endif %}>
+    <label class="field-label" for="id_csv">CSV</label>
+    <div class="field-control"><textarea name="csv" id="id_csv" rows="10" class="code" spellcheck="false">{{ csv }}</textarea></div>
+  </div>
+  {% if plan %}
+  <p><strong>{{ summary }}</strong></p>
+  <div class="table-wrap"><table class="results">
+    <thead><tr><th scope="col">Line</th><th scope="col">Action</th><th scope="col">Row</th><th scope="col">Problems</th></tr></thead>
+    <tbody>
+    {% for r in plan %}<tr{% if r.errors %} class="has-error"{% endif %}><td>{{ r.line }}</td><td>{{ r.action }}</td><td>{{ r.repr }}</td><td>{{ r.errors }}</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+  <div class="submit-row">
+    {% if can_apply %}<button type="submit" name="confirm" value="1" class="btn primary">Import {{ changes }} change{% if changes != 1 %}s{% endif %}</button>{% endif %}
+    <a href="/admin/{{ table }}/import" class="btn">Start over</a>
+  </div>
+  {% else %}
+  <div class="submit-row"><button type="submit" class="btn primary">Preview</button></div>
+  {% endif %}
+</form>
+{% endblock %}

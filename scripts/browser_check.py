@@ -79,5 +79,15 @@ with sync_playwright() as p:
     page.click("button:has-text('Yes, delete')")
     expect(page.locator(".message.success")).to_contain_text("Successfully deleted 1 author")
 
+    # CSV import: choosing a file fills the form (admin.js), then a preview before anything is saved.
+    page.goto(f"{base}/admin/blog_author/import")
+    page.set_input_files("#id_file", files=[{"name": "authors.csv", "mimeType": "text/csv",
+                                              "buffer": b"name,email\nGrace Hopper,grace@example.com\n"}])
+    expect(page.locator("#id_csv")).to_have_value("name,email\nGrace Hopper,grace@example.com\n")
+    page.click("button:has-text('Preview')")
+    expect(page.get_by_text("1 to add, 0 to change")).to_be_visible()
+    page.click("button:has-text('Import 1 change')")
+    expect(page.locator(".message.success")).to_contain_text("Imported: 1 added")
+
     assert not errors, errors
     print("browser check passed")

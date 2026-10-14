@@ -55,6 +55,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         ("agents.html", include_str!("templates/agents.html")),
         ("two_factor.html", include_str!("templates/two_factor.html")),
         ("oauth.html", include_str!("templates/oauth.html")),
+        ("import.html", include_str!("templates/import.html")),
     ] {
         env.add_template(name, src).expect("admin template");
     }
@@ -72,6 +73,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         .route("/admin/static/{file}", get(static_file))
         .route("/admin/{table}/", get(list).post(bulk))
         .route("/admin/{table}/export.csv", get(export_csv))
+        .route("/admin/{table}/import", get(import_page).post(import_submit))
         .route("/admin/{table}/add", get(add_page).post(add_submit))
         .route("/admin/{table}/{id}/", get(change_page).post(change_submit))
         .route("/admin/{table}/{id}/delete", get(delete_page).post(delete_submit))
@@ -943,6 +945,188 @@ async fn export_csv(State(site): S, user: CurrentUser, uri: Uri, Path(table): Pa
         axum::body::Body::from_stream(body),
     )
         .into_response())
+}
+
+// ---------------------------------------------------------------- CSV import
+
+const IMPORT_MAX_ROWS: usize = 10_000;
+
+/// One CSV row, checked and ready to apply.
+struct Planned {
+    line: usize,
+    id: Option<i64>,
+    action: &'static str,
+    cols: Vec<(&'static str, Value, FieldType)>,
+    repr: String,
+    errors: String,
+}
+
+async fn import_page(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>) -> Page {
+    let u = staff(&user, &uri)?;
+    let meta = addable(&site, &table)?;
+    let title = format!("Import {}", verbose_plural(meta.name));
+    render(&site, "import.html", context! { title, ..chrome(&site, u, Some(meta)) })
+}
+
+/// Turn the CSV into a plan: every row validated exactly as the admin form would, against the
+/// row as it stands (for updates), within the staff member's row permissions.
+async fn plan_import(site: &Site, meta: &'static ModelMeta, u: &User, text: &str) -> Result<Vec<Planned>, String> {
+    let rows =
+        super::csv::parse(text).map_err(|line| format!("The CSV stops making sense on line {line} (an unclosed or stray quote?)."))?;
+    let Some((header, body)) = rows.split_first() else { return Err("The CSV is empty.".into()) };
+    if body.len() > IMPORT_MAX_ROWS {
+        return Err(format!("{} rows is more than one import takes ({IMPORT_MAX_ROWS}); split the file.", body.len()));
+    }
+    let opts = options(site, meta);
+    let mut columns: Vec<Option<&'static FieldMeta>> = vec![];
+    for h in header {
+        let h = h.trim();
+        if h == "id" {
+            columns.push(None);
+            continue;
+        }
+        match meta.field(h) {
+            Some(f)
+                if !f.password
+                    && !f.is_auto()
+                    && f.ty != FieldType::Opaque
+                    && !opts.exclude.contains(&f.name)
+                    && !opts.readonly_fields.contains(&f.name) =>
+            {
+                columns.push(Some(f))
+            }
+            Some(_) => return Err(format!("The column `{h}` can't be imported.")),
+            None => return Err(format!("There's no field called `{h}`. Columns must match field names; an export shows them.")),
+        }
+    }
+    let id_col = header.iter().position(|h| h.trim() == "id");
+    let mut plan = vec![];
+    for (n, cells) in body.iter().enumerate() {
+        let line = n + 2;
+        let fail = |errors: String| Planned { line, id: None, action: "Error", cols: vec![], repr: String::new(), errors };
+        if cells.len() != header.len() {
+            plan.push(fail(format!("{} cells, but the header has {}.", cells.len(), header.len())));
+            continue;
+        }
+        let id = match id_col.map(|i| cells[i].trim()).filter(|s| !s.is_empty()) {
+            None => None,
+            Some(s) => match s.parse::<i64>() {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    plan.push(fail(format!("`{s}` isn't an id.")));
+                    continue;
+                }
+            },
+        };
+        let existing = match id {
+            Some(id) => {
+                let mut q = Query::new(meta);
+                q.filter.push(by_id(id));
+                q.filter.extend(row_filter(site, meta, u));
+                match q.rows().await.map_err(|e| e.to_string())?.pop() {
+                    Some((_, vals)) => Some(vals),
+                    None => {
+                        plan.push(fail(format!("There's no row {id} (or it isn't one you may change).")));
+                        continue;
+                    }
+                }
+            }
+            None => None,
+        };
+        let mut form = existing.as_ref().map(|v| raw_values(meta, v)).unwrap_or_default();
+        for (f, cell) in columns.iter().zip(cells) {
+            let Some(f) = f else { continue };
+            let v = cell.trim();
+            if f.ty == FieldType::Bool {
+                if matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on" | "y") {
+                    form.insert(f.name.to_string(), "on".into());
+                } else {
+                    form.remove(f.name);
+                }
+            } else {
+                form.insert(f.name.to_string(), cell.clone());
+            }
+        }
+        match crate::forms::validate(meta, &form, existing.is_none(), &fixed_fields(meta, opts, &form)).await {
+            Err(errors) => {
+                let mut msgs: Vec<String> = errors.into_iter().map(|(k, v)| format!("{k}: {v}")).collect();
+                msgs.sort();
+                plan.push(fail(msgs.join(" ")));
+            }
+            Ok(cols) => {
+                let repr = form.get(meta.display.unwrap_or("id")).cloned().unwrap_or_else(|| id.map(|i| i.to_string()).unwrap_or_default());
+                let action = match &existing {
+                    None => "Add",
+                    Some(old) => {
+                        let same = cols
+                            .iter()
+                            .filter(|(c, ..)| !meta.field(c).is_some_and(|f| f.is_auto()))
+                            .all(|(c, v, _)| meta.fields.iter().position(|f| f.name == *c).is_some_and(|i| &old[i] == v));
+                        if same {
+                            "Unchanged"
+                        } else {
+                            "Change"
+                        }
+                    }
+                };
+                plan.push(Planned { line, id, action, cols, repr, errors: String::new() });
+            }
+        }
+    }
+    Ok(plan)
+}
+
+async fn import_submit(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>, Form(f): Form<Pairs>) -> Page {
+    let u = staff(&user, &uri)?;
+    let meta = addable(&site, &table)?;
+    let title = format!("Import {}", verbose_plural(meta.name));
+    let text = param(&f, "csv").unwrap_or("").to_string();
+    let plan = match plan_import(&site, meta, u, &text).await {
+        Ok(p) => p,
+        Err(error) => return render(&site, "import.html", context! { title, error, csv => text, ..chrome(&site, u, Some(meta)) }),
+    };
+    let count = |a: &str| plan.iter().filter(|p| p.action == a).count();
+    let (adds, changes, same, errors) = (count("Add"), count("Change"), count("Unchanged"), count("Error"));
+    if param(&f, "confirm") == Some("1") && errors == 0 {
+        let applied = crate::atomic(async {
+            for p in plan.iter().filter(|p| p.action == "Add" || p.action == "Change") {
+                let id = match p.id {
+                    None => orm::insert_row(meta.table, &p.cols).await?,
+                    Some(id) => {
+                        let mut q = Query::new(meta);
+                        q.filter.push(by_id(id));
+                        q.update(&p.cols).await?;
+                        id
+                    }
+                };
+                still_visible(&site, meta, u, id).await?;
+                let vals = row_values(meta, id).await?;
+                let (action, msg) = if p.id.is_none() { (ADDITION, "Added by CSV import.") } else { (CHANGE, "Changed by CSV import.") };
+                log(u, meta, id, &repr(meta, id, &vals), action, msg.into()).await?;
+            }
+            Ok(())
+        })
+        .await;
+        return match applied {
+            Ok(()) => {
+                let done = format!("Imported: {adds} added, {changes} changed, {same} unchanged.");
+                render(&site, "import.html", context! { title, done, ..chrome(&site, u, Some(meta)) })
+            }
+            Err(e) => {
+                let error = format!("Nothing was imported: {}", db_error_message(&e).map_or_else(|| e.to_string(), str::to_string));
+                render(&site, "import.html", context! { title, error, csv => text, ..chrome(&site, u, Some(meta)) })
+            }
+        };
+    }
+    let summary = format!("{adds} to add, {changes} to change, {same} unchanged, {errors} with problems.");
+    let rows: Vec<_> = plan.iter().map(|p| context! { line => p.line, action => p.action, repr => p.repr, errors => p.errors }).collect();
+    let can_apply = errors == 0 && adds + changes > 0;
+    let error = (errors > 0).then_some("Fix the rows with problems and preview again; nothing is imported while any row has one.");
+    render(
+        &site,
+        "import.html",
+        context! { title, plan => rows, summary, can_apply, changes => adds + changes, csv => text, error, ..chrome(&site, u, Some(meta)) },
+    )
 }
 
 /// The result of a custom action. Only registered action names are shown, with their

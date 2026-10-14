@@ -9,6 +9,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 #[cfg(feature = "admin")]
+mod csv;
+#[cfg(feature = "admin")]
 mod views;
 #[cfg(feature = "admin")]
 pub use views::router;
