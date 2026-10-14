@@ -387,6 +387,7 @@ impl App {
                         ])
                         .search_fields([&tasks::TaskRecord::NAME, &tasks::TaskRecord::LAST_ERROR])
                         .list_filter([&tasks::TaskRecord::STATUS, &tasks::TaskRecord::CREATED_AT])
+                        .action("retry", "Retry selected failed runs now", tasks::retry)
                         .opts,
                 ),
             ],

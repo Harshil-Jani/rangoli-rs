@@ -67,7 +67,8 @@ pub struct TaskRecord {
     pub last_error: Option<String>,
     #[field(auto_now_add)]
     pub created_at: DateTime,
-    /// Set for scheduled ticks (`name|cron@unix`); unique, so a tick is queued once.
+    /// Set for scheduled ticks (`name|cron@unix`) and `enqueue_unique` runs (`once:name|key`,
+    /// cleared when the run ends); unique, so each is queued once.
     #[field(max_length = 200, unique)]
     pub dedup: Option<String>,
 }
@@ -92,7 +93,27 @@ pub trait Task: Serialize + DeserializeOwned + Send + 'static {
         let run_at = DateTime::from_unix(DateTime::now().unix() + delay.as_secs() as i64);
         async move { enqueue_raw(Self::NAME, payload?, run_at, Self::MAX_ATTEMPTS).await }
     }
+
+    /// Queue a run unless one with the same `key` is still waiting or running: `Ok(None)` then.
+    /// For "reindex product 7" or "send today's digest", where a double click, a retried
+    /// request or two servers must not queue the work twice. Once the run finishes (or fails
+    /// for good) the key is free again. The database's unique index decides, so it holds
+    /// across any number of processes.
+    fn enqueue_unique(&self, key: &str) -> impl Future<Output = Result<Option<i64>>> + Send {
+        let payload = serde_json::to_string(self).map_err(|e| Error::Task(format!("cannot serialize {}: {e}", Self::NAME)));
+        let dedup = format!("{ONCE}{}|{key}", Self::NAME);
+        async move {
+            match insert(Self::NAME, payload?, DateTime::now(), Self::MAX_ATTEMPTS, Some(dedup)).await {
+                Ok(id) => Ok(Some(id)),
+                Err(e) if e.is_unique_violation() => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+    }
 }
+
+/// Prefix of `enqueue_unique` keys, which are released when the run ends (schedule tick keys stay).
+const ONCE: &str = "once:";
 
 type BoxFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 type Handler = fn(String) -> BoxFuture;
@@ -113,6 +134,10 @@ pub fn register<T: Task>() {
 
 /// Queue a run by name, for code that doesn't have the task type at hand.
 pub async fn enqueue_raw(name: &str, payload: String, run_at: DateTime, max_attempts: i64) -> Result<i64> {
+    insert(name, payload, run_at, max_attempts, None).await
+}
+
+async fn insert(name: &str, payload: String, run_at: DateTime, max_attempts: i64, dedup: Option<String>) -> Result<i64> {
     let mut record = TaskRecord {
         id: None,
         name: name.into(),
@@ -125,7 +150,7 @@ pub async fn enqueue_raw(name: &str, payload: String, run_at: DateTime, max_atte
         finished_at: None,
         last_error: None,
         created_at: DateTime::now(),
-        dedup: None,
+        dedup,
     };
     record.save().await?;
     Ok(record.id.unwrap())
@@ -392,7 +417,23 @@ async fn finish(mut record: TaskRecord, now: DateTime) -> Result<()> {
             record.last_error = Some(e);
         }
     }
+    if record.status != TaskStatus::Queued && record.dedup.as_deref().is_some_and(|d| d.starts_with(ONCE)) {
+        record.dedup = None; // free the key for the next enqueue_unique
+    }
     record.save().await
+}
+
+/// Queue failed runs again from scratch (the admin's "Retry now" action).
+pub async fn retry(runs: crate::orm::QuerySet<TaskRecord>) -> Result<()> {
+    runs.filter(TaskRecord::STATUS.eq(TaskStatus::Failed))
+        .update([
+            TaskRecord::STATUS.set(TaskStatus::Queued),
+            TaskRecord::ATTEMPTS.set(0),
+            TaskRecord::RUN_AT.set(DateTime::now()),
+            TaskRecord::FINISHED_AT.set_null(),
+        ])
+        .await?;
+    Ok(())
 }
 
 /// Run tasks forever on `concurrency` loops, polling every second when idle.

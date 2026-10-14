@@ -1642,11 +1642,34 @@ async fn scenario() {
     tasks::run_due(10).await.unwrap();
     assert_eq!(TaskRecord::get(stuck).await.unwrap().status, TaskStatus::Done, "stale runs are recovered");
 
+    // Queue once: a second enqueue with the same key is refused while the first is pending,
+    // racing or not, and the key frees up once the run ends.
+    let racers: Vec<_> =
+        (0..10).map(|_| tokio::spawn(async { Greet { name: "Once".into() }.enqueue_unique("digest-7").await.unwrap() })).collect();
+    let mut won = vec![];
+    for r in racers {
+        won.extend(r.await.unwrap());
+    }
+    assert_eq!(won.len(), 1, "ten racing enqueues of one key queue one run");
+    assert!(Greet { name: "Other".into() }.enqueue_unique("digest-8").await.unwrap().is_some(), "other keys are independent");
+    tasks::run_due(10).await.unwrap();
+    assert_eq!(GREETED.lock().unwrap().iter().filter(|n| *n == "Once").count(), 1);
+    assert!(TaskRecord::get(won[0]).await.unwrap().dedup.is_none(), "the key is released when the run ends");
+    assert!(Greet { name: "Once".into() }.enqueue_unique("digest-7").await.unwrap().is_some(), "and can be queued again");
+    tasks::run_due(10).await.unwrap();
+
     let (_, _, body) = send(get("/admin/rangoli_task/?f.status=failed", &cookie)).await;
     assert!(
         body.contains("Select task record to change") && body.contains("2 results of") && body.contains("By status"),
         "tasks in the admin"
     );
+    let pick = format!("action=retry&_selected_action={boom}&_selected_action={greet}");
+    let (_, headers, _) = send(form("/admin/rangoli_task/", &cookie, &pick)).await;
+    assert!(headers.get("location").is_some(), "retry action redirects back");
+    let again = TaskRecord::get(boom).await.unwrap();
+    assert_eq!((again.status, again.attempts, again.finished_at), (TaskStatus::Queued, 0, None), "Retry requeues a failed run");
+    assert_eq!(TaskRecord::get(greet).await.unwrap().status, TaskStatus::Done, "and leaves finished ones alone");
+    tasks::run_due(10).await.unwrap();
 
     // ---- schedules: 20 workers, each with its own memory (as if separate servers), see one tick
     let tick = DateTime::parse("2030-01-01T00:05").unwrap();

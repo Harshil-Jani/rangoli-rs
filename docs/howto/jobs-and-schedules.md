@@ -28,4 +28,5 @@ SendReceipt { order_id: 42 }.enqueue().await?;       // or .enqueue_in(Duration:
 - **Where jobs run:** `runserver` runs workers in-process (`RANGOLI_WORKERS`); `cargo run -- worker` runs a dedicated one.
 - **Failures:** they retry with backoff, panics are caught, and a crashed worker's jobs are picked up again.
 - **Schedules:** each tick runs once across any number of workers and servers. In the test, 20 racing workers queued a tick once; without the unique key it was queued 20 times.
-- **Seeing them:** every job is in the admin under **Task records**.
+- **Queue once:** `ReindexProduct { id: 7 }.enqueue_unique("product-7")` returns `None` while that key is still waiting or running, so a double click or two servers can't queue it twice. In the test, 10 racing enqueues queued 1 run; the key frees when the run ends. (Celery's top complaints include "same task runs multiple times", celery#4400.)
+- **Seeing and retrying them:** every job is in the admin under **Task records**. Select failed runs and choose **Retry selected failed runs now**.
