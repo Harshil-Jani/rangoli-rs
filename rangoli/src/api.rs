@@ -801,6 +801,16 @@ async fn schema(State(site): S) -> Json<JsonValue> {
     let (mut paths, mut schemas) = (Map::new(), Map::new());
     let mut tables: Vec<_> = site.models.values().collect();
     tables.sort_by_key(|(m, _)| m.table);
+    schemas.insert("Error".into(), json!({ "type": "object", "properties": { "detail": { "type": "string" } }, "required": ["detail"] }));
+    schemas.insert(
+        "ValidationErrors".into(),
+        json!({ "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } } }),
+    );
+    schemas.insert(
+        "Pending".into(),
+        json!({ "type": "object", "required": ["pending", "approval_id", "detail"], "properties": {
+        "pending": { "type": "boolean" }, "approval_id": { "type": "integer" }, "detail": { "type": "string" } } }),
+    );
     for (meta, _) in tables {
         let mut props = Map::new();
         props.insert("id".into(), json!({ "type": "integer", "format": "int64", "readOnly": true }));
@@ -819,6 +829,7 @@ async fn schema(State(site): S) -> Json<JsonValue> {
             .filter(|f| !f.null && !f.is_auto() && !f.private && f.ty != FieldType::Bool && f.default.is_none())
             .map(|f| f.name)
             .collect();
+        schemas.insert(format!("{}Patch", meta.name), json!({ "type": "object", "properties": props.clone() }));
         schemas.insert(meta.name.into(), json!({ "type": "object", "properties": props, "required": required }));
         let item = json!({ "$ref": format!("#/components/schemas/{}", meta.name) });
         let page = json!({ "type": "object", "properties": {
@@ -826,29 +837,60 @@ async fn schema(State(site): S) -> Json<JsonValue> {
             "previous": { "type": "string", "nullable": true }, "results": { "type": "array", "items": item } } });
         let ok = |schema: JsonValue| json!({ "description": "OK", "content": { "application/json": { "schema": schema } } });
         let body = json!({ "required": true, "content": { "application/json": { "schema": item } } });
+        let patch_body = json!({ "required": true, "content": { "application/json": {
+            "schema": { "$ref": format!("#/components/schemas/{}Patch", meta.name) } } } });
+        // Every error the handlers can return, so generated clients get typed errors too.
+        let err = |d: &str, schema: &str| json!({ "description": d, "content": { "application/json": { "schema": { "$ref": format!("#/components/schemas/{schema}") } } } });
+        let errors = |extra: &[(&str, JsonValue)]| {
+            let mut r = Map::new();
+            r.insert("401".into(), err("No or invalid credentials", "Error"));
+            r.insert("403".into(), err("Not allowed (permissions, a read-only token, or a table outside its scope)", "Error"));
+            r.insert("429".into(), err("Rate limited; see the Retry-After header", "Error"));
+            for (k, v) in extra {
+                r.insert((*k).into(), v.clone());
+            }
+            r
+        };
+        let invalid = err("Validation errors: field name to messages, or non_field_errors", "ValidationErrors");
+        let missing = err("Not found", "Error");
+        let pending = err("Queued for a person to approve (tokens that ask first)", "Pending");
+        let responses = |ok_code: &str, ok_body: JsonValue, extra: &[(&str, JsonValue)]| {
+            let mut r = errors(extra);
+            r.insert(ok_code.into(), ok_body);
+            JsonValue::Object(r)
+        };
         let id_param = json!([{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }]);
         let list_params = json!([
             { "name": "limit", "in": "query", "schema": { "type": "integer", "maximum": MAX_LIMIT } },
             { "name": "offset", "in": "query", "schema": { "type": "integer" } },
             { "name": "ordering", "in": "query", "schema": { "type": "string" }, "description": "Field name, `-` prefix for descending" },
-            { "name": "search", "in": "query", "schema": { "type": "string" } }
+            { "name": "search", "in": "query", "schema": { "type": "string" } },
+            { "name": "cursor", "in": "query", "schema": { "type": "string" }, "description": "Keyset pagination by id: pass `next` from the previous page; no count is computed" }
         ]);
         paths.insert(format!("/api/{}/", meta.table), json!({
-            "get": { "summary": format!("List {}", meta.name), "parameters": list_params, "responses": { "200": ok(page) } },
-            "post": { "summary": format!("Create a {}", meta.name), "requestBody": body, "responses": { "201": ok(item.clone()), "400": { "description": "Validation errors" } } },
+            "get": { "summary": format!("List {}", meta.name), "parameters": list_params, "responses": responses("200", ok(page), &[("400", invalid.clone())]) },
+            "post": { "summary": format!("Create a {}", meta.name), "requestBody": body,
+                "responses": responses("201", ok(item.clone()), &[("400", invalid.clone()), ("202", pending.clone())]) },
         }));
         paths.insert(format!("/api/{}/{{id}}", meta.table), json!({
             "parameters": id_param,
-            "get": { "summary": format!("Get a {}", meta.name), "responses": { "200": ok(item.clone()), "404": { "description": "Not found" } } },
-            "put": { "summary": format!("Replace a {}", meta.name), "requestBody": body, "responses": { "200": ok(item.clone()) } },
-            "patch": { "summary": format!("Update a {}", meta.name), "requestBody": body, "responses": { "200": ok(item.clone()) } },
-            "delete": { "summary": format!("Delete a {}", meta.name), "responses": { "204": { "description": "Deleted" } } },
+            "get": { "summary": format!("Get a {}", meta.name), "responses": responses("200", ok(item.clone()), &[("404", missing.clone())]) },
+            "put": { "summary": format!("Replace a {}", meta.name), "requestBody": body,
+                "responses": responses("200", ok(item.clone()), &[("400", invalid.clone()), ("404", missing.clone()), ("202", pending.clone())]) },
+            "patch": { "summary": format!("Update some fields of a {}", meta.name), "requestBody": patch_body,
+                "responses": responses("200", ok(item.clone()), &[("400", invalid.clone()), ("404", missing.clone()), ("202", pending.clone())]) },
+            "delete": { "summary": format!("Delete a {}", meta.name),
+                "responses": responses("204", json!({ "description": "Deleted" }), &[("404", missing), ("202", pending)]) },
         }));
     }
     Json(json!({
         "openapi": "3.0.3",
         "info": { "title": "Rangoli API", "version": env!("CARGO_PKG_VERSION") },
         "paths": paths,
-        "components": { "schemas": schemas },
+        "components": {
+            "schemas": schemas,
+            "securitySchemes": { "token": { "type": "http", "scheme": "bearer", "description": "An API token (`createtoken`), sent as `Authorization: Bearer rgl_...`" } },
+        },
+        "security": [{ "token": [] }, {}],
     }))
 }

@@ -1588,6 +1588,17 @@ async fn scenario() {
     let schema = json(&body);
     assert_eq!(schema["openapi"], "3.0.3");
     assert!(schema["paths"]["/api/blog_post/{id}"]["patch"].is_object());
+    let patch = &schema["paths"]["/api/blog_post/{id}"]["patch"];
+    assert_eq!(patch["requestBody"]["content"]["application/json"]["schema"]["$ref"], "#/components/schemas/PostV2Patch");
+    assert!(schema["components"]["schemas"]["PostV2Patch"].get("required").is_none(), "PATCH requires no field");
+    assert!(!schema["components"]["schemas"]["PostV2"]["required"].as_array().unwrap().is_empty());
+    let ref_of = |r: &serde_json::Value| r["content"]["application/json"]["schema"]["$ref"].as_str().map(str::to_string);
+    for (code, want) in [("400", "ValidationErrors"), ("404", "Error"), ("401", "Error"), ("429", "Error"), ("202", "Pending")] {
+        assert_eq!(ref_of(&patch["responses"][code]).as_deref(), Some(&*format!("#/components/schemas/{want}")), "typed {code}");
+    }
+    // The documented shapes are what the server sends.
+    let (status, _, body) = send(get("/api/blog_post/999999", &cookie)).await;
+    assert_eq!((status.as_u16(), json(&body)["detail"].is_string()), (404, true), "404 matches the Error schema");
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["publish_at"]["format"], "date-time");
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["due"]["format"], "date");
     assert_eq!(schema["components"]["schemas"]["PostV2"]["properties"]["price"]["format"], "decimal");
