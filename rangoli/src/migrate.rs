@@ -557,6 +557,15 @@ fn sqlite_rebuild(table: &str, old: &[Column], new: &[Column], indexes: &[Index]
 /// it (Django needs `AddIndexConcurrently` and `atomic = False` by hand). Returns the index name
 /// and its SQL, which must run outside a transaction.
 fn concurrent_index(d: Dialect, before: &State, op: &Op) -> Option<(String, String)> {
+    if let Op::AlterColumn { table, column } = op {
+        let old = before.get(table)?.columns.iter().find(|c| c.name == column.name)?;
+        if d != Dialect::Postgres || old.unique || !column.unique {
+            return None;
+        }
+        let name = index_name(table, &[&column.name], true);
+        let sql = format!("CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})", d.quote(&name), d.quote(table), d.quote(&column.name));
+        return Some((name, sql));
+    }
     let Op::AddIndex { table, index } = op else { return None };
     let existing = before.get(table)?;
     if d != Dialect::Postgres || !index.columns.iter().all(|c| existing.columns.iter().any(|col| &col.name == c)) {
@@ -658,13 +667,18 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
                 .get(table)
                 .and_then(|t| t.columns.iter().find(|c| c.name == column.name))
                 .ok_or_else(|| Error::Migration(format!("column `{table}.{}` does not exist", column.name)))?;
-            if d != Dialect::Sqlite && (old.unique != column.unique || old.fk != column.fk || old.cascade != column.cascade) {
+            if d != Dialect::Sqlite && (old.fk != column.fk || old.cascade != column.cascade) {
                 return Err(Error::Migration(format!(
-                    "changing unique/foreign key on `{table}.{}` is not automated yet; add an `sql` operation",
+                    "changing the foreign key on `{table}.{}` is not automated yet; add an `sql` operation",
                     column.name
                 )));
             }
-            match d {
+            let unique_sql = if d != Dialect::Sqlite && old.unique != column.unique {
+                unique_change(d, table, &column.name, column.unique)
+            } else {
+                vec![]
+            };
+            let mut sql = match d {
                 Dialect::Sqlite => {
                     let old = &state[table];
                     let new: Vec<Column> =
@@ -685,9 +699,42 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
                     c.unique = false; // MODIFY would add a second unique index
                     vec![format!("ALTER TABLE {} MODIFY COLUMN {}", q(table), col_def(d, &c, None))]
                 }
-            }
+            };
+            sql.extend(unique_sql);
+            sql
         }
     })
+}
+
+/// Turn a column's uniqueness on or off (Postgres and MySQL; SQLite rebuilds the table).
+///
+/// Postgres adds it as `ADD CONSTRAINT ... UNIQUE USING INDEX`: the index is built first, and
+/// on a table that already existed it's built `CONCURRENTLY` before the migration (see `run`),
+/// so writes keep flowing and the constraint itself takes only a brief lock. Dropping looks the
+/// constraint up in the catalog, so it works whatever it was named when the table was created.
+/// MySQL names the index after the column, as its inline `UNIQUE` does.
+fn unique_change(d: Dialect, table: &str, col: &str, unique: bool) -> Vec<String> {
+    let q = |s: &str| d.quote(s);
+    let name = index_name(table, &[col], true);
+    match (d, unique) {
+        (Dialect::Postgres, true) => vec![
+            format!("CREATE UNIQUE INDEX IF NOT EXISTS {} ON {} ({})", q(&name), q(table), q(col)),
+            format!("ALTER TABLE {} ADD CONSTRAINT {} UNIQUE USING INDEX {}", q(table), q(&name), q(&name)),
+        ],
+        (Dialect::Postgres, false) => vec![format!(
+            "DO $$ DECLARE n text; BEGIN \
+             SELECT con.conname INTO n FROM pg_constraint con \
+             JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = con.conkey[1] \
+             WHERE con.conrelid = '{t}'::regclass AND con.contype = 'u' AND cardinality(con.conkey) = 1 AND a.attname = '{c}'; \
+             IF n IS NOT NULL THEN EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', '{table}', n); END IF; END $$",
+            t = q(table).replace('\'', "''"),
+            c = col.replace('\'', "''"),
+            table = table.replace('\'', "''"),
+        )],
+        (Dialect::Mysql, true) => vec![format!("ALTER TABLE {} ADD UNIQUE INDEX {} ({})", q(table), q(col), q(col))],
+        (Dialect::Mysql, false) => vec![format!("ALTER TABLE {} DROP INDEX {}", q(table), q(col))],
+        (Dialect::Sqlite, _) => vec![],
+    }
 }
 
 // ---------------------------------------------------------------- runner
@@ -721,9 +768,11 @@ pub async fn run(dir: &Path) -> Result<Vec<String>> {
         let (mut sqls, mut concurrent) = (vec![], vec![]);
         let before = state.clone();
         for op in &m.operations {
-            match concurrent_index(d, &before, op) {
-                Some(build) => concurrent.push(build),
-                None => sqls.extend(op_sql(d, &state, op)?),
+            let build = concurrent_index(d, &before, op);
+            let replaces_op = build.is_some() && matches!(op, Op::AddIndex { .. }); // a unique change still attaches it
+            concurrent.extend(build);
+            if !replaces_op {
+                sqls.extend(op_sql(d, &state, op)?);
             }
             apply(&mut state, op).map_err(Error::Migration)?;
         }
