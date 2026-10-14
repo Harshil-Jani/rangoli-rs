@@ -563,7 +563,8 @@ fn concurrent_index(d: Dialect, before: &State, op: &Op) -> Option<(String, Stri
             return None;
         }
         let name = index_name(table, &[&column.name], true);
-        let sql = format!("CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})", d.quote(&name), d.quote(table), d.quote(&column.name));
+        let sql =
+            format!("CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})", d.quote(&name), d.quote(table), d.quote(&column.name));
         return Some((name, sql));
     }
     let Op::AddIndex { table, index } = op else { return None };

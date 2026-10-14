@@ -12,7 +12,9 @@ async fn exec(sql: &str) -> Result<(), sqlx::Error> {
 }
 
 fn alter(unique: bool) -> String {
-    format!(r#"{{"op": "alter_column", "table": "mu_user", "column": {{"name": "email", "type": {{"varchar": 100}}, "unique": {unique}}}}}"#)
+    format!(
+        r#"{{"op": "alter_column", "table": "mu_user", "column": {{"name": "email", "type": {{"varchar": 100}}, "unique": {unique}}}}}"#
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -27,7 +29,11 @@ async fn uniqueness_can_be_dropped_and_added() {
     let dir = std::env::temp_dir().join(format!("rangoli-mu-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     // Created unique inline, so the database named the constraint itself.
-    write(&dir, "20980101000000_mu", r#"{"op": "create_table", "table": "mu_user", "columns": [{"name": "email", "type": {"varchar": 100}, "unique": true}]}"#);
+    write(
+        &dir,
+        "20980101000000_mu",
+        r#"{"op": "create_table", "table": "mu_user", "columns": [{"name": "email", "type": {"varchar": 100}, "unique": true}]}"#,
+    );
     rangoli::migrate::run(&dir).await.unwrap();
     exec("INSERT INTO mu_user (email) VALUES ('a@x.io')").await.unwrap();
     assert!(exec("INSERT INTO mu_user (email) VALUES ('a@x.io')").await.is_err(), "unique at first");
