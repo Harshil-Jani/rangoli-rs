@@ -435,3 +435,4 @@ fieldset { margin: 0; padding: 0; min-width: 0; }
 .inline-group h2 { margin: 0; padding: 10px 14px; font-size: 15px; }
 table.inline td { vertical-align: top; }
 table.inline input[type=text], table.inline input[type=number], table.inline select { width: 100%; min-width: 6em; }
+[hidden] { display: none !important; }

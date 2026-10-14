@@ -46,7 +46,8 @@ async fn main() -> rangoli::Result<()> {
                 .list_display([&Post::TITLE, &Post::AUTHOR_ID, &Post::PUBLISHED, &Post::RATING, &Post::CREATED_AT])
                 .search_fields([&Post::TITLE, &Post::BODY])
                 .list_filter([&Post::PUBLISHED, &Post::AUTHOR_ID, &Post::CREATED_AT])
-                .ordering(Post::CREATED_AT.desc()),
+                .ordering(Post::CREATED_AT.desc())
+                .show_when(&Post::RATING, &Post::PUBLISHED, ["true"]), // rate only what's out
         )
         // /api/blog_post/ for apps, /api/schema.json for docs, and /mcp for AI agents (Claude, Cursor).
         .api::<Post>(Api::new().read(Access::Public).write(Access::Staff))

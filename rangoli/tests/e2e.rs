@@ -387,6 +387,7 @@ async fn scenario() {
                 .list_filter([&PostV2::PUBLISHED, &PostV2::AUTHOR_ID, &PostV2::CREATED_AT, &PostV2::STATUS])
                 .ordering(PostV2::TITLE.asc())
                 .readonly_fields([&PostV2::VIEWS])
+                .show_when(&PostV2::PUBLISH_AT, &PostV2::STATUS, ["published"])
                 .list_per_page(2)
                 .action("publish", "Mark selected as published", |selected| async move {
                     selected.update([PostV2::PUBLISHED.set(true)]).await.map(drop)
@@ -683,6 +684,25 @@ async fn scenario() {
     let (_, _, body) = send(get(&format!("{post_url}history"), &cookie)).await;
     assert!(body.contains("Changed title, body, published, publish at, meta and tags."), "relation changes are logged");
     assert_eq!(PostV2::get(long.id.unwrap()).await.unwrap().meta, Some(Json(serde_json::json!({ "a": 1 }))));
+
+    // Conditional fields: "publish at" shows only while the status is published.
+    let (_, _, body) = send(get("/admin/blog_post/add", &cookie)).await;
+    assert!(body.contains(r#"data-show-when="status" data-show-values="published" hidden>"#), "hidden on a draft: {body}");
+    let (_, _, body) = send(get(&post_url, &cookie)).await;
+    assert!(body.contains(r#"data-show-when="status" data-show-values="published">"#), "shown once published");
+    let base = format!("title=Long&body=b&author_id={}&tags={}&price=19.99", alan.id.unwrap(), rust.id.unwrap());
+    let (status, _, _) = send(form(&post_url, &cookie, &format!("{base}&status=published&publish_at=garbage"))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a shown field is validated");
+    assert_eq!(send(form(&post_url, &cookie, &format!("{base}&status=draft&publish_at=garbage"))).await.0, StatusCode::SEE_OTHER);
+    assert_eq!(PostV2::get(long.id.unwrap()).await.unwrap().publish_at, None, "a hidden field is neither validated nor changed");
+    assert_eq!(
+        send(form(&post_url, &cookie, &format!("{base}&status=published&publish_at=2030-01-01T09:00"))).await.0,
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(PostV2::get(long.id.unwrap()).await.unwrap().publish_at.unwrap().to_string(), "2030-01-01T09:00:00Z");
+    assert_eq!(send(form(&post_url, &cookie, &format!("{base}&status=old"))).await.0, StatusCode::SEE_OTHER);
+    assert!(PostV2::get(long.id.unwrap()).await.unwrap().publish_at.is_some(), "hiding a field keeps its value");
+    send(form(&post_url, &cookie, &edit)).await;
     let (_, _, body) = send(get("/admin/blog_post/?f.status=old", &cookie)).await;
     assert!(body.contains("By status") && body.contains("Archived for good") && body.contains("0 results of"), "choice filter");
 

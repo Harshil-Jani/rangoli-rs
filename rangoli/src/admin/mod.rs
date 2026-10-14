@@ -90,6 +90,8 @@ pub struct Options {
     pub(crate) no_add: bool,
     pub(crate) actions: Vec<Action>,
     pub(crate) inlines: Vec<Inline>,
+    /// Fields shown only while another field has one of some values: (field, controller, values).
+    pub(crate) show_when: Vec<(&'static str, &'static str, Vec<String>)>,
 }
 
 /// Child rows edited on the parent's page: the child model and its foreign key to the parent.
@@ -194,6 +196,17 @@ impl<M: Model> ModelAdmin<M> {
     /// not editable, existing values kept. For secrets staff shouldn't see either.
     pub fn exclude<const N: usize>(mut self, cols: [&dyn Field<M>; N]) -> Self {
         self.opts.exclude = Self::names(cols);
+        self
+    }
+
+    /// Show `field` only while `controller` holds one of `values`: a "Delivery" choice that
+    /// reveals the address, a checkbox that reveals a reason. Booleans compare as `"true"` and
+    /// `"false"`. A hidden field isn't validated or changed by the save (it keeps its value, or
+    /// its default when adding), so give it a default or make it nullable.
+    pub fn show_when<const N: usize>(mut self, field: &dyn Field<M>, controller: &dyn Field<M>, values: [&str; N]) -> Self {
+        let (f, c) = (field.name(), controller.name());
+        self.opts.show_when.retain(|(x, ..)| *x != f);
+        self.opts.show_when.push((f, c, values.iter().map(|v| v.to_string()).collect()));
         self
     }
 

@@ -264,6 +264,8 @@ An action runs in one transaction with a History entry for every row it touched,
 
 Child rows can be edited on the parent's page (Django's inlines; nested inline editing is [Trac #9025](https://code.djangoproject.com/ticket/9025), its most-followed open ticket): `.inline(LineItem::ORDER_ID)` lists an order's line items under the order, with blank rows to add more and a box to delete. The parent and every child row save in one transaction, so one bad row saves nothing; each child gets its own History entry, and a row id from another parent is refused. `.exclude([...])` leaves fields out of the forms entirely.
 
+Fields can depend on other fields without writing any JavaScript (Wagtail's most-voted form request, wagtail#2172): `.show_when(&Order::ADDRESS, &Order::DELIVERY, ["courier", "post"])` shows the address only for those choices, and `.show_when(&Post::RATING, &Post::PUBLISHED, ["true"])` follows a checkbox. They toggle live as you edit. A hidden field is skipped on save, so it is neither validated nor changed: switching back keeps what was typed earlier. The browser check drives this in Chrome on every push.
+
 `.no_add()` removes "Add" for rows made elsewhere (Django's `has_add_permission` returning `False`): the links disappear and the add URLs answer 403. API tokens use it: they appear in the admin under **API tokens** by name and prefix, where you can rename one, set an expiry or delete it to revoke it, but not create one, since the token itself is shown only once by `createtoken`.
 
 Settings that can't work (searching a non-text column, filtering on an unsupported type) stop the app at startup, like Django's admin checks.

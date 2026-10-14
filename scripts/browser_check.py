@@ -37,6 +37,14 @@ with sync_playwright() as p:
         page.click("button[name=_save]")
         expect(page.locator(".message.success")).to_contain_text(f"“{name}” was added successfully")
 
+    # Conditional fields (show_when): rating appears only once "published" is ticked.
+    page.goto(f"{base}/admin/blog_post/add")
+    expect(page.locator("#id_rating")).to_be_hidden()
+    page.check("#id_published")
+    expect(page.locator("#id_rating")).to_be_visible()
+    page.uncheck("#id_published")
+    expect(page.locator("#id_rating")).to_be_hidden()
+
     page.goto(f"{base}/admin/blog_post/add")
     page.fill("#id_title", "Notes on the Analytical Engine")
     page.fill("#id_body", "Patterns")

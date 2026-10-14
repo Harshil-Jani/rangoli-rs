@@ -19,3 +19,20 @@ htmx.onLoad(() => {
   boxes().forEach((b) => (b.onchange = update));
   update();
 });
+
+// Conditional fields (ModelAdmin::show_when): show a field only while its controller holds
+// one of the listed values. The server ignores hidden fields on save, so this is display only.
+htmx.onLoad(() => {
+  const form = document.querySelector("form[id$=_form]");
+  const deps = [...document.querySelectorAll("[data-show-when]")];
+  if (!form || !deps.length) return;
+  const value = (name) => {
+    const el = form.elements[name];
+    if (!el) return "";
+    return el.type === "checkbox" ? String(el.checked) : el.value;
+  };
+  const update = () =>
+    deps.forEach((d) => (d.hidden = !d.dataset.showValues.split("|").includes(value(d.dataset.showWhen))));
+  form.addEventListener("input", update);
+  form.addEventListener("change", update);
+});

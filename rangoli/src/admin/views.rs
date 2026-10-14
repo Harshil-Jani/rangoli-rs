@@ -1099,6 +1099,13 @@ async fn form_page(
     let is_add = id.is_none();
     let o = options(site, meta);
     let mut fields = form_fields(site, meta, raw, &errors, is_add, &o.readonly_fields, "", &o.exclude).await?;
+    for f in &mut fields {
+        let name = f.get_attr("name").ok().and_then(|n| n.as_str().map(str::to_string)).unwrap_or_default();
+        if let Some((_, c, values)) = o.show_when.iter().find(|(x, ..)| *x == name) {
+            let shown = values.contains(&control_value(meta, raw, c));
+            *f = context! { show_when => c, show_values => values.join("|"), hidden => !shown, ..f.clone() };
+        }
+    }
     let inlines = match id {
         Some(id) => inline_blocks(site, meta, id, raw, &errors).await?,
         None => vec![],
@@ -1181,7 +1188,7 @@ async fn add_submit(State(site): S, user: CurrentUser, uri: Uri, Path(table): Pa
     let meta = addable(&site, &table)?;
     let form: HashMap<String, String> = pairs.iter().cloned().collect();
     let links = submitted_links(meta, &pairs);
-    let errors = match validate(meta, &form, true, &fixed_fields(options(&site, meta))).await {
+    let errors = match validate(meta, &form, true, &fixed_fields(meta, options(&site, meta), &form)).await {
         Ok(cols) => match crate::atomic(async {
             let id = orm::insert_row(meta.table, &cols).await?;
             save_links(meta, id, &links).await?;
@@ -1227,7 +1234,7 @@ async fn change_submit(
     let old = fetch_row(meta, id).await?;
     let old_links = current_links(meta, id).await.map_err(fail)?;
     let (inline_ops, inline_errors) = inline_changes(&site, meta, id, &form).await;
-    let errors = match validate(meta, &form, false, &fixed_fields(options(&site, meta))).await {
+    let errors = match validate(meta, &form, false, &fixed_fields(meta, options(&site, meta), &form)).await {
         Ok(_) if !inline_errors.is_empty() => inline_errors,
         Ok(cols) => {
             let mut q = Query::new(meta);
@@ -1261,9 +1268,20 @@ async fn change_submit(
     form_page(&site, u, meta, Some(id), &form, &links, errors, StatusCode::UNPROCESSABLE_ENTITY, None).await
 }
 
-/// Fields a form submission can't change: read-only ones and excluded ones.
-fn fixed_fields(o: &Options) -> Vec<&'static str> {
-    o.readonly_fields.iter().chain(&o.exclude).copied().collect()
+/// Fields a form submission can't change: read-only ones, excluded ones, and conditional ones
+/// whose controlling field doesn't currently show them.
+fn fixed_fields(meta: &ModelMeta, o: &Options, form: &HashMap<String, String>) -> Vec<&'static str> {
+    let hidden = o.show_when.iter().filter(|(_, c, values)| !values.contains(&control_value(meta, form, c))).map(|(f, ..)| *f);
+    o.readonly_fields.iter().chain(&o.exclude).copied().chain(hidden).collect()
+}
+
+/// A controlling field's submitted value as `show_when` compares it (checkboxes: "true"/"false").
+fn control_value(meta: &ModelMeta, form: &HashMap<String, String>, name: &str) -> String {
+    let raw = form.get(name).map(String::as_str).unwrap_or_default();
+    match meta.field(name).map(|f| f.ty) {
+        Some(FieldType::Bool) => (if raw.is_empty() || raw == "false" { "false" } else { "true" }).into(),
+        _ => raw.into(),
+    }
 }
 
 // ---------------------------------------------------------------- inlines
