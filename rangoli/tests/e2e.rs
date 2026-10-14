@@ -154,6 +154,8 @@ async fn reset(db: &orm::Db) {
         "blog_tag",
         "blog_post",
         "e2e_note",
+        "rangoli_oauth_code",
+        "rangoli_oauth_client",
         "rangoli_webhook",
         "rangoli_pending_change",
         "rangoli_api_token",
@@ -1123,6 +1125,93 @@ async fn scenario() {
         ["blog_post_create", "blog_post_update", "blog_post_delete", "e2e_note_list"].iter().all(|t| staff_tools.contains(&t.to_string())),
         "{staff_tools:?}"
     );
+
+    {
+        // ---- MCP sign-in with OAuth (how claude.ai and Claude Desktop connect)
+        let (status, headers, _) = send(bearer("POST", "/mcp", "rgl_not_a_real_token", &rpc("tools/list", serde_json::json!({})))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "a bad token is a 401, not anonymous access");
+        let challenge = headers[header::WWW_AUTHENTICATE].to_str().unwrap().to_string();
+        assert!(challenge.contains(r#"resource_metadata="https://localhost/.well-known/oauth-protected-resource""#), "{challenge}");
+        let (_, _, body) = send(get("/.well-known/oauth-protected-resource", "")).await;
+        assert_eq!(
+            (json(&body)["resource"].as_str(), json(&body)["authorization_servers"][0].as_str()),
+            (Some("https://localhost/mcp"), Some("https://localhost"))
+        );
+        let (_, _, body) = send(get("/.well-known/oauth-authorization-server", "")).await;
+        let meta = json(&body);
+        assert_eq!(meta["code_challenge_methods_supported"], serde_json::json!(["S256"]));
+        assert_eq!(meta["authorization_endpoint"], "https://localhost/admin/oauth/authorize");
+        let cb = "https://claude.ai/api/mcp/auth_callback";
+        let reg = serde_json::json!({ "client_name": "Claude", "redirect_uris": [cb] }).to_string();
+        let (status, _, body) = send(bearer("POST", "/oauth/register", "", &reg)).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let client_id = json(&body)["client_id"].as_str().unwrap().to_string();
+        let evil = serde_json::json!({ "redirect_uris": ["http://evil.example/cb"] }).to_string();
+        assert_eq!(send(bearer("POST", "/oauth/register", "", &evil)).await.0, StatusCode::BAD_REQUEST, "plain http only to localhost");
+        // RFC 7636's example verifier and challenge.
+        let (verifier, pkce) = ("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+        let authorize = |redirect: &str, with_pkce: bool| {
+            let mut q = vec![("response_type", "code"), ("client_id", client_id.as_str()), ("redirect_uri", redirect), ("state", "xyz")];
+            if with_pkce {
+                q.extend([("code_challenge", pkce), ("code_challenge_method", "S256")]);
+            }
+            format!("/admin/oauth/authorize?{}", serde_urlencoded::to_string(q).unwrap())
+        };
+        let (status, headers, _) = send(get(&authorize(cb, true), "")).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert!(headers[header::LOCATION].to_str().unwrap().starts_with("/admin/login?next=%2Fadmin%2Foauth%2Fauthorize"), "sign in first");
+        let (status, headers, body) = send(get(&authorize(cb, true), &cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("<strong>Claude</strong> wants to use") && body.contains("claude.ai"),
+            "consent page names the app and where it returns"
+        );
+        assert!(headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap().contains("form-action 'self' https://claude.ai"));
+        let (status, _, body) = send(get(&authorize("https://evil.example/cb", true), &cookie)).await;
+        assert!(
+            status == StatusCode::OK && body.contains("didn&#x27;t register"),
+            "an unregistered return address is never redirected to: {body}"
+        );
+        let (_, headers, _) = send(get(&authorize(cb, false), &cookie)).await;
+        assert!(headers[header::LOCATION].to_str().unwrap().starts_with(&format!("{cb}?error=invalid_request")), "PKCE is required");
+        let (_, headers, _) = send(form(&authorize(cb, true), &cookie, "decision=deny")).await;
+        assert_eq!(headers[header::LOCATION].to_str().unwrap(), format!("{cb}?error=access_denied&state=xyz"));
+        let code_from = |headers: &axum::http::HeaderMap| {
+            let loc = headers[header::LOCATION].to_str().unwrap().to_string();
+            assert!(loc.starts_with(&format!("{cb}?code=")) && loc.ends_with("&state=xyz"), "{loc}");
+            loc.split("code=").nth(1).unwrap().split('&').next().unwrap().to_string()
+        };
+        let (_, headers, _) = send(form(&authorize(cb, true), &cookie, "decision=allow&access=read")).await;
+        let code = code_from(&headers);
+        let redeem = |code: &str, verifier: &str| {
+            let body = serde_urlencoded::to_string([
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("client_id", client_id.as_str()),
+                ("redirect_uri", cb),
+                ("code_verifier", verifier),
+            ])
+            .unwrap();
+            Request::post("/oauth/token").header(header::CONTENT_TYPE, "application/x-www-form-urlencoded").body(Body::from(body)).unwrap()
+        };
+        let (status, _, body) = send(redeem(&code, verifier)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (access, scope) = (json(&body)["access_token"].as_str().unwrap().to_string(), json(&body)["scope"].clone());
+        assert!(access.starts_with("rgl_") && scope == "read");
+        let (status, _, body) = send(redeem(&code, verifier)).await;
+        assert_eq!((status, json(&body)["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "a code works once");
+        let (_, headers, _) = send(form(&authorize(cb, true), &cookie, "decision=allow&access=write")).await;
+        let stolen = code_from(&headers);
+        let wrong = "x".repeat(43);
+        assert_eq!(send(redeem(&stolen, &wrong)).await.0, StatusCode::BAD_REQUEST, "a code without its PKCE verifier is useless");
+        assert_eq!(send(redeem(&stolen, verifier)).await.0, StatusCode::BAD_REQUEST, "and a failed try spends it");
+        let (_, _, signed_in) = send(bearer("POST", "/mcp", &access, &rpc("tools/list", serde_json::json!({})))).await;
+        let signed_in = names(&signed_in);
+        assert!(
+            signed_in.contains(&"e2e_note_list".to_string()) && !signed_in.contains(&"blog_post_create".to_string()),
+            "read-only sign-in: {signed_in:?}"
+        );
+    }
     let create_tool = json(&body)["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "blog_post_create").unwrap().clone();
     assert_eq!(create_tool["inputSchema"]["properties"]["price"]["format"], "decimal", "tool schemas come from the model");
     assert_eq!(create_tool["inputSchema"]["properties"]["public_id"], serde_json::Value::Null, "auto fields aren't inputs");

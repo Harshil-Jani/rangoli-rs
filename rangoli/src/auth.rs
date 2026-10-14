@@ -437,7 +437,13 @@ pub async fn session_middleware(mut req: Request, next: Next) -> Response {
             Ok(Some(found)) => found,
             Ok(None) => {
                 let body = axum::Json(serde_json::json!({ "detail": "Invalid token." }));
-                return (axum::http::StatusCode::UNAUTHORIZED, [(axum::http::header::WWW_AUTHENTICATE, "Bearer")], body).into_response();
+                // On /mcp, say where to sign in again, so an expired connection renews itself.
+                let challenge = if req.uri().path() == "/mcp" && cfg!(feature = "admin") {
+                    crate::oauth::challenge(req.headers())
+                } else {
+                    "Bearer".into()
+                };
+                return (axum::http::StatusCode::UNAUTHORIZED, [(axum::http::header::WWW_AUTHENTICATE, challenge)], body).into_response();
             }
             Err(e) => return e.into_response(), // the database is down: 503, not "your token is bad"
         };

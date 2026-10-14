@@ -54,6 +54,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         ("password_change.html", include_str!("templates/password_change.html")),
         ("agents.html", include_str!("templates/agents.html")),
         ("two_factor.html", include_str!("templates/two_factor.html")),
+        ("oauth.html", include_str!("templates/oauth.html")),
     ] {
         env.add_template(name, src).expect("admin template");
     }
@@ -67,6 +68,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         .route("/admin/password_change/", get(password_page).post(password_submit))
         .route("/admin/agents/", get(agents_page).post(agents_submit))
         .route("/admin/2fa/", get(two_factor_page).post(two_factor_submit))
+        .route("/admin/oauth/authorize", get(oauth_page).post(oauth_submit))
         .route("/admin/static/{file}", get(static_file))
         .route("/admin/{table}/", get(list).post(bulk))
         .route("/admin/{table}/add", get(add_page).post(add_submit))
@@ -224,6 +226,56 @@ async fn agents_submit(State(site): S, user: CurrentUser, uri: Uri, headers: axu
         "agents.html",
         context! { title => "Connect an AI agent", name, token, can, server => server_name(&url), url, tokens, choices, ..chrome(&site, u, None) },
     )
+}
+
+// ---------------------------------------------------------------- MCP sign-in (OAuth consent)
+
+/// Check the request; on a problem, the page to show or the error redirect to send.
+async fn oauth_request(site: &Site, u: &User, p: &[(String, String)]) -> Result<crate::oauth::AuthRequest, Response> {
+    match crate::oauth::check_request(p).await.map_err(fail)? {
+        Ok(req) => Ok(req),
+        Err(crate::oauth::AuthError::Redirect(to)) => Err(Redirect::to(&to).into_response()),
+        Err(crate::oauth::AuthError::Show(error)) => {
+            Err(render(site, "oauth.html", context! { title => "Connect an app", error, ..chrome(site, u, None) }).unwrap_or_else(|e| e))
+        }
+    }
+}
+
+async fn oauth_page(State(site): S, user: CurrentUser, uri: Uri, UrlQuery(p): UrlQuery<Pairs>) -> Page {
+    let u = staff(&user, &uri)?;
+    let req = match oauth_request(&site, u, &p).await {
+        Ok(r) => r,
+        Err(page) => return Ok(page),
+    };
+    let host = req.redirect_uri.split("://").nth(1).unwrap_or("").split(['/', '?']).next().unwrap_or("").to_string();
+    let title = format!("Connect {}", req.client.name);
+    let mut page = render(&site, "oauth.html", context! { title, client => req.client.name, host, ..chrome(&site, u, None) })?;
+    // Browsers apply form-action to the redirect after submitting, so allow the app's address too.
+    let scheme = req.redirect_uri.split("://").next().unwrap_or("https");
+    let csp = format!("default-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' {scheme}://{host}");
+    if let Ok(v) = axum::http::HeaderValue::from_str(&csp) {
+        page.headers_mut().insert(axum::http::header::CONTENT_SECURITY_POLICY, v);
+    }
+    Ok(page)
+}
+
+async fn oauth_submit(State(site): S, user: CurrentUser, uri: Uri, UrlQuery(p): UrlQuery<Pairs>, Form(f): Form<Pairs>) -> Page {
+    let u = staff(&user, &uri)?;
+    let req = match oauth_request(&site, u, &p).await {
+        Ok(r) => r,
+        Err(page) => return Ok(page),
+    };
+    if param(&f, "decision") != Some("allow") {
+        let to = crate::oauth::with_query(&req.redirect_uri, &[("error", "access_denied")], req.state.as_deref());
+        return Ok(Redirect::to(&to).into_response());
+    }
+    let (read_only, ask) = match param(&f, "access") {
+        Some("write") => (false, false),
+        Some("ask") => (false, true),
+        _ => (true, false), // anything unexpected gets the safest choice
+    };
+    let to = crate::oauth::grant(&req, u, read_only, ask).await.map_err(fail)?;
+    Ok(Redirect::to(&to).into_response())
 }
 
 // ---------------------------------------------------------------- helpers

@@ -36,7 +36,19 @@ pub(crate) fn router(exposed: Vec<(&'static ModelMeta, Options)>) -> Router {
     let mcp = Arc::new(Mcp { api: crate::api::router(exposed.clone()), models: exposed });
     // GET would open a server-to-client stream; this server has nothing to push, which the
     // transport allows by answering 405.
-    Router::new().route("/mcp", post(handle).get(|| async { StatusCode::METHOD_NOT_ALLOWED })).with_state(mcp)
+    let oauth = Router::new()
+        .route("/.well-known/oauth-protected-resource", axum::routing::get(crate::oauth::protected_resource))
+        .route("/.well-known/oauth-protected-resource/mcp", axum::routing::get(crate::oauth::protected_resource))
+        .route("/.well-known/oauth-authorization-server", axum::routing::get(crate::oauth::authorization_server))
+        .route("/oauth/register", post(crate::oauth::register))
+        .route("/oauth/token", post(crate::oauth::token));
+    let mcp = Router::new().route("/mcp", post(handle).get(|| async { StatusCode::METHOD_NOT_ALLOWED })).with_state(mcp);
+    // Signing in happens on an admin page, so OAuth needs the admin.
+    if cfg!(feature = "admin") {
+        mcp.merge(oauth)
+    } else {
+        mcp
+    }
 }
 
 fn reply(id: &JsonValue, result: JsonValue) -> Response {
@@ -51,9 +63,15 @@ async fn handle(
     axum::extract::State(mcp): axum::extract::State<Arc<Mcp>>,
     user: CurrentUser,
     scope: ScopeExt,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let scope = scope.map(|s| s.0);
+    // A bad or expired token, or no sign-in where nothing is public: 401 with where to sign in,
+    // which is how claude.ai and other MCP clients know to start OAuth.
+    if user.0.is_none() && (headers.contains_key(header::AUTHORIZATION) || tools(&mcp, &user, None).is_empty()) {
+        return (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, crate::oauth::challenge(&headers))]).into_response();
+    }
     let Ok(msg) = serde_json::from_slice::<JsonValue>(&body) else {
         return rpc_error(&JsonValue::Null, -32700, "Parse error");
     };

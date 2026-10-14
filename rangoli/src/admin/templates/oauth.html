@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block sidebar %}{% endblock %}
+{% block crumbs %}<span aria-hidden="true">›</span>Connect an app{% endblock %}
+{% block content %}
+{% if error %}
+<p class="message error" role="alert">{{ error }}</p>
+{% else %}
+<form method="post" class="panel fields consent" hx-boost="false">
+  <p class="intro"><strong>{{ client }}</strong> wants to use this site's data as <strong>{{ username }}</strong>, through MCP. It will see what you can see, and every change it makes shows up in History as “via MCP”.</p>
+  <p class="help">It will return you to <code>{{ host }}</code>.</p>
+  <fieldset>
+    <legend class="field-label">What it may do</legend>
+    <label class="check"><input type="radio" name="access" value="read" checked> Read only</label>
+    <label class="check"><input type="radio" name="access" value="ask"> Read, and ask me before each change</label>
+    <label class="check"><input type="radio" name="access" value="write"> Read and change</label>
+  </fieldset>
+  <p class="help">The connection lasts 90 days. To end it sooner, delete it under API tokens.</p>
+  <div class="submit-row">
+    <button type="submit" name="decision" value="allow" class="btn primary">Allow</button>
+    <button type="submit" name="decision" value="deny" class="btn">Deny</button>
+  </div>
+</form>
+{% endif %}
+{% endblock %}

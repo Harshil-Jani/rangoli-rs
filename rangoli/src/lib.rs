@@ -26,6 +26,7 @@ mod health;
 mod limit;
 pub mod mcp;
 pub mod migrate;
+pub mod oauth;
 pub mod orm;
 #[cfg(feature = "realtime")]
 pub mod realtime;
@@ -291,6 +292,8 @@ impl App {
                 auth::LoginFailure::meta(),
                 approvals::PendingChange::meta(),
                 webhooks::Webhook::meta(),
+                oauth::OAuthClient::meta(),
+                oauth::OAuthCode::meta(),
                 admin::LogEntry::meta(),
                 tasks::TaskRecord::meta(),
             ],

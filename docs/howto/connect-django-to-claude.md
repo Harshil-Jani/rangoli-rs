@@ -32,6 +32,8 @@ Click **Connect an AI agent**:
 claude mcp add --transport http rangoli http://127.0.0.1:8000/mcp --header "Authorization: Bearer rgl_..."
 ```
 
+**claude.ai or Claude Desktop:** in Settings, under Connectors, choose **Add custom connector** and paste `https://your-server/mcp`. Claude sends you to a Rangoli page to sign in and pick read only, ask-first or read-and-change. Claude needs to reach the server, so for a laptop, put it behind a tunnel (for example `cloudflared tunnel --url http://127.0.0.1:8000`) and use that https address.
+
 Then ask: *"Which authors published the most posts last month?"* Claude calls tools like `blog_post_list` with filters, sorting and pagination.
 
 ## What the agent can't do

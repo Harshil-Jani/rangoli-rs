@@ -55,6 +55,8 @@ async fn django_database_to_admin_api_and_mcp() {
         "shop_order",
         "shop_customer",
         "django_session",
+        "rangoli_oauth_code",
+        "rangoli_oauth_client",
         "rangoli_webhook",
         "rangoli_pending_change",
         "rangoli_api_token",

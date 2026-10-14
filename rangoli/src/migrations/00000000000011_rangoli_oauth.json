@@ -1,0 +1,28 @@
+{
+  "operations": [
+    {
+      "op": "create_table",
+      "table": "rangoli_oauth_client",
+      "columns": [
+        { "name": "client_id", "type": { "varchar": 64 }, "unique": true },
+        { "name": "name", "type": { "varchar": 200 } },
+        { "name": "redirect_uris", "type": "text" },
+        { "name": "created_at", "type": "date_time" }
+      ]
+    },
+    {
+      "op": "create_table",
+      "table": "rangoli_oauth_code",
+      "columns": [
+        { "name": "code_hash", "type": { "varchar": 64 }, "unique": true },
+        { "name": "client_id", "type": { "varchar": 64 } },
+        { "name": "user_id", "type": "int", "fk": "rangoli_user", "cascade": true },
+        { "name": "redirect_uri", "type": "text" },
+        { "name": "challenge", "type": { "varchar": 128 } },
+        { "name": "read_only", "type": "bool" },
+        { "name": "needs_approval", "type": "bool" },
+        { "name": "expires_at", "type": "date_time" }
+      ]
+    }
+  ]
+}
