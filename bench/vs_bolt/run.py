@@ -52,7 +52,15 @@ def median(base, path):
     return runs[len(runs) // 2], sum(m["errors"] for m in runs)
 
 
-cpu = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip() or platform.processor()
+def cpu_name():
+    try:
+        return subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip()
+    except FileNotFoundError:  # Linux
+        names = [l.split(":", 1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name")]
+        return names[0] if names else platform.processor()
+
+
+cpu = cpu_name()
 lines = [
     "# Rangoli vs django-bolt, on django-bolt's own benchmark",
     "",

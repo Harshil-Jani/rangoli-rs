@@ -1,33 +1,69 @@
-name: Benchmark (Linux)
-# Rangoli vs Django 6.1.2 vs django-bolt on a Linux runner. Manual, since shared runners are noisy:
-# compare frameworks within one run, not numbers across runs.
+# Rangoli vs django-bolt on django-bolt's own benchmark harness, on a GitHub runner.
+# Results land in the job summary and as an artifact. Shared runners are noisy: compare the
+# ratio column between runs, not absolute numbers.
+name: bench vs django-bolt
 on:
+  push:
+    branches: [main]
+    paths: ["rangoli/**", "rangoli-macros/**", "bench/vs_bolt/**", ".github/workflows/bench.yml"]
+  schedule:
+    - cron: "0 4 * * 1"
   workflow_dispatch:
 
 jobs:
-  bench:
+  vs-bolt:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: benchmark
+          POSTGRES_PASSWORD: benchmark
+          POSTGRES_DB: benchmark
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      RANGOLI_DATABASE_URL: postgres://benchmark:benchmark@127.0.0.1:5432/benchmark
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v5
-      - name: Build
-        run: cargo build --release -p blog --bins --examples
-      - name: Python side
-        working-directory: bench
-        run: |
-          uv venv --python 3.12 .venv
-          uv pip install --python .venv/bin/python "django==6.1.2" djangorestframework gunicorn "django-bolt==0.11.1" uvicorn uvicorn-worker
-      - name: oha
-        run: cargo install oha --locked
-      - name: Run
-        working-directory: bench
-        run: |
-          ./setup.sh
-          python3 run.py
-          mv results/bench.json results/bench-linux.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/setup-go@v5
         with:
-          name: bench-linux
-          path: bench/results/bench-linux.json
+          go-version: "1.23"
+      - uses: astral-sh/setup-uv@v5
+      - run: go install github.com/codesenberg/bombardier@latest
+      - name: django-bolt and the harness, seeded by its own script
+        run: |
+          git clone --depth 1 https://github.com/FarhanAliRaza/python-api-frameworks-benchmark ../pafb
+          cd ../pafb && uv sync
+          DJANGO_SETTINGS_MODULE=django_project.settings_migrate .venv/bin/python manage.py migrate -v0
+          .venv/bin/python scripts/seed_db.py
+          DJANGO_SETTINGS_MODULE=django_project.settings_bolt DJANGO_BOLT_WORKERS=1 DJANGO_BOLT_EXECUTOR_THREADS=8 \
+            DJANGO_BOLT_ORM_THREADS=8 nohup .venv/bin/python manage.py runbolt --host 127.0.0.1 --port 9001 --processes 1 > ../bolt.log 2>&1 &
+      - name: Rangoli on the same rows
+        run: |
+          cargo build --release -p vs_bolt
+          cd bench/vs_bolt
+          ../../target/release/vs_bolt migrate
+          psql "$RANGOLI_DATABASE_URL" -q -v ON_ERROR_STOP=1 -f load.sql
+          RANGOLI_PASSWORD=benchpass123 ../../target/release/vs_bolt createsuperuser benchuser
+          RANGOLI_BIND=127.0.0.1:9002 RANGOLI_WORKERS=0 RANGOLI_DB_POOL=8 nohup ../../target/release/vs_bolt runserver > ../../rangoli.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf -o /dev/null 127.0.0.1:9001/json-1k && curl -sf -o /dev/null 127.0.0.1:9002/json-1k && break; sleep 1; done
+      - name: Same answers, then measure
+        working-directory: bench/vs_bolt
+        run: |
+          python3 compare.py
+          ROUNDS=3 python3 run.py
+          cat RESULTS.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vs-bolt-results
+          path: |
+            bench/vs_bolt/RESULTS.md
+            ../bolt.log
+            rangoli.log
