@@ -24,7 +24,7 @@ pub mod django;
 pub mod forms;
 mod health;
 pub mod jwt;
-mod limit;
+pub mod limit;
 pub mod mcp;
 pub mod migrate;
 pub mod oauth;
@@ -182,6 +182,11 @@ pub struct Settings {
     pub request_timeout: u64,
     /// `RANGOLI_DB_TIMEOUT` seconds to wait for a database connection before failing (default 5).
     pub db_timeout: u64,
+    /// Database connections per process (`RANGOLI_DB_POOL`, default 10).
+    pub db_pool: u32,
+    /// `RANGOLI_TRUSTED_PROXIES`: comma-separated addresses or networks (`10.0.0.0/8`) of your
+    /// load balancers, whose `X-Forwarded-For` is believed. Empty: the header is ignored.
+    pub trusted_proxies: Vec<limit::Net>,
     /// `RANGOLI_WORKERS`: task loops `runserver` runs in-process (default 1, 0 turns them off);
     /// also the concurrency of the `worker` command.
     pub workers: usize,
@@ -211,6 +216,17 @@ impl Settings {
             workers: var("RANGOLI_WORKERS").and_then(|v| v.parse().ok()).unwrap_or(1),
             request_timeout: var("RANGOLI_REQUEST_TIMEOUT").and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(30),
             db_timeout: var("RANGOLI_DB_TIMEOUT").and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(5),
+            db_pool: var("RANGOLI_DB_POOL").and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(10),
+            trusted_proxies: var("RANGOLI_TRUSTED_PROXIES")
+                .map(|v| {
+                    v.split(',')
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| {
+                            limit::Net::parse(s).unwrap_or_else(|| panic!("RANGOLI_TRUSTED_PROXIES: `{s}` is not an address or network"))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }

@@ -468,7 +468,7 @@ pub async fn connect(url: &str) -> Result<&'static Db> {
         });
     }
     let pool = AnyPoolOptions::new()
-        .max_connections(10)
+        .max_connections(crate::settings().db_pool)
         // Fail fast during an outage instead of queueing requests for sqlx's default 30s.
         .acquire_timeout(std::time::Duration::from_secs(crate::settings().db_timeout))
         .after_connect(move |conn, _| {
