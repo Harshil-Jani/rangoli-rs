@@ -54,8 +54,12 @@ def median(base, path):
 
 def cpu_name():
     try:
-        return subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip()
-    except FileNotFoundError:  # Linux
+        mac = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip()
+    except FileNotFoundError:
+        mac = ""
+    if mac:
+        return mac
+    else:  # Linux
         names = [l.split(":", 1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name")]
         return names[0] if names else platform.processor()
 
