@@ -38,6 +38,32 @@ struct Post {
     rating: Option<f64>,
 }
 
+/// Team documents for the row-level permissions test: names starting with "a" are team 1.
+#[derive(Model, Clone, Debug)]
+#[model(table = "e2e_doc", display = "title")]
+struct Doc {
+    id: Option<i64>,
+    #[field(max_length = 100)]
+    title: String,
+    team: i64,
+}
+
+fn doc_policy(user: Option<&rangoli::auth::User>) -> Option<rangoli::orm::Expr<Doc>> {
+    match user {
+        Some(u) if u.is_superuser => None,
+        Some(u) => Some(Doc::TEAM.eq(team_of(u))),
+        None => Some(Doc::TEAM.eq(-1)),
+    }
+}
+
+fn team_of(u: &rangoli::auth::User) -> i64 {
+    if u.username.starts_with('a') {
+        1
+    } else {
+        2
+    }
+}
+
 /// Owned rows for the per-object API permissions test.
 #[derive(Model, Clone, Debug)]
 #[model(table = "e2e_note", display = "title")]
@@ -154,6 +180,7 @@ async fn reset(db: &orm::Db) {
         "blog_tag",
         "blog_post",
         "e2e_note",
+        "e2e_doc",
         "rangoli_oauth_code",
         "rangoli_oauth_client",
         "rangoli_webhook",
@@ -406,6 +433,8 @@ async fn scenario() {
         .task::<Explodes>()
         .api::<Note>(Api::new().read(Access::Authenticated).write(Access::Public).owned_by(&Note::OWNER_ID))
         .jwt(rangoli::jwt::JwtAuth::hs256("e2e-jwt-secret-of-at-least-32-bytes").cookie("access_token"))
+        .api::<Doc>(Api::new().read(Access::Authenticated).write(Access::Authenticated).rows(doc_policy))
+        .admin_with::<Doc>(ModelAdmin::new().rows(doc_policy))
         .admin::<Note>()
         .admin_with::<rangoli::auth::User>(
             ModelAdmin::new().exclude([&rangoli::auth::User::TOTP_SECRET, &rangoli::auth::User::TOTP_LAST_STEP]).inline(Note::OWNER_ID),
@@ -1084,6 +1113,72 @@ async fn scenario() {
     assert_eq!(send(bearer("GET", "/api/e2e_note/", &stale, "")).await.0, StatusCode::UNAUTHORIZED, "an expired token is refused");
     let (status, _, body) = send(get("/api/e2e_note/", &format!("access_token={stale}"))).await;
     assert_eq!((status, json(&body)["count"].as_i64()), (StatusCode::UNAUTHORIZED, None), "a stale cookie is just signed out: {body}");
+
+    // ---- row-level permissions: one policy, every door (API and MCP)
+    let mut ids = vec![];
+    for (title, team) in [("plan A", 1), ("plan B", 2), ("budget B", 2)] {
+        let mut d = Doc { id: None, title: title.into(), team };
+        d.save().await.unwrap();
+        ids.push(d.id.unwrap());
+    }
+    let (a_doc, b_doc) = (ids[0], ids[1]);
+    let (_, _, body) = send(bearer("GET", "/api/e2e_doc/", &at, "")).await;
+    assert_eq!(
+        (json(&body)["count"].as_i64(), json(&body)["results"][0]["id"].as_i64()),
+        (Some(1), Some(a_doc)),
+        "alice lists only team 1"
+    );
+    let (_, _, body) = send(bearer("GET", "/api/e2e_doc/?team=2", &at, "")).await;
+    assert_eq!(json(&body)["count"], 0, "filters can't widen the policy");
+    let (_, _, body) = send(bearer("GET", "/api/e2e_doc/?search=B", &at, "")).await;
+    assert_eq!(json(&body)["count"], 0, "nor can search");
+    for (method, body) in [("GET", ""), ("PATCH", r#"{"title": "mine"}"#), ("PUT", r#"{"title": "mine", "team": 1}"#), ("DELETE", "")] {
+        let status = send(bearer(method, &format!("/api/e2e_doc/{b_doc}"), &at, body)).await.0;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} on another team's doc is a 404");
+    }
+    let (status, _, body) = send(bearer("PATCH", &format!("/api/e2e_doc/{a_doc}"), &at, r#"{"team": 2}"#)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "moving a doc to another team: {body}");
+    assert_eq!(Doc::get(a_doc).await.unwrap().team, 1, "and nothing changed");
+    let before = Doc::objects().count().await.unwrap();
+    let (status, _, _) = send(bearer("POST", "/api/e2e_doc/", &at, r#"{"title": "sneaky", "team": 2}"#)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "creating in another team");
+    assert_eq!(Doc::objects().count().await.unwrap(), before, "and nothing was created");
+    let (status, _, body) = send(bearer("POST", "/api/e2e_doc/", &at, r#"{"title": "notes", "team": 1}"#)).await;
+    assert_eq!(status, StatusCode::CREATED, "own team works: {body}");
+    let (_, _, body) = send(bearer("GET", "/api/e2e_doc/", &bt, "")).await;
+    assert_eq!(json(&body)["count"], 2, "bob sees team 2's two docs");
+    let (_, _, body) = send(bearer("GET", "/api/e2e_doc/", &token, "")).await;
+    assert_eq!(json(&body)["count"], 4, "a superuser sees all");
+    // MCP goes through the same check.
+    let mcp_call = |name: &str, args: serde_json::Value| {
+        serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } }).to_string()
+    };
+    let (_, _, body) = send(bearer("POST", "/mcp", &at, &mcp_call("e2e_doc_list", serde_json::json!({})))).await;
+    let text = json(&body)["result"]["content"][0]["text"].as_str().unwrap_or_default().to_string();
+    assert!(text.contains("plan A") && !text.contains("plan B") && !text.contains("budget B"), "MCP list: {text}");
+    let (_, _, body) = send(bearer("POST", "/mcp", &at, &mcp_call("e2e_doc_get", serde_json::json!({ "id": b_doc })))).await;
+    assert!(!body.contains("plan B") && json(&body)["result"]["isError"] == true, "MCP get of another team's doc: {body}");
+    // The admin, for a team-1 staff member.
+    let mut ann = auth::create_user("ann", "correct horse", true).await.unwrap();
+    ann.is_superuser = false; // staff, not superuser: the policy applies
+    ann.save().await.unwrap();
+    let ann_cookie = auth::login(&ann).await.unwrap().split(';').next().unwrap().to_string();
+    let (_, _, body) = send(get("/admin/e2e_doc/", &ann_cookie)).await;
+    assert!(body.contains("plan A") && !body.contains("plan B") && !body.contains("budget B"), "admin list is scoped");
+    for page in ["", "delete", "history"] {
+        let (status, _, _) = send(get(&format!("/admin/e2e_doc/{b_doc}/{page}"), &ann_cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "admin /{page} of another team's doc is a 404");
+    }
+    let (status, _, body) = send(form(&format!("/admin/e2e_doc/{a_doc}/"), &ann_cookie, "title=plan+A&team=2")).await;
+    assert!(status == StatusCode::UNPROCESSABLE_ENTITY && body.contains("outside the rows you may see"), "admin can't move it out");
+    assert_eq!(Doc::get(a_doc).await.unwrap().team, 1);
+    let (status, _, _) = send(form(&format!("/admin/e2e_doc/{b_doc}/"), &ann_cookie, "title=hijacked&team=1")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "nor change another team's");
+    let bulk = format!("action=delete_selected&_selected_action={b_doc}&_selected_action={a_doc}&post=yes");
+    send(form("/admin/e2e_doc/", &ann_cookie, &bulk)).await;
+    assert!(Doc::get(b_doc).await.is_ok(), "a bulk delete skips rows outside the policy");
+    assert!(Doc::get(a_doc).await.is_err(), "and deletes the ones inside");
+
     let rjwt = jwt_auth.issue(&root, std::time::Duration::from_secs(900)).unwrap();
     assert_eq!(send(bearer("GET", "/admin/", &rjwt, "")).await.0, StatusCode::FORBIDDEN, "a JWT can't open the admin");
     let (_, _, body) = send(bearer("GET", &format!("/api/e2e_note/?owner_id={bid}"), &at, "")).await;

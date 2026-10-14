@@ -85,6 +85,8 @@ pub enum Error {
     Template(String),
     /// A background task failed.
     Task(String),
+    /// Not allowed, with the reason to show (403).
+    Forbidden(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -103,6 +105,7 @@ impl std::fmt::Display for Error {
             Error::CodeRequired => f.write_str("enter the 6-digit code from your authenticator app"),
             Error::Template(m) => write!(f, "template error: {m}"),
             Error::Task(m) => write!(f, "task error: {m}"),
+            Error::Forbidden(m) => f.write_str(m),
         }
     }
 }
@@ -151,6 +154,7 @@ impl IntoResponse for Error {
         let status = match self {
             Error::NotFound => StatusCode::NOT_FOUND,
             Error::Locked => StatusCode::TOO_MANY_REQUESTS,
+            Error::Forbidden(_) => StatusCode::FORBIDDEN,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == StatusCode::INTERNAL_SERVER_ERROR {
@@ -434,7 +438,7 @@ impl App {
         self.models.push(meta);
         self.admin.push((meta, admin::Options::default()));
         let write = if writes { api::Access::Staff } else { api::Access::Nobody };
-        self.api.push((meta, api::Options { read: api::Access::Staff, write, owner: None }));
+        self.api.push((meta, api::Options { read: api::Access::Staff, write, owner: None, rows: None }));
         self
     }
 

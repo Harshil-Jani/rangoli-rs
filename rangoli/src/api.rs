@@ -62,12 +62,14 @@ pub struct Api<M> {
     _m: PhantomData<fn() -> M>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Options {
     pub(crate) read: Access,
     pub(crate) write: Access,
     /// A foreign key to the user: non-staff users only ever see and change their own rows.
     pub(crate) owner: Option<&'static str>,
+    /// Which rows each user may see and change (`Api::rows`).
+    pub(crate) rows: Option<crate::orm::Policy>,
 }
 
 impl<M: Model> Default for Api<M> {
@@ -79,7 +81,7 @@ impl<M: Model> Default for Api<M> {
 impl<M: Model> Api<M> {
     /// Staff-only reads and writes until you say otherwise.
     pub fn new() -> Self {
-        Api { opts: Options { read: Access::Staff, write: Access::Staff, owner: None }, _m: PhantomData }
+        Api { opts: Options { read: Access::Staff, write: Access::Staff, owner: None, rows: None }, _m: PhantomData }
     }
     /// Who may list and fetch.
     pub fn read(mut self, access: Access) -> Self {
@@ -103,6 +105,41 @@ impl<M: Model> Api<M> {
         self.opts.owner = Some(name);
         self
     }
+}
+
+impl<M: Model + 'static> Api<M> {
+    /// Row-level permissions: the rows each user may list, read, change and delete, as a filter.
+    /// Everything else is a 404, as if it didn't exist; a write that would move a row outside
+    /// the caller's rows is refused (403) and rolled back. MCP tools go through the same check.
+    ///
+    /// ```ignore
+    /// Api::new().rows(|user| match user {
+    ///     Some(u) if u.is_superuser => None,                          // everything
+    ///     Some(u) => Some(Doc::TEAM_ID.is_in(teams_of(u))),           // their teams' docs
+    ///     None => Some(Doc::PUBLIC.eq(true)),                         // the public ones
+    /// })
+    /// ```
+    pub fn rows(mut self, policy: impl Fn(Option<&crate::auth::User>) -> Option<crate::orm::Expr<M>> + Send + Sync + 'static) -> Self {
+        self.opts.rows = Some(crate::orm::Policy::new(policy));
+        self
+    }
+}
+
+/// Every row filter for this caller: `owned_by` and the `rows` policy.
+fn restrict(opts: &Options, user: &CurrentUser) -> Vec<Node> {
+    let mut out: Vec<Node> = owned(ownership(opts, user)).into_iter().collect();
+    out.extend(opts.rows.as_ref().and_then(|p| p.filter(user.0.as_ref())));
+    out
+}
+
+/// After a write, inside its transaction: the row must still be one the caller may see.
+async fn still_visible(meta: &'static ModelMeta, opts: &Options, user: &CurrentUser, id: i64) -> crate::Result<()> {
+    if let Some(f) = opts.rows.as_ref().and_then(|p| p.filter(user.0.as_ref())) {
+        if !orm::row_matches(meta, id, f).await? {
+            return Err(Error::Forbidden("You can't save a row outside the rows you may see.".into()));
+        }
+    }
+    Ok(())
 }
 
 /// The owner restriction for this user: `(column, user id)`, or `None` for staff and unowned models.
@@ -154,6 +191,7 @@ fn problem(status: StatusCode, detail: &str) -> Response {
 fn fail(e: Error) -> Response {
     match e {
         Error::NotFound => problem(StatusCode::NOT_FOUND, "Not found."),
+        Error::Forbidden(m) => problem(StatusCode::FORBIDDEN, &m),
         e if e.is_unique_violation() => {
             (StatusCode::BAD_REQUEST, Json(json!({ "non_field_errors": ["A record with one of these unique values already exists."] })))
                 .into_response()
@@ -387,10 +425,10 @@ async fn columns(
     }
 }
 
-async fn fetch(meta: &'static ModelMeta, id: i64, owner: Option<(&'static str, i64)>) -> Result<JsonValue, Response> {
+async fn fetch(meta: &'static ModelMeta, id: i64, filters: Vec<Node>) -> Result<JsonValue, Response> {
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
-    q.filter.extend(owned(owner));
+    q.filter.extend(filters);
     let (id, vals) = q.rows().await.map_err(fail)?.pop().ok_or_else(|| fail(Error::NotFound))?;
     let mut obj = [to_json(meta, id, &vals)];
     attach_links(meta, &mut obj).await?;
@@ -452,7 +490,7 @@ async fn query_method(
 async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &str, p: HashMap<String, String>) -> Reply {
     let (meta, opts) = endpoint(site, table, user, scope, false)?;
     let mut q = Query::new(meta);
-    q.filter.extend(owned(ownership(opts, user)));
+    q.filter.extend(restrict(opts, user));
     // `?field=value` filters on exact matches, typed by the field.
     for (k, raw) in &p {
         if matches!(k.as_str(), "limit" | "offset" | "ordering" | "search" | "cursor") {
@@ -543,7 +581,7 @@ async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &st
 
 async fn detail(State(site): S, user: CurrentUser, scope: ScopeExt, Path((table, id)): Path<(String, i64)>) -> Reply {
     let (meta, opts) = endpoint(&site, &table, &user, &scope, false)?;
-    Ok(Json(fetch(meta, id, ownership(opts, &user)).await?).into_response())
+    Ok(Json(fetch(meta, id, restrict(opts, &user)).await?).into_response())
 }
 
 /// How a write arrived, for the admin History. Set by the MCP server on its internal requests
@@ -655,12 +693,13 @@ async fn create(
         for (through, ids) in &links {
             orm::set_links(through, id, ids.as_deref().unwrap_or_default()).await?;
         }
+        still_visible(meta, opts, &user, id).await?;
         audit(&user, meta, id, 1, "Added", via, None).await?;
         Ok(id)
     })
     .await
     .map_err(fail)?;
-    Ok((StatusCode::CREATED, Json(fetch(meta, id, None).await?)).into_response())
+    Ok((StatusCode::CREATED, Json(fetch(meta, id, vec![]).await?)).into_response())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -675,7 +714,7 @@ async fn update(
     partial: bool,
 ) -> Reply {
     let (meta, opts) = endpoint(site, table, user, scope, true)?;
-    fetch(meta, id, ownership(opts, user)).await?; // 404 before validation, like DRF (and for others' rows)
+    fetch(meta, id, restrict(opts, user)).await?; // 404 before validation, like DRF (and for others' rows)
     let body = &claim(opts, user, body, false);
     let cols = columns(meta, body, false, partial).await?;
     let links = body_links(meta, body)?;
@@ -694,12 +733,13 @@ async fn update(
                 None => {}
             }
         }
+        still_visible(meta, opts, user, id).await?;
         audit(user, meta, id, 2, "Changed", via, Some(before)).await?;
         Ok(())
     })
     .await
     .map_err(fail)?;
-    Ok(Json(fetch(meta, id, None).await?).into_response())
+    Ok(Json(fetch(meta, id, vec![]).await?).into_response())
 }
 
 async fn replace(
@@ -728,14 +768,14 @@ async fn remove(State(site): S, user: CurrentUser, scope: ScopeExt, via: ViaExt,
     let (meta, opts) = endpoint(&site, &table, &user, &scope, true)?;
     let via = via.map(|v| v.0);
     if scope.as_ref().is_some_and(|s| s.needs_approval) {
-        fetch(meta, id, ownership(opts, &user)).await?; // only queue a delete of a row the caller can see
+        fetch(meta, id, restrict(opts, &user)).await?; // only queue a delete of a row the caller can see
     }
     if let Some(held) = hold(&scope, &user, &via, &table, "delete", Some(id), None).await? {
         return Ok(held);
     }
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
-    q.filter.extend(owned(ownership(opts, &user)));
+    q.filter.extend(restrict(opts, &user));
     // Logged first (it needs the row's name); a delete that finds nothing rolls the entry back.
     crate::atomic(async {
         let before = snapshot(meta, id).await?;

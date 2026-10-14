@@ -92,6 +92,8 @@ pub struct Options {
     pub(crate) inlines: Vec<Inline>,
     /// Fields shown only while another field has one of some values: (field, controller, values).
     pub(crate) show_when: Vec<(&'static str, &'static str, Vec<String>)>,
+    /// Which rows each staff member may see and change (`ModelAdmin::rows`).
+    pub(crate) rows: Option<crate::orm::Policy>,
 }
 
 /// Child rows edited on the parent's page: the child model and its foreign key to the parent.
@@ -196,6 +198,17 @@ impl<M: Model> ModelAdmin<M> {
     /// not editable, existing values kept. For secrets staff shouldn't see either.
     pub fn exclude<const N: usize>(mut self, cols: [&dyn Field<M>; N]) -> Self {
         self.opts.exclude = Self::names(cols);
+        self
+    }
+
+    /// Row-level permissions in the admin: the rows each staff member may list, open, change,
+    /// delete and run actions on, as a filter (the same closure shape as `Api::rows`). Other
+    /// rows are a 404; a save that would move a row outside them is refused.
+    pub fn rows(mut self, policy: impl Fn(Option<&crate::auth::User>) -> Option<crate::orm::Expr<M>> + Send + Sync + 'static) -> Self
+    where
+        M: 'static,
+    {
+        self.opts.rows = Some(crate::orm::Policy::new(policy));
         self
     }
 

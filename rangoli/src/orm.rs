@@ -737,6 +737,37 @@ pub struct Expr<M> {
     _m: PhantomData<fn() -> M>,
 }
 
+/// Which rows a user may see and change, as one filter shared by every door to a model
+/// (`Api::rows`, `ModelAdmin::rows`). `None` from the closure means every row.
+#[derive(Clone)]
+pub struct Policy(std::sync::Arc<PolicyFn>);
+
+type PolicyFn = dyn Fn(Option<&crate::auth::User>) -> Option<Node> + Send + Sync;
+
+impl Policy {
+    pub fn new<M: 'static>(f: impl Fn(Option<&crate::auth::User>) -> Option<Expr<M>> + Send + Sync + 'static) -> Self {
+        Policy(std::sync::Arc::new(move |u| f(u).map(|e| e.node)))
+    }
+    /// The filter for this user. A policy that panics denies everything instead of crashing.
+    pub(crate) fn filter(&self, user: Option<&crate::auth::User>) -> Option<Node> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.0)(user))).unwrap_or(Some(Node::In("id", vec![], FieldType::Int)))
+    }
+}
+
+impl std::fmt::Debug for Policy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Policy")
+    }
+}
+
+/// True if row `id` passes `filter` (in the current transaction, if any).
+pub(crate) async fn row_matches(meta: &'static ModelMeta, id: i64, filter: Node) -> Result<bool> {
+    let mut q = Query::new(meta);
+    q.filter.push(Node::Cmp("id", "=", Value::Int(id), FieldType::Int));
+    q.filter.push(filter);
+    Ok(q.count().await? > 0)
+}
+
 impl<M> Expr<M> {
     fn new(node: Node) -> Self {
         Expr { node, _m: PhantomData }

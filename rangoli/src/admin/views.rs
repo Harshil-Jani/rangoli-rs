@@ -713,6 +713,7 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
     let filters = filter_fields(meta, opts);
 
     let mut query = Query::new(meta);
+    query.filter.extend(row_filter(&site, meta, u));
     if !q.is_empty() && !searchable.is_empty() {
         let pat = format!("%{}%", like_escape(&q));
         query.filter.push(Node::Or(searchable.iter().map(|c| Node::Like(c, pat.clone())).collect()));
@@ -892,7 +893,9 @@ async fn bulk(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
     }
     let mut q = Query::new(meta);
     q.filter.push(Node::In("id", ids.iter().map(|i| Value::Int(*i)).collect(), FieldType::Int));
+    q.filter.extend(row_filter(&site, meta, u));
     let rows = q.rows().await.map_err(fail)?;
+    let ids: Vec<i64> = rows.iter().map(|(id, _)| *id).collect(); // only rows this staff member may touch
     let chosen = param(&f, "action").unwrap_or("");
     if chosen != "delete_selected" {
         let Some(action) = options(&site, meta).actions.iter().find(|a| a.name == chosen).cloned() else {
@@ -1106,8 +1109,36 @@ async fn form_fields(
     Ok(out)
 }
 
+/// Row `id` exists but is outside this staff member's rows: answer 404, as if it didn't.
+async fn visible(site: &Site, meta: &'static ModelMeta, u: &User, id: i64) -> Result<(), Response> {
+    let Some(f) = row_filter(site, meta, u) else { return Ok(()) };
+    let exists = orm::row_matches(meta, id, Node::In("id", vec![Value::Int(id)], FieldType::Int)).await.map_err(fail)?;
+    if exists && !orm::row_matches(meta, id, f).await.map_err(fail)? {
+        return Err(StatusCode::NOT_FOUND.into_response());
+    }
+    Ok(())
+}
+
+fn row_filter(site: &Site, meta: &ModelMeta, u: &User) -> Option<Node> {
+    options(site, meta).rows.as_ref().and_then(|p| p.filter(Some(u)))
+}
+
+/// Inside a save's transaction: the row must still be one this staff member may see.
+async fn still_visible(site: &Site, meta: &'static ModelMeta, u: &User, id: i64) -> crate::Result<()> {
+    if let Some(f) = row_filter(site, meta, u) {
+        if !orm::row_matches(meta, id, f).await? {
+            return Err(Error::Forbidden(OUTSIDE.into()));
+        }
+    }
+    Ok(())
+}
+
+const OUTSIDE: &str = "You can't save a row outside the rows you may see.";
+
 fn db_error_message(e: &Error) -> Option<&'static str> {
-    if e.is_unique_violation() {
+    if matches!(e, Error::Forbidden(_)) {
+        Some(OUTSIDE)
+    } else if e.is_unique_violation() {
         Some("A record with one of these unique values already exists.")
     } else if e.is_foreign_key_violation() {
         Some("Select a valid choice. That choice is not one of the available choices.")
@@ -1244,6 +1275,7 @@ async fn add_submit(State(site): S, user: CurrentUser, uri: Uri, Path(table): Pa
         Ok(cols) => match crate::atomic(async {
             let id = orm::insert_row(meta.table, &cols).await?;
             save_links(meta, id, &links).await?;
+            still_visible(&site, meta, u, id).await?;
             let vals = row_values(meta, id).await?;
             Ok((id, log(u, meta, id, &repr(meta, id, &vals), ADDITION, "Added.".into()).await?))
         })
@@ -1266,6 +1298,7 @@ async fn change_page(
 ) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
+    visible(&site, meta, u, id).await?;
     let vals = fetch_row(meta, id).await?;
     let links = current_links(meta, id).await.map_err(fail)?;
     let messages = message(&p, u, "change").await;
@@ -1281,6 +1314,7 @@ async fn change_submit(
 ) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
+    visible(&site, meta, u, id).await?;
     let form: HashMap<String, String> = pairs.iter().cloned().collect();
     let links = submitted_links(meta, &pairs);
     let old = fetch_row(meta, id).await?;
@@ -1294,6 +1328,7 @@ async fn change_submit(
             let saved = crate::atomic(async {
                 q.update(&cols).await?;
                 save_links(meta, id, &links).await?;
+                still_visible(&site, meta, u, id).await?;
                 let changed_inlines = apply_inlines(u, id, &inline_ops).await?;
                 let vals = row_values(meta, id).await?;
                 let sorted = |l: &Links, n: &str| {
@@ -1491,6 +1526,7 @@ async fn apply_inlines(u: &User, parent: i64, ops: &[InlineOp]) -> crate::Result
 async fn delete_page(State(site): S, user: CurrentUser, uri: Uri, Path((table, id)): Path<(String, i64)>) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
+    visible(&site, meta, u, id).await?;
     let obj = repr(meta, id, &fetch_row(meta, id).await?);
     let related = related(&site, meta, &[id]).await?;
     let status = if related.protected.is_empty() { StatusCode::OK } else { StatusCode::CONFLICT };
@@ -1509,6 +1545,7 @@ async fn delete_page(State(site): S, user: CurrentUser, uri: Uri, Path((table, i
 async fn delete_submit(State(site): S, user: CurrentUser, uri: Uri, Path((table, id)): Path<(String, i64)>) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
+    visible(&site, meta, u, id).await?;
     let obj = repr(meta, id, &fetch_row(meta, id).await?);
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
@@ -1528,6 +1565,7 @@ async fn delete_submit(State(site): S, user: CurrentUser, uri: Uri, Path((table,
 async fn history(State(site): S, user: CurrentUser, uri: Uri, Path((table, id)): Path<(String, i64)>) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
+    visible(&site, meta, u, id).await?;
     let entries = LogEntry::objects()
         .filter(LogEntry::TABLE_NAME.eq(table.as_str()) & LogEntry::OBJECT_ID.eq(id))
         .order_by(LogEntry::ID.asc())
@@ -1567,6 +1605,7 @@ fn undoable(e: &LogEntry) -> bool {
 async fn undo(State(site): S, user: CurrentUser, uri: Uri, Path((table, id, entry)): Path<(String, i64, i64)>) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
+    visible(&site, meta, u, id).await?;
     let e = LogEntry::get(entry).await.map_err(fail)?;
     let newest = LogEntry::objects()
         .filter(LogEntry::TABLE_NAME.eq(table.as_str()) & LogEntry::OBJECT_ID.eq(id))
