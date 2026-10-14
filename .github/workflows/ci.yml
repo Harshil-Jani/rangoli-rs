@@ -88,11 +88,11 @@ jobs:
           echo '{"identities":[{"name":"ci","credentials":[{"accessKey":"cikey","secretKey":"cisecret123"}],"actions":["Admin","Read","Write","List"]}]}' > /tmp/s3cfg/s3.json
           docker run -d --name s3 -p 8333:8333 -v /tmp/s3cfg:/etc/s3 chrislusf/seaweedfs server -s3 -s3.config=/etc/s3/s3.json -dir=/data
           for i in $(seq 1 60); do curl -s -o /dev/null 127.0.0.1:8333 && break; sleep 1; done; sleep 3
-          docker exec s3 sh -c "echo 's3.bucket.create -name ci' | weed shell"
+          docker exec s3 sh -c "echo 's3.bucket.create -name rangoli-ci' | weed shell"
       - run: cargo test -p rangoli --test storage
         env:
           RANGOLI_TEST_S3_ENDPOINT: http://127.0.0.1:8333
-          RANGOLI_TEST_S3_BUCKET: ci
+          RANGOLI_TEST_S3_BUCKET: rangoli-ci
           RANGOLI_TEST_S3_KEY: cikey
           RANGOLI_TEST_S3_SECRET: cisecret123
 
