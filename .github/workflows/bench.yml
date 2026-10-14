@@ -43,7 +43,7 @@ jobs:
           DJANGO_SETTINGS_MODULE=django_project.settings_migrate .venv/bin/python manage.py migrate -v0
           .venv/bin/python scripts/seed_db.py
           DJANGO_SETTINGS_MODULE=django_project.settings_bolt DJANGO_BOLT_WORKERS=1 DJANGO_BOLT_EXECUTOR_THREADS=8 \
-            DJANGO_BOLT_ORM_THREADS=8 nohup .venv/bin/python manage.py runbolt --host 127.0.0.1 --port 9001 --processes 1 > ../bolt.log 2>&1 &
+            DJANGO_BOLT_ORM_THREADS=8 nohup .venv/bin/python manage.py runbolt --host 127.0.0.1 --port 9001 --processes 1 > "$GITHUB_WORKSPACE/bolt.log" 2>&1 &
       - name: Rangoli on the same rows
         run: |
           cargo build --release -p vs_bolt
@@ -65,5 +65,5 @@ jobs:
           name: vs-bolt-results
           path: |
             bench/vs_bolt/RESULTS.md
-            ../bolt.log
+            bolt.log
             rangoli.log
