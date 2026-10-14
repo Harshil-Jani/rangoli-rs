@@ -532,6 +532,21 @@ impl App {
         self
     }
 
+    /// How to turn text into vectors for semantic search (any provider: OpenAI, Voyage, a
+    /// local model). Every model with a `#[field(vector = N)]` then answers
+    /// `GET /api/<table>/similar?text=...`, and AI agents get a `<table>_similar` MCP tool.
+    pub fn embed<F, Fut>(self, f: F) -> Self
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Vec<f32>>> + Send + 'static,
+    {
+        let boxed: Box<api::EmbedFn> = Box::new(move |text| Box::pin(f(text)));
+        if api::EMBED.set(boxed).is_err() {
+            panic!("rangoli: App::embed can be set once per process");
+        }
+        self
+    }
+
     /// Sign requests in with JWTs (see [`jwt::JwtAuth`]): tokens you issue, or an identity
     /// provider's (Clerk, Auth0, Supabase Auth) checked against its JWKS keys.
     pub fn jwt(self, auth: jwt::JwtAuth) -> Self {

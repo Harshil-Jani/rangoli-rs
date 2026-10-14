@@ -1083,6 +1083,54 @@ impl Query {
         fetch_all(&sql, &p).await
     }
 
+    /// `QuerySet::nearest` from metadata: `(id, values, cosine distance)`, closest first.
+    pub(crate) async fn nearest(mut self, col: &'static str, to: &Vector, k: usize) -> Result<Vec<(i64, Vec<Value>, f32)>> {
+        let at = self.fields.iter().position(|f| f.name == col).ok_or(Error::NotFound)?;
+        self.filter.push(Node::IsNull(col, true));
+        self.order.clear();
+        self.offset = None;
+        let d = db().dialect;
+        let rows = if d == Dialect::Postgres {
+            self.limit = None;
+            let mut p = vec![];
+            let mut sql = self.select_sql(d, &mut p);
+            p.push((Value::from(to.clone()), FieldType::Vector(0)));
+            sql.push_str(&format!(" ORDER BY {} <=> {} LIMIT {k}", d.quote(col), d.ph_for(p.len(), FieldType::Vector(0))));
+            // HNSW explores `ef_search` candidates. Measured recall@10 on 20,000 random 64-d vectors
+            // (tests/vector.rs): 0.69 at pgvector's default 40, 0.91 at 100, 0.98 at 200 (8 ms).
+            // Search wider, for this query only (`set_config(.., true)` = this transaction).
+            let ef = (k * 20).clamp(200, 1000).to_string();
+            let fields = self.fields;
+            atomic(async move {
+                fetch_all("SELECT set_config('hnsw.ef_search', $1, true)", &vec![(Value::Text(ef), FieldType::Text)]).await?;
+                let found = fetch_all(&sql, &p).await?;
+                found
+                    .iter()
+                    .map(|r| {
+                        Ok((
+                            i64::from_value(read(r, "id", FieldType::Int)?)?,
+                            fields.iter().map(|f| read(r, f.name, f.ty)).collect::<Result<Vec<_>>>()?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .await?
+        } else {
+            self.limit = None;
+            self.rows().await?
+        };
+        let mut scored: Vec<(i64, Vec<Value>, f32)> = rows
+            .into_iter()
+            .filter_map(|(id, vals)| {
+                let dist = Vector::from_value(vals[at].clone()).ok()?.cosine_distance(to);
+                Some((id, vals, dist))
+            })
+            .collect();
+        scored.sort_by(|a, b| a.2.total_cmp(&b.2));
+        scored.truncate(k);
+        Ok(scored)
+    }
+
     /// `(id, values-in-field-order)` per row, for code that works from metadata.
     pub async fn rows(&self) -> Result<Vec<(i64, Vec<Value>)>> {
         self.fetch()
@@ -1539,41 +1587,9 @@ impl<M: Model> QuerySet<M> {
     /// On Postgres it's pgvector's `<=>`, using the HNSW index of an indexed vector field; on
     /// MySQL and SQLite the distances are computed here over the filtered rows (fine into the
     /// tens of thousands; use Postgres beyond that). Rows without a vector are skipped.
-    pub async fn nearest(mut self, col: Col<M, Vector>, to: &Vector, k: usize) -> Result<Vec<(M, f32)>> {
-        let at = M::meta().fields.iter().position(|f| f.name == col.name).ok_or(Error::NotFound)?;
-        self.q.filter.push(Node::IsNull(col.name, true));
-        let d = db().dialect;
-        let rows: Vec<M> = if d == Dialect::Postgres {
-            self.q.order.clear();
-            self.q.limit = None;
-            self.q.offset = None;
-            let mut p = vec![];
-            let mut sql = self.q.select_sql(d, &mut p);
-            p.push((Value::from(to.clone()), FieldType::Vector(0)));
-            sql.push_str(&format!(" ORDER BY {} <=> {} LIMIT {k}", d.quote(col.name), d.ph_for(p.len(), FieldType::Vector(0))));
-            // HNSW explores `ef_search` candidates. Measured recall@10 on 20,000 random 64-d vectors
-            // (tests/vector.rs): 0.69 at pgvector's default 40, 0.91 at 100, 0.98 at 200 (8 ms).
-            // Search wider, for this query only (`set_config(.., true)` = this transaction).
-            let ef = (k * 20).clamp(200, 1000).to_string();
-            atomic(async {
-                fetch_all("SELECT set_config('hnsw.ef_search', $1, true)", &vec![(Value::Text(ef), FieldType::Text)]).await?;
-                fetch_all(&sql, &p).await?.iter().map(M::from_row).collect::<Result<Vec<M>>>()
-            })
-            .await?
-        } else {
-            self.q.fetch().await?.iter().map(M::from_row).collect::<Result<_>>()?
-        };
-        let mut scored: Vec<(M, f32)> = rows
-            .into_iter()
-            .filter_map(|m| {
-                let v = Vector::from_value(m.values().swap_remove(at)).ok()?;
-                let dist = v.cosine_distance(to);
-                Some((m, dist))
-            })
-            .collect();
-        scored.sort_by(|a, b| a.1.total_cmp(&b.1));
-        scored.truncate(k);
-        Ok(scored)
+    pub async fn nearest(self, col: Col<M, Vector>, to: &Vector, k: usize) -> Result<Vec<(M, f32)>> {
+        let rows = self.q.nearest(col.name, to, k).await?;
+        rows.into_iter().map(|(id, vals, dist)| Ok((M::from_values(Some(id), vals)?, dist))).collect()
     }
 
     /// Each row with the row its foreign key points at, in one query (Django's `select_related`):

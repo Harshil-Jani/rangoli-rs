@@ -178,6 +178,7 @@ pub(crate) fn router(exposed: Vec<(&'static ModelMeta, Options)>) -> Router {
     Router::new()
         .route("/api/schema.json", get(schema))
         .route("/api/{table}/", get(list).post(create).fallback(query_method))
+        .route("/api/{table}/similar", get(similar))
         .route("/api/{table}/{id}", get(detail).put(replace).patch(patch).delete(remove))
         .with_state(site)
 }
@@ -580,6 +581,54 @@ async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &st
     let next = (offset + limit < count).then(|| page(offset + limit));
     let previous = (offset > 0).then(|| page(offset.saturating_sub(limit)));
     Ok(Json(json!({ "count": count, "next": next, "previous": previous, "results": results })).into_response())
+}
+
+/// Turns text into the vectors a model's `#[field(vector = N)]` holds (`App::embed`).
+pub type EmbedFn = dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::Result<Vec<f32>>> + Send>> + Send + Sync;
+pub(crate) static EMBED: std::sync::OnceLock<Box<EmbedFn>> = std::sync::OnceLock::new();
+
+/// The model's vector field, if it has one.
+pub(crate) fn vector_field(meta: &ModelMeta) -> Option<&'static FieldMeta> {
+    meta.fields.iter().find(|f| matches!(f.ty, FieldType::Vector(_)))
+}
+
+/// GET /api/<table>/similar?text=...&k=10: the rows closest in meaning to `text`, through the
+/// same access rules, owned_by and row permissions as a list. Needs `App::embed`.
+async fn similar(
+    State(site): S,
+    user: CurrentUser,
+    scope: ScopeExt,
+    Path(table): Path<String>,
+    UrlQuery(p): UrlQuery<HashMap<String, String>>,
+) -> Reply {
+    let (meta, opts) = endpoint(&site, &table, &user, &scope, false)?;
+    let (Some(field), Some(embed)) = (vector_field(meta), EMBED.get()) else {
+        return Err(problem(StatusCode::NOT_FOUND, "Not found."));
+    };
+    let text = param(&p, "text").unwrap_or("").trim().to_string();
+    if text.is_empty() || text.chars().count() > 2000 {
+        return Err(problem(StatusCode::BAD_REQUEST, "Give `text`, up to 2000 characters."));
+    }
+    let k: usize = param(&p, "k").and_then(|v| v.parse().ok()).unwrap_or(10).clamp(1, 50);
+    let to = crate::Vector(embed(text).await.map_err(fail)?);
+    let FieldType::Vector(n) = field.ty else { unreachable!() };
+    if to.0.len() != n as usize {
+        eprintln!("rangoli: App::embed returned {} numbers but {}.{} holds {n}", to.0.len(), meta.table, field.name);
+        return Err(problem(StatusCode::INTERNAL_SERVER_ERROR, "The embedding has the wrong size for this field."));
+    }
+    let mut q = Query::new(meta);
+    q.filter.extend(restrict(opts, &user));
+    let found = q.nearest(field.name, &to, k).await.map_err(fail)?;
+    let mut results: Vec<JsonValue> = found
+        .iter()
+        .map(|(id, vals, dist)| {
+            let mut row = to_json(meta, *id, vals);
+            row["distance"] = json!(dist);
+            row
+        })
+        .collect();
+    attach_links(meta, &mut results).await?;
+    Ok(Json(json!({ "results": results })).into_response())
 }
 
 async fn detail(State(site): S, user: CurrentUser, scope: ScopeExt, Path((table, id)): Path<(String, i64)>) -> Reply {

@@ -191,6 +191,16 @@ fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonV
             }
             out.push(tool);
         }
+        if crate::api::EMBED.get().is_some() && crate::api::vector_field(meta).is_some() && opts.read.allows(user) {
+            out.push(json!({
+                "name": format!("{}_similar", meta.table),
+                "description": format!("Find the {n} rows closest in meaning to `text` (semantic search), closest first, each with its distance."),
+                "inputSchema": { "type": "object", "properties": {
+                    "text": { "type": "string", "description": "What to look for, in plain words" },
+                    "k": { "type": "integer", "minimum": 1, "maximum": 50, "description": "How many rows (default 10)" } }, "required": ["text"] },
+                "annotations": { "readOnlyHint": true },
+            }));
+        }
     }
     if scope.is_some_and(|s| s.needs_approval) {
         out.push(json!({
@@ -235,6 +245,13 @@ async fn call(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>, name: &
             (Method::PATCH, format!("/api/{table}/{}", id()?), Some(fields))
         }
         "delete" => (Method::DELETE, format!("/api/{table}/{}", id()?), None),
+        "similar" => {
+            let mut q = vec![("text".to_string(), args["text"].as_str().unwrap_or("").to_string())];
+            if let Some(k) = args["k"].as_i64() {
+                q.push(("k".into(), k.to_string()));
+            }
+            (Method::GET, format!("/api/{table}/similar?{}", serde_urlencoded::to_string(&q).unwrap_or_default()), None)
+        }
         _ => return None,
     };
     let mut req = Request::builder().method(method).uri(path).header(header::CONTENT_TYPE, "application/json");
