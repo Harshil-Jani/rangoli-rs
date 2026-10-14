@@ -673,6 +673,13 @@ pub(crate) enum Node {
         cond: Box<Node>,
     },
     /// Full-text match over a model's `search(...)` fields: every word, as a prefix.
+    /// Rows below (`down`) or above `start` in a tree made by a foreign key to the same table.
+    Tree {
+        table: &'static str,
+        col: &'static str,
+        start: i64,
+        down: bool,
+    },
     /// `few`: the caller counted few matches, so on Postgres look them up in the index first
     /// (see `Query::few_search_matches`).
     Search {
@@ -759,6 +766,19 @@ impl Node {
                 sql.push_str(&format!("{} IN (SELECT {} FROM {} WHERE ", d.quote(col), d.quote(select), d.quote(from)));
                 cond.render(d, sql, p);
                 sql.push(')');
+            }
+            Node::Tree { table, col, start, down } => {
+                // One WITH RECURSIVE, the same on all three databases. UNION (not UNION ALL)
+                // drops rows already seen, so a cycle in the data ends instead of looping forever.
+                let (t, c, id, walk) = (d.quote(table), d.quote(col), d.quote("id"), d.quote("_rangoli_tree"));
+                let (seed, step) = if *down {
+                    (format!("SELECT {id} FROM {t} WHERE {c} = "), format!("SELECT x.{id} FROM {t} x JOIN {walk} w ON x.{c} = w.{id}"))
+                } else {
+                    (format!("SELECT {c} FROM {t} WHERE {id} = "), format!("SELECT x.{c} FROM {t} x JOIN {walk} w ON x.{id} = w.{id}"))
+                };
+                sql.push_str(&format!("{id} IN (WITH RECURSIVE {walk} ({id}) AS ({seed}"));
+                push(sql, Value::Int(*start), FieldType::Int);
+                sql.push_str(&format!(" UNION {step}) SELECT {id} FROM {walk})"));
             }
             Node::Search { words, .. } if words.is_empty() => sql.push_str("1=1"),
             Node::Search { table, cols, words, few } => match d {
@@ -1675,6 +1695,21 @@ impl<S, T> Clone for Fk<S, T> {
     }
 }
 impl<S, T> Copy for Fk<S, T> {}
+
+impl<M: Model> Fk<M, M> {
+    /// Everything below row `id` in the tree this foreign key makes (children, their children,
+    /// ...), as a filter: `Category::objects().filter(Category::PARENT.descendants(7))`. One
+    /// `WITH RECURSIVE` query however deep the tree; Django needs raw SQL or django-cte for it
+    /// (Trac #28919). Only offered on a foreign key to its own model.
+    pub fn descendants(self, id: i64) -> Expr<M> {
+        Expr::new(Node::Tree { table: M::TABLE, col: self.col, start: id, down: true })
+    }
+
+    /// Everything above row `id`: its parent, the parent's parent, up to the root (breadcrumbs).
+    pub fn ancestors(self, id: i64) -> Expr<M> {
+        Expr::new(Node::Tree { table: M::TABLE, col: self.col, start: id, down: false })
+    }
+}
 
 impl<S: Model, T: Model> Fk<S, T> {
     pub const fn new(col: &'static str) -> Self {
