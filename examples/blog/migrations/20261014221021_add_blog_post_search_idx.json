@@ -1,0 +1,16 @@
+{
+  "operations": [
+    {
+      "op": "add_index",
+      "table": "blog_post",
+      "index": {
+        "name": "blog_post_search_idx",
+        "columns": [
+          "title",
+          "body"
+        ],
+        "fulltext": true
+      }
+    }
+  ]
+}

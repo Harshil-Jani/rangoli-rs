@@ -20,7 +20,7 @@ pub struct Tag {
 }
 
 #[derive(Model, Serialize, Clone, Debug)]
-#[model(table = "blog_post", display = "title", m2m(tags = Tag))]
+#[model(table = "blog_post", display = "title", m2m(tags = Tag), search(title, body))]
 pub struct Post {
     pub id: Option<i64>,
     #[field(max_length = 200)]
