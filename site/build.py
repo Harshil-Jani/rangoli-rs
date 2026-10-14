@@ -304,7 +304,7 @@ th, td {{ text-align: left; padding: var(--s2) var(--s3); border-bottom: 1px sol
 thead th {{ font-size: 13px; color: var(--ink-2); }}
 td.win {{ color: var(--win); font-weight: 700; }}
 .table-wrap {{ overflow-x: auto; max-width: 100%; border: 1px solid var(--line); }}
-.tiles {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--s4); margin: var(--s5) 0; }}
+.tiles {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: var(--s4); margin: var(--s5) 0; }}
 .tile {{ padding: var(--s4); background: var(--surface); border: 1px solid var(--line); }}
 .tile .label {{ font-size: 14px; color: var(--ink-2); }}
 .tile .value {{ font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }}
@@ -337,7 +337,7 @@ footer {{ max-width: 1080px; margin: 0 auto; padding: var(--s6) var(--s5) var(--
 </head>
 <body>
 <header class="top"><div class="in">
-  <a class="word" href="#">Rangoli</a>
+  <a class="word" href="index.html">Rangoli</a>
   <nav aria-label="Sections"><a href="#why">Why</a><a href="#start">Get started</a><a href="#results">Results</a><a href="#findings">Findings</a><a href="#gaps">Not done yet</a><a href="{REPO}">GitHub</a></nav>
 </div></header>
 <main>
@@ -461,7 +461,7 @@ RANGOLI_DEBUG=1 cargo run</code></pre>
     <li><strong>The rest of the batteries.</strong> Internationalization, email, caching, password reset, savepoints in nested transactions, API tokens, and real-time groups across several servers are on the roadmap.</li>
     <li><strong>SQLite tuning.</strong> Getting full SQLite throughput needs one config file in your project. Postgres and MySQL need nothing.</li>
   </ul>
-  <p>The full list is in the <a href="{REPO}#whats-not-done-yet">README</a>.</p>
+  <p>The full list is in the <a href="{REPO}/blob/main/docs/REFERENCE.md#whats-not-done-yet">README</a>.</p>
 </section>
 
 <section id="reproduce">
@@ -479,8 +479,74 @@ python experiments.py  # the findings above -> results/experiments.json</code></
 </html>
 '''
 
+# ---------------------------------------------------------------- the short homepage
+
+def bolt_ratios():
+    rows = [l for l in (ROOT / "bench/vs_bolt/RESULTS.md").read_text().splitlines() if l.startswith("| `/")]
+    return [float(l.split("|")[4].strip().rstrip("×")) for l in rows]
+
+
+br = bolt_ratios()
+style = page[page.index("<style>"):page.index("</style>") + len("</style>")]
+posts_r, posts_d = r["scenarios"]["posts_json"]["rps"], d["scenarios"]["posts_json"]["rps"]
+tiles = [
+    (ratio(posts_r, posts_d), "faster than Django", f"{num(posts_r)} vs {num(posts_d)} requests/s"),
+    (f"{min(br):.1f}–{max(br):.1f}×", "faster than django-bolt", "on django-bolt's own benchmark"),
+    (f"{r['loaded_rss_mb']:.0f} MB", "memory under load", f"Django: {d['loaded_rss_mb']:.0f} MB"),
+    (f"{r['startup_ms']} ms", "to start", f"Django: {d['startup_ms']} ms"),
+]
+tiles_html = "".join(f'<div class="tile"><div class="value">{e(v)}</div><div class="label">{e(l)}</div><div class="vs">{e(x)}</div></div>' for v, l, x in tiles)
+home = f'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<title>Rangoli</title>
+<meta name="description" content="Django's admin, ORM and API, rebuilt in Rust, with a safe way to connect AI agents to your data.">
+{style}
+</head>
+<body>
+<header class="top"><div class="in">
+  <a class="word" href="#">Rangoli</a>
+  <nav aria-label="Links"><a href="report.html">Full report</a><a href="{REPO}/tree/main/docs/howto">Guides</a><a href="{REPO}">GitHub</a></nav>
+</div></header>
+<main>
+<section class="hero">
+  <h1>Give your Django data to Claude. Not your database.</h1>
+  <p class="lede">Django's admin, ORM and API, rebuilt in Rust. AI agents connect as a user you control.</p>
+  <div class="actions"><a class="btn" href="{REPO}">Get it on GitHub</a><a class="btn ghost" href="report.html">See the proof</a></div>
+  <video src="ai-agent-demo.mp4" poster="ai-agent-demo-poster.jpg" controls muted playsinline preload="none" aria-label="16-second demo: connecting Claude from the admin"></video>
+</section>
+<section>
+  <h2>Faster, lighter</h2>
+  <div class="tiles">{tiles_html}</div>
+  <p class="method">Same app, same data, same machine. <a href="report.html">How we measured</a>.</p>
+</section>
+<section>
+  <h2>Safe by default</h2>
+  <dl class="why">
+    <div><dt>Read-only</dt><dd>Agents can't change anything until you allow it.</dd></div>
+    <div><dt>You approve</dt><dd>Changes can wait for a person. Every change can be undone.</dd></div>
+    <div><dt>Secrets stay put</dt><dd>Private columns never leave the server.</dd></div>
+    <div><dt>Only their rows</dt><dd>One rule decides what each user and agent sees.</dd></div>
+  </dl>
+</section>
+<section>
+  <h2>Try it</h2>
+  <p>On your Django database (nothing in it changes):</p>
+  <pre><code>RANGOLI_DATABASE_URL=postgres://user:pw@host/db cargo run -p rangoli-django</code></pre>
+  <p>Open <code>/admin/</code>, sign in with your Django account, click <strong>Connect an AI agent</strong>.</p>
+</section>
+</main>
+<footer>Open source, MIT or Apache-2.0. <a href="{REPO}">github.com/Harshil-Jani/rangoli-rs</a></footer>
+</body>
+</html>
+'''
+
 DIST.mkdir(exist_ok=True)
-(DIST / "index.html").write_text(page)
+(DIST / "report.html").write_text(page)
+(DIST / "index.html").write_text(home)
 for asset in ["rangoli-demo.mp4", "rangoli-demo-poster.jpg", "ai-agent-demo.mp4", "ai-agent-demo-poster.jpg", "favicon.svg"]:
     shutil.copy(SITE / asset, DIST / asset)
 (DIST / ".nojekyll").write_text("")
