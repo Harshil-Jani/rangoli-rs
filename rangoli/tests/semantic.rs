@@ -20,6 +20,8 @@ struct Ticket {
     embedding: Option<Vector>,
 }
 
+static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// A stand-in embedding model: how much a text is about money, logins, shipping, invoices.
 fn embed(text: &str) -> Vec<f32> {
     let t = text.to_lowercase();
@@ -66,7 +68,11 @@ async fn agents_search_by_meaning_within_their_rights() {
     sqlx::query("DELETE FROM rangoli_migrations WHERE name LIKE '%se_ticket%'").execute(&db().pool).await.ok();
     let app = App::new()
         .api::<Ticket>(Api::new().read(Access::Authenticated).write(Access::Authenticated).owned_by(&Ticket::OWNER_ID))
-        .embed(|text| async move { Ok(embed(&text)) });
+        .embed(|text| async move {
+            CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(embed(&text))
+        })
+        .embed_fields(Ticket::EMBEDDING, [&Ticket::TITLE]);
     let dir = std::env::temp_dir().join(format!("rangoli-semantic-mig-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -110,6 +116,37 @@ async fn agents_search_by_meaning_within_their_rights() {
     let (_, out) = send(&router, "POST", "/mcp", &token, &call).await;
     let text = out["result"]["content"][0]["text"].as_str().unwrap_or_default();
     assert!(text.contains("Parcel delivery is late") && !text.contains("money back"), "{text}");
+
+    // ---- vectors that keep themselves current
+    let calls = || CALLS.load(std::sync::atomic::Ordering::SeqCst);
+    let (status, created) = send(&router, "POST", "/api/se_ticket/", &token, r#"{"title": "Invoice is missing the tax number"}"#).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let new_id = created["id"].as_i64().unwrap();
+    assert!(Ticket::get(new_id).await.unwrap().embedding.is_none(), "created without a vector");
+    let before = calls();
+    rangoli::tasks::run_due(10).await.unwrap();
+    assert!(Ticket::get(new_id).await.unwrap().embedding.is_some(), "the background job filled it");
+    assert_eq!(calls(), before + 1, "one embedding call for one new row");
+    let (_, body) = send(&router, "GET", "/api/se_ticket/similar?text=receipt+tax&k=1", &token, "").await;
+    assert_eq!(body["results"][0]["id"], new_id, "and it's findable by meaning: {body}");
+
+    let (status, _) =
+        send(&router, "PATCH", &format!("/api/se_ticket/{new_id}"), &token, r#"{"title": "Parcel never arrived, delivery lost"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(Ticket::get(new_id).await.unwrap().embedding.is_none(), "changing the text clears the old vector in the same write");
+    rangoli::tasks::run_due(10).await.unwrap();
+    let (_, body) = send(&router, "GET", "/api/se_ticket/similar?text=lost+delivery&k=1", &token, "").await;
+    let top = &body["results"][0];
+    assert!(top["id"] == new_id || top["title"] == "Parcel delivery is late", "the new meaning is found: {body}");
+    let (_, body) = send(&router, "GET", "/api/se_ticket/similar?text=receipt+tax&k=1", &token, "").await;
+    assert_ne!(body["results"][0]["id"], new_id, "and the old meaning no longer matches it");
+
+    let before = calls();
+    let loaded = Ticket::get(new_id).await.unwrap();
+    loaded.clone().save().await.unwrap(); // the same text, its vector passed back unchanged
+    rangoli::tasks::run_due(10).await.unwrap();
+    assert_eq!(Ticket::get(new_id).await.unwrap().embedding, loaded.embedding, "a write that leaves the text alone keeps the vector");
+    assert_eq!(calls(), before, "and costs no embedding call");
 
     sqlx::query("DROP TABLE se_ticket").execute(&db().pool).await.unwrap();
     sqlx::query("DELETE FROM rangoli_migrations WHERE name LIKE '%se_ticket%'").execute(&db().pool).await.ok();

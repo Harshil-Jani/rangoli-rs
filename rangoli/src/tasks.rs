@@ -103,7 +103,10 @@ pub trait Task: Serialize + DeserializeOwned + Send + 'static {
         let payload = serde_json::to_string(self).map_err(|e| Error::Task(format!("cannot serialize {}: {e}", Self::NAME)));
         let dedup = format!("{ONCE}{}|{key}", Self::NAME);
         async move {
-            match insert(Self::NAME, payload?, DateTime::now(), Self::MAX_ATTEMPTS, Some(dedup)).await {
+            let payload = payload?;
+            // In its own savepoint: inside a caller's transaction, a failed INSERT would otherwise
+            // abort the whole transaction on Postgres.
+            match crate::atomic(insert(Self::NAME, payload, DateTime::now(), Self::MAX_ATTEMPTS, Some(dedup))).await {
                 Ok(id) => Ok(Some(id)),
                 Err(e) if e.is_unique_violation() => Ok(None),
                 Err(e) => Err(e),

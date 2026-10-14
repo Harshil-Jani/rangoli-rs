@@ -24,6 +24,21 @@ let similar = Article::objects().filter(Article::PUBLISHED.eq(true)).nearest(Art
 
 **Measured (tests/vector.rs):** on 20,000 random 64-dimension vectors, the index's top 10 matched the exact top 10 for 97.6% of results (recall@10), with a median query of 8 ms. Random vectors are the hard case; real embeddings cluster and do better. To get there, Rangoli widens pgvector's default search for each query, which on its own scored 0.69.
 
+## Let Rangoli keep the vectors current
+
+```rust
+App::new()
+    .embed(|text| async move { my_embedding_model(&text).await })
+    .embed_fields(Article::EMBEDDING, [&Article::TITLE, &Article::BODY])
+```
+
+There's no embedding code in your handlers:
+
+- **New rows** get their vector from a background job.
+- **Changing the title or body,** through the admin, the API, an agent or your code, clears the old vector in the same write, and the job computes the new one.
+- **Writes that leave the text alone** (publishing, a view count) keep the vector and cost no embedding call. The test counts the calls.
+- **A failed call** (provider down) is retried, and a once-a-minute sweep catches anything left.
+
 ## Let agents search by meaning
 
 ```rust

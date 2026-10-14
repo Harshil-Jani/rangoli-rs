@@ -1209,23 +1209,46 @@ impl Query {
         }
         let d = db().dialect;
         let mut p: Params = vec![];
-        let assigns: Vec<String> = sets
-            .iter()
-            .map(|(c, v, t)| {
+        let mut assigns: Vec<String> = vec![];
+        // An auto-embedded vector goes first: it compares the sources with the row as it was.
+        let guard = crate::embed::guard(self.table, sets, d);
+        if let Some((col, template, params)) = &guard {
+            let mut expr = String::new();
+            let mut parts = template.split("{}");
+            expr.push_str(parts.next().unwrap_or(""));
+            for ((v, t), rest) in params.iter().zip(parts) {
                 p.push((v.clone(), *t));
-                format!("{} = {}", d.quote(c), d.ph_for(p.len(), *t))
-            })
-            .collect();
+                expr.push_str(&d.ph_for(p.len(), *t));
+                expr.push_str(rest);
+            }
+            assigns.push(format!("{} = {expr}", d.quote(col)));
+        }
+        for (c, v, t) in sets {
+            if guard.as_ref().is_some_and(|(col, ..)| col == c) {
+                continue;
+            }
+            p.push((v.clone(), *t));
+            assigns.push(format!("{} = {}", d.quote(c), d.ph_for(p.len(), *t)));
+        }
         let mut sql = format!("UPDATE {} SET {}", d.quote(self.table), assigns.join(", "));
         self.push_where(d, &mut sql, &mut p);
         let n = execute(&sql, &p).await?.rows_affected();
         crate::cache::changed(self.table);
+        if guard.is_some() {
+            crate::embed::after_write(self.table).await?;
+        }
         Ok(n)
     }
 }
 
 /// Insert a row from `(column, value, type)` triples; returns the new id.
 pub(crate) async fn insert_row(table: &str, cols: &[(&str, Value, FieldType)]) -> Result<i64> {
+    let id = insert_row_inner(table, cols).await?;
+    crate::embed::after_write(table).await?;
+    Ok(id)
+}
+
+async fn insert_row_inner(table: &str, cols: &[(&str, Value, FieldType)]) -> Result<i64> {
     crate::cache::changed(table);
     let d = db().dialect;
     let names: Vec<String> = cols.iter().map(|(c, ..)| d.quote(c)).collect();
@@ -1330,7 +1353,7 @@ async fn write_many<M: Model>(rows: &mut [M], conflict: Option<&'static str>) ->
             row.set_pk(id);
         }
     }
-    Ok(())
+    crate::embed::after_write(meta.table).await
 }
 
 fn key_of<M: Model>(meta: &ModelMeta, row: &M, col: &str) -> Value {

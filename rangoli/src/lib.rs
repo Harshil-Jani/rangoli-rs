@@ -22,6 +22,7 @@ mod crypt;
 pub mod datetime;
 pub mod decimal;
 pub mod django;
+mod embed;
 pub mod forms;
 mod health;
 pub mod jwt;
@@ -545,6 +546,20 @@ impl App {
             panic!("rangoli: App::embed can be set once per process");
         }
         self
+    }
+
+    /// Keep `vector` in step with the text in `from`: when a write changes that text, the old
+    /// vector is cleared in the same statement and a background task computes the new one with
+    /// [`App::embed`]'s function (also once a minute, for anything a failed call left behind).
+    pub fn embed_fields<M: orm::Model, const N: usize>(self, vector: orm::Col<M, orm::Vector>, from: [&dyn admin::Field<M>; N]) -> Self {
+        let sources: Vec<&'static str> = from.iter().map(|f| f.name()).collect();
+        embed::AUTO.write().unwrap_or_else(std::sync::PoisonError::into_inner).push(embed::Auto {
+            table: M::TABLE,
+            vector: admin::Field::<M>::name(&vector),
+            sources,
+            fields: M::meta().fields,
+        });
+        self.task::<embed::Fill>().schedule("* * * * *", embed::Fill { table: M::TABLE.to_string() })
     }
 
     /// Sign requests in with JWTs (see [`jwt::JwtAuth`]): tokens you issue, or an identity
