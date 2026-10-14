@@ -1,0 +1,12 @@
+[package]
+name = "vs_bolt"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+# Only what the benchmark uses: the ORM, JWT and Postgres.
+[dependencies]
+rangoli = { path = "../../rangoli", default-features = false, features = ["postgres"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["rangoli", "rangoli-macros", "examples/blog", "examples/api_only", "examples/django", "examples/helpdesk"]
+members = ["rangoli", "rangoli-macros", "examples/blog", "examples/api_only", "examples/django", "examples/helpdesk", "bench/vs_bolt"]
 
 [workspace.package]
 version = "0.2.0"
