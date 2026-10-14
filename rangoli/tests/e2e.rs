@@ -405,6 +405,7 @@ async fn scenario() {
         .task::<Flaky>()
         .task::<Explodes>()
         .api::<Note>(Api::new().read(Access::Authenticated).write(Access::Public).owned_by(&Note::OWNER_ID))
+        .jwt(rangoli::jwt::JwtAuth::hs256("e2e-jwt-secret-of-at-least-32-bytes").cookie("access_token"))
         .admin::<Note>()
         .admin_with::<rangoli::auth::User>(
             ModelAdmin::new().exclude([&rangoli::auth::User::TOTP_SECRET, &rangoli::auth::User::TOTP_LAST_STEP]).inline(Note::OWNER_ID),
@@ -1066,6 +1067,25 @@ async fn scenario() {
     assert_eq!(json(&body)["owner_id"], bid, "the owner is filled in");
     let (_, _, body) = send(bearer("GET", "/api/e2e_note/", &at, "")).await;
     assert_eq!((json(&body)["count"].as_i64(), json(&body)["results"][0]["id"].as_i64()), (Some(1), Some(a1)), "lists show only your rows");
+
+    // ---- JWT sign-in: the same user, the same rules, by bearer header or cookie
+    let jwt_auth = rangoli::jwt::JwtAuth::hs256("e2e-jwt-secret-of-at-least-32-bytes");
+    let ajwt = jwt_auth.issue(&alice, std::time::Duration::from_secs(900)).unwrap();
+    let (_, _, body) = send(bearer("GET", "/api/e2e_note/", &ajwt, "")).await;
+    assert_eq!(json(&body)["count"], 1, "a JWT signs in as its user, owned_by included: {body}");
+    let (status, _, body) = send(get("/api/e2e_note/", &format!("other=1; access_token={ajwt}"))).await;
+    assert_eq!((status, json(&body)["count"].as_i64()), (StatusCode::OK, Some(1)), "or from an HttpOnly cookie");
+    let forged = rangoli::jwt::sign_hs256(&serde_json::json!({ "sub": bid.to_string() }), b"guessed-secret");
+    assert_eq!(send(bearer("GET", "/api/e2e_note/", &forged, "")).await.0, StatusCode::UNAUTHORIZED, "a forged token is refused");
+    let stale = rangoli::jwt::sign_hs256(
+        &serde_json::json!({ "sub": aid.to_string(), "exp": DateTime::now().unix() - 3600 }),
+        b"e2e-jwt-secret-of-at-least-32-bytes",
+    );
+    assert_eq!(send(bearer("GET", "/api/e2e_note/", &stale, "")).await.0, StatusCode::UNAUTHORIZED, "an expired token is refused");
+    let (status, _, body) = send(get("/api/e2e_note/", &format!("access_token={stale}"))).await;
+    assert_eq!((status, json(&body)["count"].as_i64()), (StatusCode::UNAUTHORIZED, None), "a stale cookie is just signed out: {body}");
+    let rjwt = jwt_auth.issue(&root, std::time::Duration::from_secs(900)).unwrap();
+    assert_eq!(send(bearer("GET", "/admin/", &rjwt, "")).await.0, StatusCode::FORBIDDEN, "a JWT can't open the admin");
     let (_, _, body) = send(bearer("GET", &format!("/api/e2e_note/?owner_id={bid}"), &at, "")).await;
     assert_eq!(json(&body)["count"], 0, "filters can't widen the scope");
     for (method, body) in [("GET", ""), ("PATCH", r#"{"title": "mine now"}"#), ("PUT", r#"{"title": "mine now"}"#), ("DELETE", "")] {

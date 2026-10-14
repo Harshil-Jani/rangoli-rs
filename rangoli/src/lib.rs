@@ -23,6 +23,7 @@ pub mod decimal;
 pub mod django;
 pub mod forms;
 mod health;
+pub mod jwt;
 mod limit;
 pub mod mcp;
 pub mod migrate;
@@ -502,6 +503,15 @@ impl App {
     pub fn schedule<T: tasks::Task>(self, cron: &str, task: T) -> Self {
         if let Err(e) = tasks::schedule(cron, &task) {
             panic!("rangoli: {e}");
+        }
+        self
+    }
+
+    /// Sign requests in with JWTs (see [`jwt::JwtAuth`]): tokens you issue, or an identity
+    /// provider's (Clerk, Auth0, Supabase Auth) checked against its JWKS keys.
+    pub fn jwt(self, auth: jwt::JwtAuth) -> Self {
+        if jwt::AUTH.set(auth).is_err() {
+            panic!("rangoli: App::jwt can be set once per process");
         }
         self
     }

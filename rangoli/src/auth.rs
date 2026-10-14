@@ -402,7 +402,12 @@ pub async fn logout(cookie_header: Option<&str>) -> Result<String> {
 }
 
 pub(crate) fn session_key(header: &str) -> Option<&str> {
-    header.split(';').find_map(|kv| kv.trim().strip_prefix(COOKIE)?.strip_prefix('='))
+    cookie_value(header, COOKIE)
+}
+
+/// One cookie's value from a `Cookie` header.
+pub(crate) fn cookie_value<'a>(header: &'a str, name: &str) -> Option<&'a str> {
+    header.split(';').find_map(|kv| kv.trim().strip_prefix(name)?.strip_prefix('='))
 }
 
 /// The logged-in user, if any. Use as an axum extractor.
@@ -450,6 +455,36 @@ pub async fn session_middleware(mut req: Request, next: Next) -> Response {
         req.extensions_mut().insert(CurrentUser(Some(user)));
         req.extensions_mut().insert(scope);
         return next.run(req).await;
+    }
+    if let Some(jwt) = crate::jwt::AUTH.get() {
+        // Only JWT-shaped bearer values: other schemes still reach the app's own handlers.
+        let header = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .filter(|t| t.split('.').count() == 3);
+        let cookie = jwt.cookie.as_deref().and_then(|name| {
+            req.headers().get(axum::http::header::COOKIE).and_then(|v| v.to_str().ok()).and_then(|c| cookie_value(c, name))
+        });
+        if let Some(token) = header.or(cookie).map(str::to_owned) {
+            let user = match jwt.user(&token).await {
+                Ok(u) => u,
+                Err(e) => return e.into_response(),
+            };
+            if user.is_none() && header.is_some() {
+                let body = axum::Json(serde_json::json!({ "detail": "Invalid token." }));
+                return (axum::http::StatusCode::UNAUTHORIZED, [(axum::http::header::WWW_AUTHENTICATE, "Bearer")], body).into_response();
+            }
+            if user.is_some() && req.uri().path().starts_with("/admin") {
+                let body = axum::Json(serde_json::json!({ "detail": "Sign in to the admin with your password." }));
+                return (axum::http::StatusCode::FORBIDDEN, body).into_response();
+            }
+            if user.is_some() {
+                req.extensions_mut().insert(CurrentUser(user));
+                return next.run(req).await;
+            }
+        }
     }
     let key = req.headers().get(axum::http::header::COOKIE).and_then(|v| v.to_str().ok()).and_then(session_key).map(str::to_owned);
     let mut user = None;

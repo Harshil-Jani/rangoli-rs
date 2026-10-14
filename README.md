@@ -396,6 +396,17 @@ curl -H "Authorization: Bearer rgl_…" -X POST localhost:8000/api/blog_post/ -d
 
 or `rangoli::auth::create_token(&user, "ci-bot", Some(ttl))` in code. A token carries its user's rights and stops working when it expires, when its `ApiToken` row is deleted, or when the user is deactivated. Only a SHA-256 of the token is stored, so a database leak doesn't leak working tokens, and the `rgl_` prefix lets secret scanners recognise one pushed to a repository. A bad token is a `401 {"detail": "Invalid token."}` with `WWW-Authenticate: Bearer`. `last_used_at` is written at most once a minute per token, so checking a token is two reads and no write on hot paths (asserted with `count_queries`). Password fields are write-only, datetimes are ISO 8601, `auto_now` fields are filled in. Browser requests are covered by the same cross-origin protection as the admin.
 
+### JWT sign-in
+
+For mobile apps and single-page front ends, or when sign-in already lives with Clerk, Auth0 or Supabase Auth:
+
+```rust
+App::new().jwt(JwtAuth::hs256(secret).cookie("access_token"))      // tokens you issue: auth.issue(&user, ttl)
+App::new().jwt(JwtAuth::jwks(&provider_jwks, "email"))              // a provider's RS256 tokens, matched by email
+```
+
+A valid token, in `Authorization: Bearer` or the cookie, signs the request in as its user, and every access rule and `owned_by` applies. A forged, expired or tampered token gets a 401. The checks are run in the order the attacks happen: `alg: none` is refused; a key only verifies its own algorithm, so an HS256 token "signed" with an RSA public key fails (the alg-confusion attack); `kid` picks the key; and `exp`/`nbf` allow 60 seconds of clock skew. Both RFC 7515 test vectors (HS256 and RS256) pass. JWTs can't open the admin, which still wants a password and 2FA.
+
 ## AI agents (MCP)
 
 Every model you expose with `.api::<M>(...)` is also an MCP server at `POST /mcp` (Streamable HTTP, protocol 2025-06-18 back to 2024-11-05). Each model gets five tools, such as `blog_post_list`, `blog_post_get`, `blog_post_create`, `blog_post_update` and `blog_post_delete`, with input schemas generated from the model.
