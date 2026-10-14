@@ -997,6 +997,9 @@ async fn labels(site: &Site, table: &str, mut ids: Vec<i64>) -> Result<HashMap<i
     Ok(label_rows(site, table, Some(ids)).await?.into_iter().collect())
 }
 
+/// The fields of one form. `prefix` goes in front of input names (inline rows use
+/// `table-0-`); `raw` and `errors` are keyed by the bare field name.
+#[allow(clippy::too_many_arguments)]
 async fn form_fields(
     site: &Site,
     meta: &ModelMeta,
@@ -1004,9 +1007,11 @@ async fn form_fields(
     errors: &HashMap<String, String>,
     is_add: bool,
     readonly: &[&str],
+    prefix: &str,
+    hidden: &[&str],
 ) -> Result<Vec<minijinja::Value>, Response> {
     let mut out = vec![];
-    for f in meta.fields.iter().filter(|f| !f.is_auto()) {
+    for f in meta.fields.iter().filter(|f| !f.is_auto() && !hidden.contains(&f.name)) {
         let options: Vec<(String, String)> = match (f.fk, f.choices) {
             (Some(t), _) => label_rows(site, t, None).await?.into_iter().map(|(id, l)| (id.to_string(), l)).collect(),
             (_, Some(choices)) => choices.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
@@ -1020,7 +1025,7 @@ async fn form_fields(
                 (FieldType::DateTime, v) => DateTime::parse(v).map_or(v.to_string(), DateTime::human),
                 _ => options.iter().find(|(id, _)| *id == raw).map_or(raw.clone(), |(_, l)| l.clone()),
             };
-            out.push(context! { name => f.name, label => label(f.name), kind => "readonly", value => shown });
+            out.push(context! { name => format!("{prefix}{}", f.name), label => label(f.name), kind => "readonly", value => shown });
             continue;
         }
         let kind = match (f.fk.is_some() || f.choices.is_some(), f.password, f.ty) {
@@ -1038,7 +1043,7 @@ async fn form_fields(
         };
         let value = raw.get(f.name).cloned().unwrap_or_default();
         out.push(context! {
-            name => f.name, label => label(f.name), kind, checked => !value.is_empty(), value, options,
+            name => format!("{prefix}{}", f.name), label => label(f.name), kind, checked => !value.is_empty(), value, options,
             required => !f.null && f.ty != FieldType::Bool && (is_add || !f.password),
             maxlength => match f.ty { FieldType::Varchar(n) => Some(n), _ => None },
             help => if f.password && !is_add { Some("Leave blank to keep the current password.") } else if f.ty == FieldType::DateTime { Some("Date and time in UTC.") } else { None },
@@ -1091,7 +1096,12 @@ async fn form_page(
     messages: Option<minijinja::Value>,
 ) -> Page {
     let is_add = id.is_none();
-    let mut fields = form_fields(site, meta, raw, &errors, is_add, &options(site, meta).readonly_fields).await?;
+    let o = options(site, meta);
+    let mut fields = form_fields(site, meta, raw, &errors, is_add, &o.readonly_fields, "", &o.exclude).await?;
+    let inlines = match id {
+        Some(id) => inline_blocks(site, meta, id, raw, &errors).await?,
+        None => vec![],
+    };
     for rel in meta.m2m {
         let chosen = links.get(rel.name).cloned().unwrap_or_default();
         let options: Vec<_> = label_rows(site, rel.target, None)
@@ -1113,7 +1123,7 @@ async fn form_page(
         site,
         "form.html",
         context! {
-            title, obj, id, is_add, fields, messages, form_error => errors.get("__all__"),
+            title, obj, id, is_add, fields, inlines, messages, form_error => errors.get("__all__"),
             error_count => errors.len(), ..chrome(site, u, Some(meta))
         },
     )?;
@@ -1170,7 +1180,7 @@ async fn add_submit(State(site): S, user: CurrentUser, uri: Uri, Path(table): Pa
     let meta = addable(&site, &table)?;
     let form: HashMap<String, String> = pairs.iter().cloned().collect();
     let links = submitted_links(meta, &pairs);
-    let errors = match validate(meta, &form, true, &options(&site, meta).readonly_fields).await {
+    let errors = match validate(meta, &form, true, &fixed_fields(options(&site, meta))).await {
         Ok(cols) => match crate::atomic(async {
             let id = orm::insert_row(meta.table, &cols).await?;
             save_links(meta, id, &links).await?;
@@ -1215,13 +1225,16 @@ async fn change_submit(
     let links = submitted_links(meta, &pairs);
     let old = fetch_row(meta, id).await?;
     let old_links = current_links(meta, id).await.map_err(fail)?;
-    let errors = match validate(meta, &form, false, &options(&site, meta).readonly_fields).await {
+    let (inline_ops, inline_errors) = inline_changes(&site, meta, id, &form).await;
+    let errors = match validate(meta, &form, false, &fixed_fields(options(&site, meta))).await {
+        Ok(_) if !inline_errors.is_empty() => inline_errors,
         Ok(cols) => {
             let mut q = Query::new(meta);
             q.filter.push(by_id(id));
             let saved = crate::atomic(async {
                 q.update(&cols).await?;
                 save_links(meta, id, &links).await?;
+                let changed_inlines = apply_inlines(u, id, &inline_ops).await?;
                 let vals = row_values(meta, id).await?;
                 let sorted = |l: &Links, n: &str| {
                     let mut v = l.get(n).cloned().unwrap_or_default();
@@ -1229,7 +1242,8 @@ async fn change_submit(
                     v.dedup();
                     v
                 };
-                let rels: Vec<&str> = meta.m2m.iter().map(|r| r.name).filter(|n| sorted(&old_links, n) != sorted(&links, n)).collect();
+                let mut rels: Vec<&str> = meta.m2m.iter().map(|r| r.name).filter(|n| sorted(&old_links, n) != sorted(&links, n)).collect();
+                rels.extend(changed_inlines);
                 log(u, meta, id, &repr(meta, id, &vals), CHANGE, change_message(meta, &old, &cols, &rels)).await
             })
             .await;
@@ -1238,9 +1252,167 @@ async fn change_submit(
                 Err(e) => [("__all__".to_string(), db_error_message(&e).ok_or_else(|| fail(e))?.to_string())].into(),
             }
         }
-        Err(errors) => errors,
+        Err(mut errors) => {
+            errors.extend(inline_errors);
+            errors
+        }
     };
     form_page(&site, u, meta, Some(id), &form, &links, errors, StatusCode::UNPROCESSABLE_ENTITY, None).await
+}
+
+/// Fields a form submission can't change: read-only ones and excluded ones.
+fn fixed_fields(o: &Options) -> Vec<&'static str> {
+    o.readonly_fields.iter().chain(&o.exclude).copied().collect()
+}
+
+// ---------------------------------------------------------------- inlines
+
+type InlineRow = (Option<i64>, HashMap<String, String>, bool);
+
+/// Rows of one inline as submitted: (child id if it exists, its fields, ticked for delete).
+fn parse_inline(form: &HashMap<String, String>, inl: &super::Inline) -> Vec<InlineRow> {
+    let t = inl.meta.table;
+    let total: usize = form.get(&format!("{t}-TOTAL")).and_then(|n| n.parse().ok()).unwrap_or(0).min(500);
+    (0..total)
+        .map(|i| {
+            let prefix = format!("{t}-{i}-");
+            let id = form.get(&format!("{prefix}id")).and_then(|v| v.parse().ok());
+            let raw = inl
+                .meta
+                .fields
+                .iter()
+                .filter_map(|f| form.get(&format!("{prefix}{}", f.name)).map(|v| (f.name.to_string(), v.clone())))
+                .collect();
+            (id, raw, form.contains_key(&format!("{prefix}DELETE")))
+        })
+        .collect()
+}
+
+/// The inline tables for a change page: existing child rows plus blank ones (or, after a
+/// failed save, the rows as submitted, with their errors).
+async fn inline_blocks(
+    site: &Site,
+    meta: &'static ModelMeta,
+    parent: i64,
+    posted: &HashMap<String, String>,
+    errors: &HashMap<String, String>,
+) -> Result<Vec<minijinja::Value>, Response> {
+    let mut out = vec![];
+    for inl in &options(site, meta).inlines {
+        let t = inl.meta.table;
+        let mut rows: Vec<InlineRow> = if posted.contains_key(&format!("{t}-TOTAL")) {
+            parse_inline(posted, inl)
+        } else {
+            let mut q = Query::new(inl.meta);
+            q.filter.push(Node::Cmp(inl.fk, "=", Value::Int(parent), FieldType::Int));
+            q.order = vec![("id", false)];
+            q.limit = Some(200);
+            let mut rows: Vec<InlineRow> =
+                q.rows().await.map_err(fail)?.into_iter().map(|(cid, v)| (Some(cid), raw_values(inl.meta, &v), false)).collect();
+            rows.extend((0..inl.extra).map(|_| (None, HashMap::new(), false)));
+            rows
+        };
+        if rows.is_empty() {
+            rows.extend((0..inl.extra).map(|_| (None, HashMap::new(), false))); // always room to add
+        }
+        // Column headings come from the model, not the first row, so an empty table still has them.
+        let columns: Vec<String> = inl.meta.fields.iter().filter(|f| !f.is_auto() && f.name != inl.fk).map(|f| label(f.name)).collect();
+        let mut shown = vec![];
+        for (i, (cid, raw, delete)) in rows.iter().enumerate() {
+            let prefix = format!("{t}-{i}-");
+            let row_errors: HashMap<String, String> =
+                errors.iter().filter_map(|(k, v)| k.strip_prefix(&prefix).map(|f| (f.to_string(), v.clone()))).collect();
+            let fields = form_fields(site, inl.meta, raw, &row_errors, cid.is_none(), &[inl.fk], &prefix, &[]).await?;
+            shown.push(context! { prefix, id => cid, fields, delete });
+        }
+        out.push(context! { table => t, label => title_plural(inl.meta.name), fk => inl.fk, total => rows.len(), rows => shown, columns });
+    }
+    Ok(out)
+}
+
+enum InlineOp {
+    Delete(&'static ModelMeta, &'static str, i64),
+    Update(&'static ModelMeta, &'static str, i64, Vec<(&'static str, Value, FieldType)>),
+    Insert(&'static ModelMeta, Vec<(&'static str, Value, FieldType)>),
+}
+
+/// Validate every submitted inline row. Blank new rows are skipped; the foreign key is always
+/// the parent's, whatever was posted.
+async fn inline_changes(
+    site: &Site,
+    meta: &'static ModelMeta,
+    parent: i64,
+    form: &HashMap<String, String>,
+) -> (Vec<InlineOp>, HashMap<String, String>) {
+    let (mut ops, mut errors) = (vec![], HashMap::new());
+    for inl in &options(site, meta).inlines {
+        for (i, (cid, mut raw, delete)) in parse_inline(form, inl).into_iter().enumerate() {
+            if delete {
+                if let Some(cid) = cid {
+                    ops.push(InlineOp::Delete(inl.meta, inl.fk, cid));
+                }
+                continue;
+            }
+            let blank = inl
+                .meta
+                .fields
+                .iter()
+                .filter(|f| f.name != inl.fk && !f.is_auto())
+                .all(|f| raw.get(f.name).is_none_or(|v| v.trim().is_empty()));
+            if cid.is_none() && blank {
+                continue;
+            }
+            raw.insert(inl.fk.to_string(), parent.to_string());
+            match (validate(inl.meta, &raw, cid.is_none(), &[]).await, cid) {
+                (Ok(cols), Some(cid)) => ops.push(InlineOp::Update(inl.meta, inl.fk, cid, cols)),
+                (Ok(cols), None) => ops.push(InlineOp::Insert(inl.meta, cols)),
+                (Err(e), _) => errors.extend(e.into_iter().map(|(k, v)| (format!("{}-{i}-{k}", inl.meta.table), v))),
+            }
+        }
+    }
+    (ops, errors)
+}
+
+/// Apply validated inline changes (inside the parent's transaction), logging each child.
+/// Updates and deletes only reach rows that belong to this parent. Returns what changed.
+async fn apply_inlines(u: &User, parent: i64, ops: &[InlineOp]) -> crate::Result<Vec<&'static str>> {
+    let mut changed: Vec<&'static str> = vec![];
+    let owned = |m: &'static ModelMeta, fk: &'static str, cid: i64| {
+        let mut q = Query::new(m);
+        q.filter.push(by_id(cid));
+        q.filter.push(Node::Cmp(fk, "=", Value::Int(parent), FieldType::Int));
+        q
+    };
+    for op in ops {
+        let m = match op {
+            InlineOp::Delete(m, fk, cid) => {
+                let name = repr(m, *cid, &row_values(m, *cid).await?);
+                if owned(m, fk, *cid).delete().await? == 0 {
+                    return Err(Error::NotFound);
+                }
+                log(u, m, *cid, &name, DELETION, String::new()).await?;
+                m
+            }
+            InlineOp::Update(m, fk, cid, cols) => {
+                let q = owned(m, fk, *cid);
+                if q.update(cols).await? == 0 && q.count().await? == 0 {
+                    return Err(Error::NotFound); // not this parent's row
+                }
+                log(u, m, *cid, &repr(m, *cid, &row_values(m, *cid).await?), CHANGE, "Changed.".into()).await?;
+                m
+            }
+            InlineOp::Insert(m, cols) => {
+                let cid = orm::insert_row(m.table, cols).await?;
+                log(u, m, cid, &repr(m, cid, &row_values(m, cid).await?), ADDITION, "Added.".into()).await?;
+                m
+            }
+        };
+        let name = m.table.split_once('_').map_or(m.table, |(_, n)| n);
+        if !changed.contains(&name) {
+            changed.push(name);
+        }
+    }
+    Ok(changed)
 }
 
 // ---------------------------------------------------------------- delete & history

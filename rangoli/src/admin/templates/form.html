@@ -52,6 +52,37 @@
     </div>
     {% endfor %}
   </fieldset>
+  {% for inl in inlines %}
+  <section class="panel inline-group" aria-labelledby="inline-{{ inl.table }}">
+    <h2 id="inline-{{ inl.table }}">{{ inl.label }}</h2>
+    <input type="hidden" name="{{ inl.table }}-TOTAL" value="{{ inl.total }}">
+    <div class="table-wrap">
+      <table class="results inline">
+        <thead><tr>
+          {% for c in inl.columns %}<th scope="col">{{ c }}</th>{% endfor %}
+          <th scope="col" class="shrink">Delete?</th>
+        </tr></thead>
+        <tbody>
+        {% for r in inl.rows %}
+        <tr>
+          {% for f in r.fields %}{% if f.name != r.prefix ~ inl.fk %}
+          <td{% if f.error %} class="has-error"{% endif %}>
+            {% if f.kind == "readonly" %}{{ f.value }}
+            {% elif f.kind == "checkbox" %}<input type="checkbox" name="{{ f.name }}" aria-label="{{ f.label }}"{% if f.checked %} checked{% endif %}>
+            {% elif f.kind == "select" %}<select name="{{ f.name }}" aria-label="{{ f.label }}"><option value="">-</option>{% for o in f.options %}<option value="{{ o[0] }}"{% if o[0] == f.value %} selected{% endif %}>{{ o[1] }}</option>{% endfor %}</select>
+            {% else %}<input name="{{ f.name }}" aria-label="{{ f.label }}" value="{{ f.value }}" {% if f.kind == "number" %}type="number"{% elif f.kind == "float" %}type="number" step="any"{% elif f.kind == "date" %}type="date"{% elif f.kind == "datetime" %}type="datetime-local"{% elif f.kind == "decimal" %}type="text" inputmode="decimal"{% else %}type="text"{% endif %}{% if f.maxlength %} maxlength="{{ f.maxlength }}"{% endif %}>
+            {% endif %}
+            {% if f.error %}<p class="field-error">{{ f.error }}</p>{% endif %}
+          </td>
+          {% endif %}{% endfor %}
+          <td class="shrink">{% if r.id %}<input type="hidden" name="{{ r.prefix }}id" value="{{ r.id }}"><input type="checkbox" name="{{ r.prefix }}DELETE" aria-label="Delete"{% if r.delete %} checked{% endif %}>{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endfor %}
   <div class="submit-row">
     <button type="submit" class="btn primary" name="_save" value="1">Save</button>
     <button type="submit" class="btn" name="_continue" value="1">Save and continue editing</button>

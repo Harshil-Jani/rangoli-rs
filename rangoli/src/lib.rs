@@ -291,7 +291,11 @@ impl App {
                 tasks::TaskRecord::meta(),
             ],
             admin: vec![
-                (auth::User::meta(), admin::Options::default()),
+                // The two-factor key never appears in the admin, even to staff.
+                (
+                    auth::User::meta(),
+                    admin::ModelAdmin::<auth::User>::new().exclude([&auth::User::TOTP_SECRET, &auth::User::TOTP_LAST_STEP]).opts,
+                ),
                 (
                     approvals::PendingChange::meta(),
                     // What agents asked to change, waiting for a person. Approve or reject in bulk.

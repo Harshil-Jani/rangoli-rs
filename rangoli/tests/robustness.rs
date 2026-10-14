@@ -187,7 +187,7 @@ async fn the_framework_never_takes_the_server_down() {
         .unwrap_or_else(|| format!("sqlite://{}/fuzz.sqlite3?mode=rwc", dir.display()));
 
     let app = App::new()
-        .admin::<Author>()
+        .admin_with::<Author>(rangoli::admin::ModelAdmin::new().inline(Post::AUTHOR_ID))
         .admin::<Tag>()
         .admin_with::<Post>(
             rangoli::admin::ModelAdmin::new()
@@ -355,6 +355,24 @@ async fn the_framework_never_takes_the_server_down() {
             let (s, b) = send(req).await;
             check(format!("GET /api/fz_post/ with token {token:?}"), s, &b);
         }
+
+        // An inline (the author's posts) with random rows, ids, delete flags and values.
+        let mut inline: Vec<(String, String)> = vec![("name".into(), rng.string()), ("email".into(), rng.string())];
+        let rows = rng.below(4);
+        inline.push(("fz_post-TOTAL".into(), if rng.chance(20) { rng.string() } else { rows.to_string() }));
+        for i in 0..rows {
+            for f in ["id", "title", "body", "views", "flag", "status", "DELETE", "author_id"] {
+                if rng.chance(60) {
+                    let v = if f == "id" && rng.chance(50) { pid.to_string() } else { rng.string() };
+                    inline.push((format!("fz_post-{i}-{f}"), v));
+                }
+            }
+        }
+        let author_page = format!("/admin/fz_author/{}/", author.id.unwrap());
+        let (s, b) =
+            send(post(author_page.clone(), &cookie, "application/x-www-form-urlencoded", serde_urlencoded::to_string(&inline).unwrap()))
+                .await;
+        check(format!("POST {author_page} {inline:?}"), s, &b);
 
         // Admin add / change forms with random fields.
         let form: Vec<(String, String)> = (0..rng.below(10)).map(|_| (rng.pick(FIELDS).to_string(), rng.string())).collect();

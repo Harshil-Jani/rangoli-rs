@@ -252,6 +252,8 @@ Custom actions join "Delete selected" in the changelist's Action menu (Django's 
 
 An action runs in one transaction with a History entry for every row it touched, so an `Err` undoes both, and the admin reports "Applied “Mark selected as published” to 2 posts." or that it failed and nothing changed. The message is built from the registered label, so a crafted link can't make the admin display other text (the e2e test tries).
 
+Child rows can be edited on the parent's page (Django's inlines; nested inline editing is [Trac #9025](https://code.djangoproject.com/ticket/9025), its most-followed open ticket): `.inline(LineItem::ORDER_ID)` lists an order's line items under the order, with blank rows to add more and a box to delete. The parent and every child row save in one transaction, so one bad row saves nothing; each child gets its own History entry, and a row id from another parent is refused. `.exclude([...])` leaves fields out of the forms entirely.
+
 `.no_add()` removes "Add" for rows made elsewhere (Django's `has_add_permission` returning `False`): the links disappear and the add URLs answer 403. API tokens use it: they appear in the admin under **API tokens** by name and prefix, where you can rename one, set an expiry or delete it to revoke it, but not create one, since the token itself is shown only once by `createtoken`.
 
 Settings that can't work (searching a non-text column, filtering on an unsupported type) stop the app at startup, like Django's admin checks.

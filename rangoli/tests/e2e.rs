@@ -402,6 +402,9 @@ async fn scenario() {
         .task::<Explodes>()
         .api::<Note>(Api::new().read(Access::Authenticated).write(Access::Public).owned_by(&Note::OWNER_ID))
         .admin::<Note>()
+        .admin_with::<rangoli::auth::User>(
+            ModelAdmin::new().exclude([&rangoli::auth::User::TOTP_SECRET, &rangoli::auth::User::TOTP_LAST_STEP]).inline(Note::OWNER_ID),
+        )
         .api::<PostV2>(Api::new().read(Access::Public))
         .templates(dir.join("templates"))
         .static_files("/static", dir.join("static"))
@@ -1488,6 +1491,54 @@ async fn scenario() {
     private_note.save().await.unwrap();
     assert_ne!(raw(sid).await, stored, "each write uses a fresh nonce");
     assert_eq!(send(bearer("GET", "/api/e2e_note/?ssn=123-45-6789", &at, "")).await.0, StatusCode::BAD_REQUEST, "can't be filtered");
+
+    // ---- admin inlines: a user's notes edited on the user's page, in one transaction
+    let user_url = format!("/admin/rangoli_user/{aid}/");
+    let (_, _, page) = send(get(&user_url, &cookie)).await;
+    let mine = Note::objects().filter(Note::OWNER_ID.eq(aid)).order_by(Note::ID.asc()).all().await.unwrap();
+    assert!(mine.len() >= 2, "{mine:?}");
+    assert!(
+        page.contains("inline-e2e_note") && page.contains(&format!("name=\"e2e_note-TOTAL\" value=\"{}\"", mine.len() + 3)),
+        "existing rows plus three blank"
+    );
+    assert!(!page.contains("totp_secret") && !page.contains("totp_last_step"), "the 2FA key isn't in the user form");
+    let inline_form = |rows: &[(Option<i64>, &str, bool)]| {
+        let mut body = format!("username=alice&is_active=on&e2e_note-TOTAL={}", rows.len());
+        for (i, (id, title, delete)) in rows.iter().enumerate() {
+            if let Some(id) = id {
+                body.push_str(&format!("&e2e_note-{i}-id={id}"));
+            }
+            body.push_str(&format!("&e2e_note-{i}-title={}", title.replace(' ', "+")));
+            if *delete {
+                body.push_str(&format!("&e2e_note-{i}-DELETE=on"));
+            }
+        }
+        body
+    };
+    let (first, second) = (mine[0].id.unwrap(), mine[1].id.unwrap());
+    let too_long = "x".repeat(101);
+    let bad = inline_form(&[(Some(first), "Renamed inline", false), (None, &too_long, false)]);
+    let (status, _, page) = send(form(&user_url, &cookie, &bad)).await;
+    assert!(
+        status == StatusCode::UNPROCESSABLE_ENTITY && page.contains("at most 100 characters"),
+        "a bad row is reported in its cell: {status} {}",
+        page.lines().filter(|l| l.contains("error")).collect::<Vec<_>>().join("\n")
+    );
+    assert_ne!(Note::get(first).await.unwrap().title, "Renamed inline", "and nothing is saved, not even the good row");
+    let good =
+        inline_form(&[(Some(first), "Renamed inline", false), (Some(second), "", true), (None, "Inline new", false), (None, "", false)]);
+    let (status, _, _) = send(form(&user_url, &cookie, &good)).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(Note::get(first).await.unwrap().title, "Renamed inline", "edited");
+    assert!(Note::get(second).await.is_err(), "deleted");
+    let added = Note::objects().filter(Note::TITLE.eq("Inline new")).get().await.unwrap();
+    assert_eq!(added.owner_id, aid, "added, owned by the parent");
+    let (_, _, hist) = send(get(&format!("/admin/e2e_note/{}/history", added.id.unwrap()), &cookie)).await;
+    assert!(hist.contains("Added."), "each child gets its own History entry");
+    let bobs = Note::objects().filter(Note::OWNER_ID.eq(bid)).first().await.unwrap().unwrap();
+    let tamper = inline_form(&[(bobs.id, "Stolen", false)]);
+    send(form(&user_url, &cookie, &tamper)).await;
+    assert_ne!(Note::get(bobs.id.unwrap()).await.unwrap().title, "Stolen", "another parent's row can't be edited from here");
 
     // Tokens in the admin: listed and revocable, never created there (the plaintext couldn't be shown).
     let (status, _, body) = send(get("/admin/rangoli_api_token/", &cookie)).await;

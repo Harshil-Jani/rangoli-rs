@@ -429,3 +429,9 @@ fieldset { margin: 0; padding: 0; min-width: 0; }
 .agents-cta h2 { margin: 0 0 6px; }
 .agent-setup pre { margin: 0; padding: 8px 10px; background: var(--surface-2); overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-setup code { font-size: 13px; overflow-wrap: anywhere; }
+
+/* Inline child rows on a change page */
+.inline-group { margin-top: 16px; }
+.inline-group h2 { margin: 0; padding: 10px 14px; font-size: 15px; }
+table.inline td { vertical-align: top; }
+table.inline input[type=text], table.inline input[type=number], table.inline select { width: 100%; min-width: 6em; }

@@ -85,9 +85,22 @@ pub struct Options {
     pub(crate) list_filter: Option<Vec<&'static str>>,
     pub(crate) ordering: Option<(&'static str, bool)>,
     pub(crate) readonly_fields: Vec<&'static str>,
+    pub(crate) exclude: Vec<&'static str>,
     pub(crate) list_per_page: Option<u64>,
     pub(crate) no_add: bool,
     pub(crate) actions: Vec<Action>,
+    pub(crate) inlines: Vec<Inline>,
+}
+
+/// Child rows edited on the parent's page: the child model and its foreign key to the parent.
+/// Without the `admin` feature there are no pages to show it on.
+#[cfg_attr(not(feature = "admin"), allow(dead_code))]
+#[derive(Clone, Debug)]
+pub(crate) struct Inline {
+    pub(crate) meta: &'static crate::orm::ModelMeta,
+    pub(crate) fk: &'static str,
+    /// Blank rows for adding.
+    pub(crate) extra: usize,
 }
 
 type ActionFn = dyn Fn(Vec<i64>) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send>> + Send + Sync;
@@ -177,6 +190,21 @@ impl<M: Model> ModelAdmin<M> {
         self
     }
 
+    /// Leave fields out of the add and change forms entirely (Django's `exclude`): not shown,
+    /// not editable, existing values kept. For secrets staff shouldn't see either.
+    pub fn exclude<const N: usize>(mut self, cols: [&dyn Field<M>; N]) -> Self {
+        self.opts.exclude = Self::names(cols);
+        self
+    }
+
+    /// Edit `C` rows that point at this model on its change page (Django's inlines): an order's
+    /// line items under the order. `fk` is `C`'s foreign key to this model. Parent and children
+    /// save in one transaction; three blank rows let you add more.
+    pub fn inline<C: Model>(mut self, fk: crate::orm::Col<C, i64>) -> Self {
+        self.opts.inlines.push(Inline { meta: C::meta(), fk: fk.name(), extra: 3 });
+        self
+    }
+
     /// No "Add" in the admin (Django's `has_add_permission` returning False), for rows made
     /// elsewhere: API tokens, task runs, imports. Change and delete still work.
     pub fn no_add(mut self) -> Self {
@@ -193,6 +221,11 @@ impl<M: Model> ModelAdmin<M> {
     pub(crate) fn check(&self) -> std::result::Result<(), String> {
         let meta = M::meta();
         let field = |n: &str| meta.field(n);
+        for i in &self.opts.inlines {
+            if i.meta.field(i.fk).and_then(|f| f.fk) != Some(meta.table) {
+                return Err(format!("{}: inline {} needs `{}` to be a foreign key to {}", meta.name, i.meta.name, i.fk, meta.table));
+            }
+        }
         for n in self.opts.search_fields.iter().flatten() {
             if !field(n).is_some_and(|f| matches!(f.ty, FieldType::Varchar(_) | FieldType::Text) && !f.password) {
                 return Err(format!("{}: search_fields can only use text columns, not `{n}`", meta.name));
