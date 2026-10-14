@@ -31,7 +31,8 @@ jobs:
             url: mysql://root:pw@127.0.0.1:3306/rangoli
     services:
       postgres:
-        image: postgres:17-alpine
+        # Postgres 17 plus pgvector, so the vector search tests run too.
+        image: pgvector/pgvector:pg17
         env:
           POSTGRES_PASSWORD: pw
           POSTGRES_DB: rangoli

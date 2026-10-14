@@ -419,6 +419,7 @@ fn display(v: &Value, f: &FieldMeta) -> String {
         Value::Text(s) if f.choices.is_some() => {
             f.choices.into_iter().flatten().find(|(v, _)| v == s).map_or(s.clone(), |(_, l)| l.to_string())
         }
+        Value::Text(s) if matches!(f.ty, FieldType::Vector(_)) => format!("{} numbers", s.matches(',').count() + 1),
         Value::Text(s) if matches!(f.ty, FieldType::Text | FieldType::Json) && s.chars().count() > 80 => {
             s.chars().take(80).chain("…".chars()).collect()
         }
@@ -908,7 +909,9 @@ async fn export_csv(State(site): S, user: CurrentUser, uri: Uri, Path(table): Pa
         .fields
         .iter()
         .enumerate()
-        .filter(|(_, f)| !f.password && !f.private && f.ty != FieldType::Encrypted && !excluded.contains(&f.name))
+        .filter(|(_, f)| {
+            !f.password && !f.private && !matches!(f.ty, FieldType::Encrypted | FieldType::Vector(_)) && !excluded.contains(&f.name)
+        })
         .map(|(i, _)| i)
         .collect();
     let header: Vec<String> = std::iter::once("id".to_string()).chain(cols.iter().map(|i| meta.fields[*i].name.to_string())).collect();
@@ -989,7 +992,7 @@ async fn plan_import(site: &Site, meta: &'static ModelMeta, u: &User, text: &str
             Some(f)
                 if !f.password
                     && !f.is_auto()
-                    && f.ty != FieldType::Opaque
+                    && !matches!(f.ty, FieldType::Opaque | FieldType::Vector(_))
                     && !opts.exclude.contains(&f.name)
                     && !opts.readonly_fields.contains(&f.name) =>
             {
@@ -1350,7 +1353,7 @@ async fn form_fields(
             (_, Some(choices)) => choices.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
             _ => vec![],
         };
-        if readonly.contains(&f.name) || f.ty == FieldType::Opaque {
+        if readonly.contains(&f.name) || matches!(f.ty, FieldType::Opaque | FieldType::Vector(_)) {
             let raw = raw.get(f.name).cloned().unwrap_or_default();
             let shown = match (f.ty, raw.as_str()) {
                 (_, "") if f.ty != FieldType::Bool => "-".to_string(),

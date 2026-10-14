@@ -284,6 +284,7 @@ pub(crate) fn zero(ty: FieldType) -> Value {
         FieldType::Varchar(_) | FieldType::Text | FieldType::Opaque | FieldType::Encrypted => Value::Text(String::new()),
         FieldType::Uuid => Value::from(crate::Uuid::NIL),
         FieldType::Json => Value::Text("null".into()),
+        FieldType::Vector(n) => Value::from(crate::orm::Vector(vec![0.0; n as usize])),
     }
 }
 
@@ -481,6 +482,8 @@ fn col_type(d: Dialect, ty: FieldType) -> String {
         (FieldType::Uuid, _) => "VARCHAR(36)".into(),
         // Opaque columns come from introspection, never from Rangoli's own migrations.
         (FieldType::Text | FieldType::Json | FieldType::Opaque | FieldType::Encrypted, _) => "TEXT".into(),
+        (FieldType::Vector(n), Dialect::Postgres) => format!("vector({n})"),
+        (FieldType::Vector(_), _) => "TEXT".into(),
     }
 }
 
@@ -586,6 +589,15 @@ fn concurrent_index(d: Dialect, before: &State, op: &Op) -> Option<(String, Stri
         return Some((name, sql));
     }
     let Op::AddIndex { table, index } = op else { return None };
+    if d == Dialect::Postgres && vector_column(before, table, index).is_some() {
+        let sql = format!(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} USING hnsw ({} vector_cosine_ops)",
+            d.quote(&index.name),
+            d.quote(table),
+            d.quote(&index.columns[0])
+        );
+        return Some((index.name.clone(), sql));
+    }
     let existing = before.get(table)?;
     if d != Dialect::Postgres || !index.columns.iter().all(|c| existing.columns.iter().any(|col| &col.name == c)) {
         return None;
@@ -640,6 +652,14 @@ fn sqlite_fts_drop(name: &str) -> String {
         .join(";\n")
 }
 
+const VECTOR_EXT: &str = "CREATE EXTENSION IF NOT EXISTS vector";
+
+/// The vector column an index covers, if it's a one-column index on one.
+fn vector_column<'a>(state: &'a State, table: &str, ix: &Index) -> Option<&'a Column> {
+    let [col] = &ix.columns[..] else { return None };
+    state.get(table)?.columns.iter().find(|c| &c.name == col && matches!(c.ty, FieldType::Vector(_)))
+}
+
 fn create_index(d: Dialect, table: &str, ix: &Index) -> String {
     if ix.fulltext {
         return match d {
@@ -664,13 +684,26 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
     let q = |s: &str| d.quote(s);
     let none = BTreeMap::new();
     Ok(match op {
-        Op::CreateTable { table, columns } => vec![create_table(d, table, columns, &none)],
+        Op::CreateTable { table, columns } => {
+            let ext =
+                (d == Dialect::Postgres && columns.iter().any(|c| matches!(c.ty, FieldType::Vector(_)))).then(|| VECTOR_EXT.to_string());
+            ext.into_iter().chain(std::iter::once(create_table(d, table, columns, &none))).collect()
+        }
         Op::DropTable { table } => {
             // SQLite's FTS tables aren't dropped with the table they index.
             let fts = state.get(table).into_iter().flat_map(|t| &t.indexes).filter(|ix| d == Dialect::Sqlite && ix.fulltext);
             fts.map(|ix| sqlite_fts_drop(&ix.name)).chain(std::iter::once(format!("DROP TABLE {}", q(table)))).collect()
         }
         Op::Sql { sql } => vec![sql.clone()],
+        Op::AddIndex { table, index } if vector_column(state, table, index).is_some() => {
+            match d {
+                // HNSW: approximate nearest neighbours, fast at millions of rows, by cosine distance.
+                Dialect::Postgres => {
+                    vec![format!("CREATE INDEX {} ON {} USING hnsw ({} vector_cosine_ops)", q(&index.name), q(table), q(&index.columns[0]))]
+                }
+                _ => vec![], // searched in Rust on MySQL and SQLite: nothing to build
+            }
+        }
         Op::AddIndex { table, index } => {
             let cols = &state[table].columns;
             if d == Dialect::Mysql
@@ -684,6 +717,15 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
             }
             vec![create_index(d, table, index)]
         }
+        Op::DropIndex { table, name }
+            if d != Dialect::Postgres
+                && state
+                    .get(table)
+                    .and_then(|t| t.indexes.iter().find(|ix| &ix.name == name))
+                    .is_some_and(|ix| vector_column(state, table, ix).is_some()) =>
+        {
+            vec![]
+        }
         Op::DropIndex { table, name } => match d {
             Dialect::Mysql => vec![format!("DROP INDEX {} ON {}", q(name), q(table))],
             Dialect::Sqlite if state.get(table).is_some_and(|t| t.indexes.iter().any(|ix| &ix.name == name && ix.fulltext)) => {
@@ -694,6 +736,9 @@ pub fn op_sql(d: Dialect, state: &State, op: &Op) -> Result<Vec<String>> {
         // A UUID column's existing rows each need their own UUID: one shared default would break a
         // unique one (Django needs three hand-written migrations for this) and leave an `auto` one
         // all-zero forever. Add it nullable, give every row its own UUID, then tighten it.
+        Op::AddColumn { table, column, default } if d == Dialect::Postgres && matches!(column.ty, FieldType::Vector(_)) => {
+            vec![VECTOR_EXT.to_string(), format!("ALTER TABLE {} ADD COLUMN {}", q(table), col_def(d, column, default.as_ref()))]
+        }
         Op::AddColumn { table, column, .. } if column.ty == FieldType::Uuid && !column.null => {
             let loose = Column { null: true, unique: false, ..column.clone() };
             let (t, c) = (q(table), q(&column.name));

@@ -270,7 +270,7 @@ fn from_json(f: &FieldMeta, j: &JsonValue) -> Result<Value, String> {
         return if f.null { Ok(Value::Null) } else { Err("This field may not be null.".into()) };
     }
     match f.ty {
-        FieldType::Opaque => Err("This field is read-only.".into()),
+        FieldType::Opaque | FieldType::Vector(_) => Err("This field is read-only.".into()),
         FieldType::Int => j.as_i64().map(Value::Int).ok_or_else(|| "A valid integer is required.".into()),
         FieldType::Float => j.as_f64().filter(|x| x.is_finite()).map(Value::Float).ok_or_else(|| "A valid number is required.".into()),
         FieldType::Bool => j.as_bool().map(Value::Bool).ok_or_else(|| "Must be a valid boolean.".into()),
@@ -806,6 +806,7 @@ pub(crate) fn field_schema(f: &FieldMeta) -> JsonValue {
         FieldType::Varchar(n) => json!({ "type": "string", "maxLength": n }),
         FieldType::Text => json!({ "type": "string" }),
         FieldType::Encrypted => json!({ "type": "string", "description": "Stored encrypted; can't be searched or filtered" }),
+        FieldType::Vector(n) => json!({ "type": "array", "items": { "type": "number" }, "minItems": n, "maxItems": n, "readOnly": true }),
         FieldType::Uuid => json!({ "type": "string", "format": "uuid" }),
         FieldType::DateTime => json!({ "type": "string", "format": "date-time" }),
         FieldType::Date => json!({ "type": "string", "format": "date" }),

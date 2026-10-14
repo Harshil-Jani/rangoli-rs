@@ -10,3 +10,4 @@ Short, task-first guides. Every API they use is exercised by the test suite on P
 - [Keep personal data encrypted at rest](encrypt-personal-data.md)
 - [File uploads without the files touching your server](file-uploads.md)
 - [Caching that clears itself](caching.md)
+- [Vector search (semantic search) on your own database](vector-search.md)

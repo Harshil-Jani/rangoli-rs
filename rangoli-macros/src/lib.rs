@@ -75,10 +75,13 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
         let (mut private, mut encrypted) = (false, false);
         let (mut auto_now, mut auto_now_add, mut auto, mut index, mut choices) = (false, false, false, false, false);
         let mut default: Option<Tokens> = None;
+        let mut vector_dims: Option<u32> = None;
         for attr in f.attrs.iter().filter(|a| a.path().is_ident("field")) {
             attr.parse_nested_meta(|m| {
                 if m.path.is_ident("max_length") {
                     max_length = Some(m.value()?.parse::<LitInt>()?.base10_parse()?);
+                } else if m.path.is_ident("vector") {
+                    vector_dims = Some(m.value()?.parse::<LitInt>()?.base10_parse()?);
                 } else if m.path.is_ident("text") {
                     text = true;
                 } else if m.path.is_ident("unique") {
@@ -122,7 +125,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     fk = Some(m.value()?.parse()?);
                 } else {
                     return Err(m.error(
-                        "expected `max_length`, `text`, `unique`, `password`, `fk`, `cascade`, `index`, `choices`, `default`, `private`, `encrypted`, `auto`, `auto_now` or `auto_now_add`",
+                        "expected `max_length`, `text`, `unique`, `password`, `fk`, `cascade`, `index`, `choices`, `default`, `private`, `encrypted`, `vector`, `auto`, `auto_now` or `auto_now_add`",
                     ));
                 }
                 Ok(())
@@ -179,6 +182,10 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
             // The scale lives in the type (`Decimal<2>`), so ask it.
             "Decimal" => quote!(Decimal(<#inner as ::rangoli::orm::Kind>::KIND.decimal_places())),
             "Json" => quote!(Json),
+            "Vector" => match vector_dims {
+                Some(n) if n > 0 && n <= 16_000 => quote!(Vector(#n)),
+                _ => return Err(syn::Error::new_spanned(&f.ty, "a Vector field needs its size: #[field(vector = 384)] (1 to 16000)")),
+            },
             "choices" => {
                 let n = max_length.unwrap_or(32);
                 // Every stored value must fit the column: checked when the crate compiles.
@@ -359,14 +366,14 @@ fn unwrap_option(ty: &Type) -> (&Type, bool) {
 fn base_type(ty: &Type) -> syn::Result<&'static str> {
     if let Type::Path(p) = ty {
         if let Some(seg) = p.path.segments.last() {
-            for t in ["i64", "f64", "bool", "String", "DateTime", "Date", "Decimal", "Uuid", "Json"] {
+            for t in ["i64", "f64", "bool", "String", "DateTime", "Date", "Decimal", "Uuid", "Json", "Vector"] {
                 if seg.ident == t {
                     return Ok(t);
                 }
             }
         }
     }
-    Err(syn::Error::new_spanned(ty, "supported field types: i64, f64, bool, String, DateTime, Date, Decimal<P>, Uuid, Json, or a Choices enum with #[field(choices)] (optionally wrapped in Option)"))
+    Err(syn::Error::new_spanned(ty, "supported field types: i64, f64, bool, String, DateTime, Date, Decimal<P>, Uuid, Json, Vector, or a Choices enum with #[field(choices)] (optionally wrapped in Option)"))
 }
 
 /// `#[derive(Choices)]` on a fieldless enum: stored as a short string, shown with a label.

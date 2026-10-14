@@ -43,7 +43,7 @@ pub mod webhooks;
 pub use axum;
 pub use datetime::{Date, DateTime};
 pub use decimal::Decimal;
-pub use orm::{atomic, Json, Model};
+pub use orm::{atomic, Json, Model, Vector};
 pub use rangoli_macros::{migrations, Choices, Model};
 pub use serde;
 pub use uuid::Uuid;
@@ -56,7 +56,7 @@ pub mod prelude {
     pub use crate::tasks::Task;
     #[cfg(feature = "web")]
     pub use crate::web::{context, render};
-    pub use crate::{atomic, App, Choices, Date, DateTime, Decimal, Error, Json, Model, Result, Uuid};
+    pub use crate::{atomic, App, Choices, Date, DateTime, Decimal, Error, Json, Model, Result, Uuid, Vector};
 }
 
 use axum::extract::Request;

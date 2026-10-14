@@ -37,6 +37,9 @@ pub enum FieldType {
     /// A `String` stored encrypted (`#[field(encrypted)]`): AES-256-GCM ciphertext in a TEXT
     /// column, decrypted when read. Not searchable or filterable.
     Encrypted,
+    /// `crate::orm::Vector` of this many dimensions: pgvector's `vector(n)` on Postgres (with an
+    /// HNSW index when indexed), JSON text elsewhere. Kept out of the API and MCP output.
+    Vector(u32),
     /// A column of a type Rangoli doesn't model (a Django `timestamptz`, `numeric` or native
     /// `uuid`), found by introspecting an existing database. Read as text by casting in SQL,
     /// shown read-only, never written, filtered or sorted by Rangoli.
@@ -152,7 +155,7 @@ impl FieldType {
 impl FieldMeta {
     /// May this field travel over the API and MCP? Not passwords, not private fields.
     pub fn exposed(&self) -> bool {
-        !self.password && !self.private
+        !self.password && !self.private && !matches!(self.ty, FieldType::Vector(_))
     }
 
     /// Filled in by the framework, never by forms.
@@ -236,6 +239,44 @@ impl From<&str> for Value {
         Value::Text(v.to_owned())
     }
 }
+/// An embedding: a list of numbers to find similar rows by (`QuerySet::nearest`).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Vector(pub Vec<f32>);
+
+impl Vector {
+    /// Cosine distance: 0 for the same direction, 1 for unrelated, 2 for opposite.
+    pub fn cosine_distance(&self, other: &Vector) -> f32 {
+        let (mut dot, mut a, mut b) = (0f32, 0f32, 0f32);
+        for (x, y) in self.0.iter().zip(&other.0) {
+            dot += x * y;
+            a += x * x;
+            b += y * y;
+        }
+        if a == 0.0 || b == 0.0 {
+            return 1.0;
+        }
+        1.0 - dot / (a.sqrt() * b.sqrt())
+    }
+}
+
+impl From<Vector> for Value {
+    fn from(v: Vector) -> Self {
+        Value::Text(serde_json::to_string(&v.0).unwrap_or_else(|_| "[]".into()))
+    }
+}
+impl FromValue for Vector {
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::Text(s) => serde_json::from_str(&s).map(Vector).map_err(|e| Error::Decode(format!("stored vector is invalid: {e}"))),
+            v => mismatch(v, "vector"),
+        }
+    }
+}
+impl Kind for Vector {
+    const KIND: FieldType = FieldType::Vector(0);
+}
+
 impl From<Json> for Value {
     fn from(v: Json) -> Self {
         Value::Text(v.0.to_string())
@@ -436,6 +477,15 @@ impl Dialect {
         format!("CAST({src} AS {ty}) AS {}", self.quote(col))
     }
 
+    /// A placeholder for a value going into a column of type `ty`: Postgres needs `$n::vector`
+    /// to put text into a pgvector column.
+    pub fn ph_for(self, n: usize, ty: FieldType) -> String {
+        match (self, ty) {
+            (Dialect::Postgres, FieldType::Vector(_)) => format!("${n}::vector"),
+            _ => self.ph(n),
+        }
+    }
+
     pub fn ph(self, n: usize) -> String {
         match self {
             Dialect::Postgres => format!("${n}"),
@@ -502,9 +552,13 @@ fn bind<'q>(q: AnyQuery<'q>, v: &Value, ty: FieldType) -> AnyQuery<'q> {
             FieldType::Int | FieldType::DateTime | FieldType::Date | FieldType::Decimal(_) => q.bind(None::<i64>),
             FieldType::Float => q.bind(None::<f64>),
             FieldType::Bool => q.bind(None::<bool>),
-            FieldType::Varchar(_) | FieldType::Text | FieldType::Json | FieldType::Uuid | FieldType::Opaque | FieldType::Encrypted => {
-                q.bind(None::<String>)
-            }
+            FieldType::Varchar(_)
+            | FieldType::Text
+            | FieldType::Json
+            | FieldType::Uuid
+            | FieldType::Opaque
+            | FieldType::Encrypted
+            | FieldType::Vector(_) => q.bind(None::<String>),
         },
         Value::Bool(b) => q.bind(*b),
         Value::Int(i) => q.bind(*i),
@@ -641,7 +695,13 @@ fn read_raw(row: &AnyRow, col: &str, ty: FieldType) -> Result<Value> {
             Ok(v) => v.map_or(Value::Null, Value::Bool),
             Err(_) => int(row, col)?.map_or(Value::Null, |i| Value::Bool(i != 0)),
         },
-        FieldType::Varchar(_) | FieldType::Text | FieldType::Json | FieldType::Uuid | FieldType::Opaque | FieldType::Encrypted => {
+        FieldType::Varchar(_)
+        | FieldType::Text
+        | FieldType::Json
+        | FieldType::Uuid
+        | FieldType::Opaque
+        | FieldType::Encrypted
+        | FieldType::Vector(_) => {
             match row.try_get::<Option<String>, _>(col) {
                 Ok(v) => v.map_or(Value::Null, Value::Text),
                 // MySQL TEXT columns surface as BLOB through the Any driver.
@@ -992,7 +1052,7 @@ impl Query {
     pub fn select_sql(&self, d: Dialect, p: &mut Params) -> String {
         let cols: Vec<String> = std::iter::once(d.quote("id"))
             .chain(self.fields.iter().map(|f| match (f.ty, d) {
-                (FieldType::Opaque, _) => d.as_text(f.name, None),
+                (FieldType::Opaque, _) | (FieldType::Vector(_), Dialect::Postgres) => d.as_text(f.name, None),
                 // Django's booleans are `bool` on SQLite and TINYINT(1) on MySQL, which sqlx's Any
                 // driver can't decode; read them as integers (a no-op for Rangoli's own columns).
                 (FieldType::Bool, Dialect::Sqlite) => format!("CAST({q} AS INTEGER) AS {q}", q = d.quote(f.name)),
@@ -1103,7 +1163,7 @@ impl Query {
             .iter()
             .map(|(c, v, t)| {
                 p.push((v.clone(), *t));
-                format!("{} = {}", d.quote(c), d.ph(p.len()))
+                format!("{} = {}", d.quote(c), d.ph_for(p.len(), *t))
             })
             .collect();
         let mut sql = format!("UPDATE {} SET {}", d.quote(self.table), assigns.join(", "));
@@ -1119,7 +1179,7 @@ pub(crate) async fn insert_row(table: &str, cols: &[(&str, Value, FieldType)]) -
     crate::cache::changed(table);
     let d = db().dialect;
     let names: Vec<String> = cols.iter().map(|(c, ..)| d.quote(c)).collect();
-    let phs: Vec<String> = (1..=cols.len()).map(|i| d.ph(i)).collect();
+    let phs: Vec<String> = cols.iter().enumerate().map(|(i, (_, _, t))| d.ph_for(i + 1, *t)).collect();
     let body = match (cols.is_empty(), d) {
         (true, Dialect::Mysql) => "() VALUES ()".to_string(),
         (true, _) => "DEFAULT VALUES".to_string(),
@@ -1158,7 +1218,7 @@ async fn write_many<M: Model>(rows: &mut [M], conflict: Option<&'static str>) ->
             let mut phs = vec![];
             for (f, v) in meta.fields.iter().zip(row.values()) {
                 params.push((v, f.ty));
-                phs.push(d.ph(params.len()));
+                phs.push(d.ph_for(params.len(), f.ty));
             }
             tuples.push(format!("({})", phs.join(", ")));
         }
@@ -1472,6 +1532,48 @@ impl<M: Model> QuerySet<M> {
 
     pub async fn all(self) -> Result<Vec<M>> {
         self.q.fetch().await?.iter().map(M::from_row).collect()
+    }
+
+    /// The `k` rows whose `col` is nearest to `to` by cosine distance, closest first, with the
+    /// distance (0 = same direction). Filters still apply: `Doc::objects().filter(..).nearest(..)`.
+    /// On Postgres it's pgvector's `<=>`, using the HNSW index of an indexed vector field; on
+    /// MySQL and SQLite the distances are computed here over the filtered rows (fine into the
+    /// tens of thousands; use Postgres beyond that). Rows without a vector are skipped.
+    pub async fn nearest(mut self, col: Col<M, Vector>, to: &Vector, k: usize) -> Result<Vec<(M, f32)>> {
+        let at = M::meta().fields.iter().position(|f| f.name == col.name).ok_or(Error::NotFound)?;
+        self.q.filter.push(Node::IsNull(col.name, true));
+        let d = db().dialect;
+        let rows: Vec<M> = if d == Dialect::Postgres {
+            self.q.order.clear();
+            self.q.limit = None;
+            self.q.offset = None;
+            let mut p = vec![];
+            let mut sql = self.q.select_sql(d, &mut p);
+            p.push((Value::from(to.clone()), FieldType::Vector(0)));
+            sql.push_str(&format!(" ORDER BY {} <=> {} LIMIT {k}", d.quote(col.name), d.ph_for(p.len(), FieldType::Vector(0))));
+            // HNSW explores `ef_search` candidates. Measured recall@10 on 20,000 random 64-d vectors
+            // (tests/vector.rs): 0.69 at pgvector's default 40, 0.91 at 100, 0.98 at 200 (8 ms).
+            // Search wider, for this query only (`set_config(.., true)` = this transaction).
+            let ef = (k * 20).clamp(200, 1000).to_string();
+            atomic(async {
+                fetch_all("SELECT set_config('hnsw.ef_search', $1, true)", &vec![(Value::Text(ef), FieldType::Text)]).await?;
+                fetch_all(&sql, &p).await?.iter().map(M::from_row).collect::<Result<Vec<M>>>()
+            })
+            .await?
+        } else {
+            self.q.fetch().await?.iter().map(M::from_row).collect::<Result<_>>()?
+        };
+        let mut scored: Vec<(M, f32)> = rows
+            .into_iter()
+            .filter_map(|m| {
+                let v = Vector::from_value(m.values().swap_remove(at)).ok()?;
+                let dist = v.cosine_distance(to);
+                Some((m, dist))
+            })
+            .collect();
+        scored.sort_by(|a, b| a.1.total_cmp(&b.1));
+        scored.truncate(k);
+        Ok(scored)
     }
 
     /// Each row with the row its foreign key points at, in one query (Django's `select_related`):
