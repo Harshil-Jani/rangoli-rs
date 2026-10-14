@@ -25,6 +25,7 @@ pub mod django;
 mod embed;
 pub mod forms;
 mod health;
+pub mod inspect;
 pub mod jwt;
 pub mod limit;
 pub mod mcp;
@@ -562,6 +563,13 @@ impl App {
         self.task::<embed::Fill>().schedule("* * * * *", embed::Fill { table: M::TABLE.to_string() })
     }
 
+    /// Record every request's SQL (on by default with `RANGOLI_DEBUG=1`): staff see it under
+    /// **Requests** in the admin, and staff AI agents get an `inspect_requests` tool.
+    pub fn inspect_queries(self) -> Self {
+        inspect::enable();
+        self
+    }
+
     /// Sign requests in with JWTs (see [`jwt::JwtAuth`]): tokens you issue, or an identity
     /// provider's (Clerk, Auth0, Supabase Auth) checked against its JWKS keys.
     pub fn jwt(self, auth: jwt::JwtAuth) -> Self {
@@ -613,7 +621,11 @@ impl App {
             .merge(limited(api::router(self.api.clone()), self.api_rate))
             .merge(limited(mcp::router(self.api.clone()), self.mcp_rate))
             .layer(from_fn(auth::session_middleware))
-            .layer(from_fn(security_middleware));
+            .layer(from_fn(security_middleware))
+            .layer(from_fn(inspect::middleware));
+        if settings().debug {
+            inspect::enable();
+        }
         if let Some(c) = &self.cors {
             // Outside the cross-origin check, so it can vouch for listed origins and answer preflights.
             app = app.layer(axum::middleware::from_fn_with_state(c.clone(), cors::middleware));

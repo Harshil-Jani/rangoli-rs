@@ -655,18 +655,24 @@ fn note_query() {
 
 pub(crate) async fn fetch_all(sql: &str, params: &Params) -> Result<Vec<AnyRow>> {
     note_query();
-    match TX.try_with(Arc::clone) {
-        Ok(tx) => Ok(build(sql, params).fetch_all(&mut **tx.lock().await).await?),
-        Err(_) => Ok(build(sql, params).fetch_all(&db().pool).await?),
-    }
+    let started = std::time::Instant::now();
+    let out = match TX.try_with(Arc::clone) {
+        Ok(tx) => build(sql, params).fetch_all(&mut **tx.lock().await).await,
+        Err(_) => build(sql, params).fetch_all(&db().pool).await,
+    };
+    crate::inspect::record(sql, started);
+    Ok(out?)
 }
 
 pub(crate) async fn execute(sql: &str, params: &Params) -> Result<AnyQueryResult> {
     note_query();
-    match TX.try_with(Arc::clone) {
-        Ok(tx) => Ok(build(sql, params).execute(&mut **tx.lock().await).await?),
-        Err(_) => Ok(build(sql, params).execute(&db().pool).await?),
-    }
+    let started = std::time::Instant::now();
+    let out = match TX.try_with(Arc::clone) {
+        Ok(tx) => build(sql, params).execute(&mut **tx.lock().await).await,
+        Err(_) => build(sql, params).execute(&db().pool).await,
+    };
+    crate::inspect::record(sql, started);
+    Ok(out?)
 }
 
 /// Read one column as a `Value`, tolerating how each driver reports ints and bools.

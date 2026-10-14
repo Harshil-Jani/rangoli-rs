@@ -53,12 +53,12 @@ async fn nearest_neighbours() {
     for t in ["ve_doc", "ve_big"] {
         exec(&format!("DROP TABLE IF EXISTS {t}")).await;
     }
-    sqlx::query("DELETE FROM rangoli_migrations WHERE name LIKE '%ve_%'").execute(&db().pool).await.ok();
+    sqlx::query("DELETE FROM rangoli_migrations WHERE name LIKE '%vector_test'").execute(&db().pool).await.ok();
     let dir = std::env::temp_dir().join(format!("rangoli-vector-mig-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let app = rangoli::App::new().model::<Doc>().model::<Big>();
-    rangoli::migrate::make(&dir, app.models(), Some("ve")).unwrap();
+    rangoli::migrate::make(&dir, app.models(), Some("vector_test")).unwrap();
     rangoli::migrate::run(&dir).await.unwrap();
 
     for (title, lang, v) in [
@@ -85,7 +85,7 @@ async fn nearest_neighbours() {
     for t in ["ve_doc", "ve_big"] {
         exec(&format!("DROP TABLE {t}")).await;
     }
-    sqlx::query("DELETE FROM rangoli_migrations WHERE name LIKE '%ve_%'").execute(&db().pool).await.ok();
+    sqlx::query("DELETE FROM rangoli_migrations WHERE name LIKE '%vector_test'").execute(&db().pool).await.ok();
     std::fs::remove_dir_all(&dir).ok();
 }
 

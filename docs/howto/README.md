@@ -12,3 +12,4 @@ Short, task-first guides. Every API they use is exercised by the test suite on P
 - [Caching that clears itself](caching.md)
 - [Vector search (semantic search) on your own database](vector-search.md)
 - [A multi-tenant SaaS: every customer sees only their own data](multi-tenant.md)
+- [Find out why a page is slow (or ask Claude to)](slow-pages.md)

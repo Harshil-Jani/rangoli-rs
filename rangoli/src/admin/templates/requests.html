@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block crumbs %}<span aria-hidden="true">›</span>Requests{% endblock %}
+{% block content %}
+{% if not enabled %}
+<p class="message warning">Recording is off. Run with <code>RANGOLI_DEBUG=1</code> or add <code>App::inspect_queries()</code>.</p>
+{% endif %}
+<p class="intro">The last {{ requests|length }} requests and the SQL each ran, newest first. Rows marked <strong>repeated</strong> ran the same statement {{ repeat }}+ times, the usual sign of one query per row in a loop (N+1). Fix it with <code>select_related</code> or <code>prefetch</code>.</p>
+<div class="table-wrap"><table class="results">
+  <thead><tr><th scope="col">Request</th><th scope="col">Status</th><th scope="col">Time</th><th scope="col">Queries</th><th scope="col">In SQL</th></tr></thead>
+  <tbody>
+  {% for r in requests %}
+  <tr{% if r.repeats %} class="has-error"{% endif %}>
+    <td><details><summary><code>{{ r.method }} {{ r.path }}</code>{% if r.repeats %} <strong>repeated</strong>{% endif %}</summary>
+      {% for x in r.repeats %}<p class="field-error">{{ x.times }}× ({{ x.ms }} ms): <code>{{ x.sql }}</code></p>{% endfor %}
+      <ol>{% for s in r.statements %}<li><code>{{ s.sql }}</code> <span class="meta">{{ s.ms }} ms</span></li>{% endfor %}</ol>
+    </details></td>
+    <td>{{ r.status }}</td><td>{{ r.ms }} ms</td><td>{{ r.count }}</td><td>{{ r.db_ms }} ms</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endblock %}

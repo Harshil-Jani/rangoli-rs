@@ -56,6 +56,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         ("two_factor.html", include_str!("templates/two_factor.html")),
         ("oauth.html", include_str!("templates/oauth.html")),
         ("import.html", include_str!("templates/import.html")),
+        ("requests.html", include_str!("templates/requests.html")),
     ] {
         env.add_template(name, src).expect("admin template");
     }
@@ -70,6 +71,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         .route("/admin/agents/", get(agents_page).post(agents_submit))
         .route("/admin/2fa/", get(two_factor_page).post(two_factor_submit))
         .route("/admin/oauth/authorize", get(oauth_page).post(oauth_submit))
+        .route("/admin/requests/", get(requests_page))
         .route("/admin/static/{file}", get(static_file))
         .route("/admin/{table}/", get(list).post(bulk))
         .route("/admin/{table}/export.csv", get(export_csv))
@@ -396,6 +398,7 @@ fn apps(site: &Site, current: Option<&str>) -> Vec<minijinja::Value> {
 fn chrome(site: &Site, u: &User, current: Option<&'static ModelMeta>) -> minijinja::Value {
     context! {
         username => u.username,
+        inspecting => crate::inspect::enabled(),
         apps => apps(site, current.map(|m| m.table)),
         app => current.map(|m| app_of(m.table)),
         table => current.map(|m| m.table),
@@ -948,6 +951,23 @@ async fn export_csv(State(site): S, user: CurrentUser, uri: Uri, Path(table): Pa
         axum::body::Body::from_stream(body),
     )
         .into_response())
+}
+
+// ---------------------------------------------------------------- what requests did to the database
+
+async fn requests_page(State(site): S, user: CurrentUser, uri: Uri) -> Page {
+    let u = staff(&user, &uri)?;
+    let round = |x: f64| (x * 10.0).round() / 10.0;
+    let requests: Vec<_> = crate::inspect::recent()
+        .iter()
+        .map(|r| {
+            let repeats: Vec<_> = r.repeats().iter().map(|x| context! { sql => x.sql, times => x.times, ms => round(x.ms) }).collect();
+            let statements: Vec<_> = r.statements.iter().map(|s| context! { sql => s.sql, ms => round(s.ms) }).collect();
+            context! { method => r.method, path => r.path, status => r.status, ms => round(r.ms), db_ms => round(r.db_ms()), count => r.statements.len(), repeats, statements }
+        })
+        .collect();
+    let (enabled, repeat) = (crate::inspect::enabled(), crate::inspect::REPEAT_WARNING);
+    render(&site, "requests.html", context! { title => "Requests", requests, enabled, repeat, ..chrome(&site, u, None) })
 }
 
 // ---------------------------------------------------------------- CSV import

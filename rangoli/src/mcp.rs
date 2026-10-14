@@ -202,6 +202,16 @@ fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonV
             }));
         }
     }
+    if may_inspect(user, scope) {
+        out.push(json!({
+            "name": "inspect_requests",
+            "description": "See what recent requests did to the database, slowest first: time, number of queries, and statements repeated 5+ times in one request (an N+1: one query per row in a loop). Use it to explain why a page or API endpoint is slow.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Only requests whose path contains this, e.g. /api/orders" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 20, "description": "How many (default 5)" } } },
+            "annotations": { "readOnlyHint": true },
+        }));
+    }
     if scope.is_some_and(|s| s.needs_approval) {
         out.push(json!({
             "name": "approval_status",
@@ -215,9 +225,39 @@ fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonV
 
 /// Run a tool by sending the matching request through the JSON API as this user.
 /// `None` for an unknown tool name.
+/// The SQL log covers every table, so only staff, on tokens not limited to some tables.
+fn may_inspect(user: &CurrentUser, scope: Option<&TokenScope>) -> bool {
+    crate::inspect::enabled() && user.0.as_ref().is_some_and(|u| u.is_staff) && scope.is_none_or(|s| s.tables.is_none())
+}
+
+fn inspect_requests(args: &JsonValue) -> JsonValue {
+    let path = args["path"].as_str().unwrap_or("");
+    let limit = args["limit"].as_u64().unwrap_or(5).clamp(1, 20) as usize;
+    let mut found: Vec<_> = crate::inspect::recent().into_iter().filter(|r| r.path.contains(path)).collect();
+    found.sort_by(|a, b| b.ms.total_cmp(&a.ms));
+    let requests: Vec<JsonValue> = found
+        .iter()
+        .take(limit)
+        .map(|r| {
+            let mut slowest = r.statements.clone();
+            slowest.sort_by(|a, b| b.ms.total_cmp(&a.ms));
+            slowest.truncate(5);
+            json!({
+                "request": format!("{} {}", r.method, r.path), "status": r.status, "ms": r.ms, "queries": r.statements.len(),
+                "ms_in_sql": r.db_ms(), "repeated_statements": r.repeats(), "slowest_statements": slowest,
+            })
+        })
+        .collect();
+    let structured = json!({ "requests": requests });
+    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&structured).unwrap_or_default() }], "structuredContent": structured, "isError": false })
+}
+
 async fn call(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>, name: &str, args: &JsonValue) -> Option<JsonValue> {
     if name == "approval_status" {
         return Some(approval_status(user, args).await);
+    }
+    if name == "inspect_requests" {
+        return may_inspect(user, scope).then(|| inspect_requests(args));
     }
     let (table, op) = name.rsplit_once('_')?;
     mcp.models.iter().find(|(m, _)| m.table == table)?;
