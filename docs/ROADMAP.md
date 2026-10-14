@@ -37,14 +37,15 @@ Rangoli is built by reading what Django developers keep asking for and shipping 
 | CSV export and import in the admin | import-export #2097, #445 | round trip unchanged; formulas defused |
 | Vector search, and semantic search for agents | NF#145 | recall@10 0.98 at 8 ms on pgvector; agents never see others' rows |
 | `unique(a, b)` (unique_together) | Django staple | refused pair, accepted parts, on 3 databases |
+| Embeddings kept current automatically | follows `App::embed` | text edits re-embed, other writes cost no call (counted) |
+| Query inspector: N+1s for staff and their agents | silk#80, debug-toolbar#2048 | an N+1 route flagged, a select_related one not |
 | Webhooks, 2FA, inlines, QUERY, encrypted fields, undo, cursor paging, upsert, aggregates, approvals, scoped tokens, CORS, rate limits | NF#8 (73), NF#185 (41), Trac#9025, NF#12, Trac#8408, Trac#28919-adjacent, NF#204 | see README, each with its numbers |
 
 ## Next, in order
 
 | # | Build | Why (demand) | Proof |
 |---|---|---|---|
-| 1 | **Embeddings computed for you** when rows change, through the task queue | follows from `App::embed` | a saved row is searchable by meaning without app code |
-| 2 | **An MCP tool that explains slow queries** to an agent | silk#80, debug-toolbar#2048 | an agent finds the N+1 in a sample app |
+| 1 | **Filter lookups in the API and MCP:** `__gte`, `__lt`, `__in`, `__contains`, `__isnull` | django-filter#1134 (19👍), DRF habits | every lookup typed by its field, on 3 databases; private fields still refused |
 
 ## Decided against, with reasons
 
