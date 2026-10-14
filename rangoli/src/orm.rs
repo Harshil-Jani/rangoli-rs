@@ -552,11 +552,12 @@ pub async fn atomic<T, F: Future<Output = Result<T>>>(body: F) -> Result<T> {
         return out;
     }
     let tx: SharedTx = Arc::new(tokio::sync::Mutex::new(db().pool.begin().await?));
-    let out = TX.scope(tx.clone(), body).await;
+    let (out, written) = crate::cache::track(TX.scope(tx.clone(), body)).await;
     let tx = Arc::try_unwrap(tx).map_err(|_| Error::Config("a transaction outlived its atomic block".into()))?.into_inner();
     match out {
         Ok(v) => {
             tx.commit().await?;
+            crate::cache::after_commit(written);
             Ok(v)
         }
         Err(e) => {
@@ -1087,7 +1088,9 @@ impl Query {
         let d = db().dialect;
         let (mut p, mut sql) = (vec![], format!("DELETE FROM {}", d.quote(self.table)));
         self.push_where(d, &mut sql, &mut p);
-        Ok(execute(&sql, &p).await?.rows_affected())
+        let n = execute(&sql, &p).await?.rows_affected();
+        crate::cache::changed(self.table);
+        Ok(n)
     }
 
     pub async fn update(&self, sets: &[(&'static str, Value, FieldType)]) -> Result<u64> {
@@ -1105,12 +1108,15 @@ impl Query {
             .collect();
         let mut sql = format!("UPDATE {} SET {}", d.quote(self.table), assigns.join(", "));
         self.push_where(d, &mut sql, &mut p);
-        Ok(execute(&sql, &p).await?.rows_affected())
+        let n = execute(&sql, &p).await?.rows_affected();
+        crate::cache::changed(self.table);
+        Ok(n)
     }
 }
 
 /// Insert a row from `(column, value, type)` triples; returns the new id.
 pub(crate) async fn insert_row(table: &str, cols: &[(&str, Value, FieldType)]) -> Result<i64> {
+    crate::cache::changed(table);
     let d = db().dialect;
     let names: Vec<String> = cols.iter().map(|(c, ..)| d.quote(c)).collect();
     let phs: Vec<String> = (1..=cols.len()).map(|i| d.ph(i)).collect();
@@ -1134,6 +1140,7 @@ pub(crate) async fn insert_row(table: &str, cols: &[(&str, Value, FieldType)]) -
 /// `conflict` (a unique column), a row whose value is already there updates it instead (upsert).
 async fn write_many<M: Model>(rows: &mut [M], conflict: Option<&'static str>) -> Result<()> {
     let meta = M::meta();
+    crate::cache::changed(meta.table);
     if let Some(c) = conflict {
         if !meta.field(c).is_some_and(|f| f.unique) {
             return Err(Error::Config(format!("upsert on `{}.{c}` needs a unique column", meta.table)));
@@ -1237,6 +1244,7 @@ pub(crate) async fn insert_row_with_id(table: &str, id: i64, cols: &[(&str, Valu
     let names: Vec<String> = all.iter().map(|(c, ..)| d.quote(c)).collect();
     let phs: Vec<String> = (1..=all.len()).map(|i| d.ph(i)).collect();
     let sql = format!("INSERT INTO {} ({}) VALUES ({})", d.quote(table), names.join(", "), phs.join(", "));
+    crate::cache::changed(table);
     execute(&sql, &all.into_iter().map(|(_, v, t)| (v, t)).collect()).await.map(drop)
 }
 

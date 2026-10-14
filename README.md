@@ -42,7 +42,7 @@ It's also **1.3–3.1× faster than [django-bolt](bench/vs_bolt/RESULTS.md)** on
 
 ## What's included
 
-Admin · typed ORM · JSON API with OpenAPI · MCP server for AI agents · background jobs and cron · WebSockets and SSE · webhooks · 2FA · JWT and OAuth sign-in · row-level permissions · full-text search · S3 uploads · encrypted fields · zero-downtime migrations
+Admin · typed ORM · JSON API with OpenAPI · MCP server for AI agents · background jobs and cron · WebSockets and SSE · webhooks · 2FA · JWT and OAuth sign-in · row-level permissions · full-text search · S3 uploads · self-clearing cache · encrypted fields · zero-downtime migrations
 
 All in one binary, with no Celery, no Redis and no extra services.
 

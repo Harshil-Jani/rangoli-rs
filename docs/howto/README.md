@@ -9,3 +9,4 @@ Short, task-first guides. Every API they use is exercised by the test suite on P
 - [A live dashboard with Server-Sent Events](live-dashboard.md)
 - [Keep personal data encrypted at rest](encrypt-personal-data.md)
 - [File uploads without the files touching your server](file-uploads.md)
+- [Caching that clears itself](caching.md)

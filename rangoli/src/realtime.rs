@@ -53,6 +53,14 @@ pub fn publish(group: &str, message: impl Into<String>) -> usize {
 #[cfg(feature = "postgres")]
 pub use cluster::join_cluster;
 
+/// Send to subscribers on every *other* instance only (this one already acted on it).
+pub(crate) fn publish_to_others(group: &str, message: &str) {
+    #[cfg(feature = "postgres")]
+    cluster::forward(group, message);
+    #[cfg(not(feature = "postgres"))]
+    let _ = (group, message);
+}
+
 #[cfg(feature = "postgres")]
 mod cluster {
     use std::sync::OnceLock;

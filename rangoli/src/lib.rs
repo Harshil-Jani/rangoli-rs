@@ -16,6 +16,7 @@ pub mod admin;
 pub mod api;
 pub mod approvals;
 pub mod auth;
+pub mod cache;
 mod cors;
 mod crypt;
 pub mod datetime;
