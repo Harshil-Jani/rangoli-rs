@@ -71,6 +71,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         .route("/admin/oauth/authorize", get(oauth_page).post(oauth_submit))
         .route("/admin/static/{file}", get(static_file))
         .route("/admin/{table}/", get(list).post(bulk))
+        .route("/admin/{table}/export.csv", get(export_csv))
         .route("/admin/{table}/add", get(add_page).post(add_submit))
         .route("/admin/{table}/{id}/", get(change_page).post(change_submit))
         .route("/admin/{table}/{id}/delete", get(delete_page).post(delete_submit))
@@ -712,37 +713,7 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
     let searchable = search_fields(meta, opts);
     let filters = filter_fields(meta, opts);
 
-    let mut query = Query::new(meta);
-    query.filter.extend(row_filter(&site, meta, u));
-    if !q.is_empty() && !meta.search.is_empty() {
-        query.filter.push(orm::search_node(meta, &q)); // the model's full-text index
-    } else if !q.is_empty() && !searchable.is_empty() {
-        let pat = format!("%{}%", like_escape(&q));
-        query.filter.push(Node::Or(searchable.iter().map(|c| Node::Like(c, pat.clone())).collect()));
-    }
-    for f in &filters {
-        let Some(v) = param(&p, &format!("f.{}", f.name)) else { continue };
-        let node = match f.ty {
-            FieldType::Bool if v == "1" || v == "0" => Node::Cmp(f.name, "=", Value::Bool(v == "1"), FieldType::Bool),
-            FieldType::DateTime => match date_range_start(v) {
-                Some(since) => Node::Cmp(f.name, ">=", Value::Int(since.unix()), FieldType::DateTime),
-                None => continue,
-            },
-            FieldType::Date => match date_range_start(v) {
-                Some(since) => Node::Cmp(f.name, ">=", Value::Int(since.unix().div_euclid(86_400)), FieldType::Date),
-                None => continue,
-            },
-            FieldType::Int if f.fk.is_some() => match v.parse::<i64>() {
-                Ok(id) => Node::Cmp(f.name, "=", Value::Int(id), FieldType::Int),
-                Err(_) => continue,
-            },
-            FieldType::Varchar(_) if f.choices.is_some_and(|c| c.iter().any(|(val, _)| *val == v)) => {
-                Node::Cmp(f.name, "=", Value::Text(v.to_string()), f.ty)
-            }
-            _ => continue,
-        };
-        query.filter.push(node);
-    }
+    let mut query = changelist_query(&site, meta, u, &p, &q);
     let filtered = !query.filter.is_empty();
     let (full_count, estimated) = Query::new(meta).table_count().await.map_err(fail)?;
     let count = if filtered { query.count().await.map_err(fail)? } else { full_count };
@@ -836,6 +807,8 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
         filter_blocks.push(context! { label => label(f.name).to_lowercase(), options });
     }
     let keep: Vec<(String, String)> = p.iter().filter(|(k, _)| k.starts_with("f.") || k == "o").cloned().collect();
+    let shown: Vec<&(String, String)> = p.iter().filter(|(k, _)| k.starts_with("f.") || k == "q").collect();
+    let export_url = format!("/admin/{table}/export.csv?{}", serde_urlencoded::to_string(&shown).unwrap_or_default());
     let page_links: Vec<_> = (1..=pages)
         .filter(|n| *n == 1 || *n == pages || n.abs_diff(page) <= 3)
         .map(|n| context! { n, url => link(&[("p", &n.to_string())]), current => n == page })
@@ -848,11 +821,128 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
             title => format!("Select {} to change", verbose(meta.name)),
             messages => match action_message(&site, meta, &p) { Some(m) => Some(m), None => message(&p, u, "list").await },
             actions => options(&site, meta).actions.iter().map(|a| context! { name => a.name, label => a.label }).collect::<Vec<_>>(),
-            q, keep, count, full_count, filtered, what, page_links, estimated,
+            q, keep, count, full_count, filtered, what, page_links, estimated, export_url,
             columns => headers, rows, filters => filter_blocks, searchable => !searchable.is_empty() || !meta.search.is_empty(), clear_url => base.clone(),
             ..chrome(&site, u, Some(meta))
         },
     )
+}
+
+/// The rows a changelist shows for these parameters: row permissions, search and filters.
+/// The export uses it too, so a download is exactly what's on screen (every page of it).
+fn changelist_query(site: &Site, meta: &'static ModelMeta, u: &User, p: &[(String, String)], q: &str) -> Query {
+    let opts = options(site, meta);
+    let searchable = search_fields(meta, opts);
+    let filters = filter_fields(meta, opts);
+    let mut query = Query::new(meta);
+    query.filter.extend(row_filter(site, meta, u));
+    if !q.is_empty() && !meta.search.is_empty() {
+        query.filter.push(orm::search_node(meta, q)); // the model's full-text index
+    } else if !q.is_empty() && !searchable.is_empty() {
+        let pat = format!("%{}%", like_escape(q));
+        query.filter.push(Node::Or(searchable.iter().map(|c| Node::Like(c, pat.clone())).collect()));
+    }
+    for f in &filters {
+        let Some(v) = param(p, &format!("f.{}", f.name)) else { continue };
+        let node = match f.ty {
+            FieldType::Bool if v == "1" || v == "0" => Node::Cmp(f.name, "=", Value::Bool(v == "1"), FieldType::Bool),
+            FieldType::DateTime => match date_range_start(v) {
+                Some(since) => Node::Cmp(f.name, ">=", Value::Int(since.unix()), FieldType::DateTime),
+                None => continue,
+            },
+            FieldType::Date => match date_range_start(v) {
+                Some(since) => Node::Cmp(f.name, ">=", Value::Int(since.unix().div_euclid(86_400)), FieldType::Date),
+                None => continue,
+            },
+            FieldType::Int if f.fk.is_some() => match v.parse::<i64>() {
+                Ok(id) => Node::Cmp(f.name, "=", Value::Int(id), FieldType::Int),
+                Err(_) => continue,
+            },
+            FieldType::Varchar(_) if f.choices.is_some_and(|c| c.iter().any(|(val, _)| *val == v)) => {
+                Node::Cmp(f.name, "=", Value::Text(v.to_string()), f.ty)
+            }
+            _ => continue,
+        };
+        query.filter.push(node);
+    }
+    query
+}
+
+/// A cell that spreadsheets would run as a formula (`=`, `+`, `-`, `@`, tab, CR) gets a `'`
+/// in front: an exported CSV can't attack whoever opens it (CWE-1236).
+fn csv_cell(s: &str) -> String {
+    let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{s}") } else { s.to_string() };
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s
+    }
+}
+
+fn csv_value(v: &Value, f: &FieldMeta) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::Bool(b) => b.to_string(),
+        Value::Int(i) if f.ty == FieldType::DateTime => DateTime::from_unix(*i).to_string(),
+        Value::Int(i) if f.ty == FieldType::Date => crate::Date::from_days(*i).to_string(),
+        Value::Int(i) => match f.ty {
+            FieldType::Decimal(p) => crate::decimal::format_units(*i, p),
+            _ => i.to_string(),
+        },
+        Value::Float(x) => x.to_string(),
+        Value::Text(t) => t.clone(),
+    }
+}
+
+/// GET /admin/<table>/export.csv: every row the changelist shows, streamed in batches by id.
+/// Passwords, private, encrypted and excluded fields are left out: files travel.
+async fn export_csv(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>, UrlQuery(p): UrlQuery<Pairs>) -> Page {
+    let u = staff(&user, &uri)?;
+    let meta = model(&site, &table)?;
+    let q = param(&p, "q").unwrap_or("").trim().to_string();
+    let base = changelist_query(&site, meta, u, &p, &q);
+    let excluded = &options(&site, meta).exclude;
+    let cols: Vec<usize> = meta
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| !f.password && !f.private && f.ty != FieldType::Encrypted && !excluded.contains(&f.name))
+        .map(|(i, _)| i)
+        .collect();
+    let header: Vec<String> = std::iter::once("id".to_string()).chain(cols.iter().map(|i| meta.fields[*i].name.to_string())).collect();
+    let first = format!("{}\r\n", header.join(","));
+    // State: the last id sent, or None when finished.
+    let stream = futures_util::stream::unfold(Some(0i64), move |after| {
+        let (mut q, cols) = (base.clone(), cols.clone());
+        async move {
+            let after = after?;
+            q.filter.push(Node::Cmp("id", ">", Value::Int(after), FieldType::Int));
+            q.order = vec![("id", false)];
+            q.limit = Some(2_000);
+            let rows = match q.rows().await {
+                Ok(r) => r,
+                Err(e) => return Some((Err(std::io::Error::other(e.to_string())), None)),
+            };
+            if rows.is_empty() {
+                return None;
+            }
+            let mut chunk = String::new();
+            for (id, vals) in &rows {
+                let cells = std::iter::once(id.to_string()).chain(cols.iter().map(|i| csv_cell(&csv_value(&vals[*i], &meta.fields[*i]))));
+                chunk.push_str(&cells.collect::<Vec<_>>().join(","));
+                chunk.push_str("\r\n");
+            }
+            let next = (rows.len() == 2_000).then(|| rows.last().map_or(after, |(id, _)| *id));
+            Some((Ok::<_, std::io::Error>(bytes::Bytes::from(chunk)), next))
+        }
+    });
+    let body = futures_util::StreamExt::chain(futures_util::stream::once(async move { Ok(bytes::Bytes::from(first)) }), stream);
+    let filename = format!("attachment; filename=\"{table}.csv\"");
+    Ok((
+        [(header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()), (header::CONTENT_DISPOSITION, filename)],
+        axum::body::Body::from_stream(body),
+    )
+        .into_response())
 }
 
 /// The result of a custom action. Only registered action names are shown, with their

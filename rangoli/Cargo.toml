@@ -45,7 +45,7 @@ libsqlite3-sys = { version = "0.30", optional = true }
 # Everything on by default; an API-only Postgres service can use
 # `default-features = false, features = ["postgres"]` and compile none of the rest.
 default = ["admin", "web", "realtime", "webhooks", "postgres", "mysql", "sqlite"]
-admin = ["dep:minijinja"]
+admin = ["dep:minijinja", "dep:futures-util", "dep:bytes"]
 web = ["dep:minijinja", "tower-http/fs"]
 realtime = ["axum/ws", "dep:futures-util"]
 webhooks = ["dep:tokio-rustls", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes", "dep:webpki-roots"]

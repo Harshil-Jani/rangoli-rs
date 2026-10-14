@@ -1179,6 +1179,34 @@ async fn scenario() {
     assert!(Doc::get(b_doc).await.is_ok(), "a bulk delete skips rows outside the policy");
     assert!(Doc::get(a_doc).await.is_err(), "and deletes the ones inside");
 
+    // ---- CSV export: what the changelist shows, all of it, safely
+    for (title, team) in [("=HYPERLINK(\"http://evil\")", 1), ("Plan, \"quoted\"\nnext line", 1), ("other team", 2)] {
+        Doc { id: None, title: title.into(), team }.save().await.unwrap();
+    }
+    let (status, headers, csv) = send(get("/admin/e2e_doc/export.csv", &ann_cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers[header::CONTENT_DISPOSITION].to_str().unwrap().contains("e2e_doc.csv"));
+    assert!(csv.starts_with("id,title,team\r\n"), "{csv}");
+    assert!(!csv.contains("other team") && !csv.contains("plan B"), "the export follows row permissions: {csv}");
+    assert!(csv.contains(r#""'=HYPERLINK(""http://evil"")""#), "formulas are defused: {csv}");
+    assert!(csv.contains("\"Plan, \"\"quoted\"\"\nnext line\""), "commas, quotes and newlines are escaped: {csv}");
+    let (_, _, csv) = send(get("/admin/e2e_doc/export.csv?q=other", &cookie)).await;
+    assert_eq!(csv.lines().count(), 2, "search applies: {csv}");
+    let mut many_docs: Vec<Doc> = (0..2_500).map(|i| Doc { id: None, title: format!("bulk {i}"), team: 3 }).collect();
+    Doc::bulk_create(&mut many_docs).await.unwrap();
+    let (_, _, csv) = send(get("/admin/e2e_doc/export.csv", &cookie)).await;
+    assert_eq!(
+        csv.lines().count() as i64 - 1,
+        Doc::objects().count().await.unwrap() + 1,
+        "every row, past one 2,000-row batch (one title spans two lines)"
+    );
+    let (_, _, csv) = send(get("/admin/e2e_note/export.csv", &cookie)).await;
+    assert!(csv.starts_with("id,title,owner_id\r\n"), "private and encrypted fields stay out: {csv}");
+    let (_, _, csv) = send(get("/admin/rangoli_user/export.csv", &cookie)).await;
+    assert!(!csv.contains("password") && !csv.contains("argon2"), "passwords never: {}", &csv[..80]);
+    let (_, _, page) = send(get("/admin/e2e_doc/?q=plan", &cookie)).await;
+    assert!(page.replace("&#x2f;", "/").contains("/admin/e2e_doc/export.csv?q=plan"), "the link carries the current search");
+
     let rjwt = jwt_auth.issue(&root, std::time::Duration::from_secs(900)).unwrap();
     assert_eq!(send(bearer("GET", "/admin/", &rjwt, "")).await.0, StatusCode::FORBIDDEN, "a JWT can't open the admin");
     let (_, _, body) = send(bearer("GET", &format!("/api/e2e_note/?owner_id={bid}"), &at, "")).await;
