@@ -133,6 +133,12 @@ fn indexes_of(meta: &ModelMeta) -> Vec<Index> {
             unique: false,
             fulltext: false,
         })
+        .chain(meta.unique_together.iter().map(|cols| Index {
+            name: index_name(meta.table, cols, true),
+            columns: cols.iter().map(|c| c.to_string()).collect(),
+            unique: true,
+            fulltext: false,
+        }))
         .chain((!meta.search.is_empty()).then(|| Index {
             name: index_name(meta.table, &["search"], false),
             columns: meta.search.iter().map(|c| c.to_string()).collect(),

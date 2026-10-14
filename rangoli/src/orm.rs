@@ -186,6 +186,8 @@ pub struct ModelMeta {
     pub indexes: &'static [&'static [&'static str]],
     /// Text fields with a full-text index, from `#[model(search(title, body))]`.
     pub search: &'static [&'static str],
+    /// Column sets unique together (Django's `unique_together`), from `#[model(unique(a, b))]`.
+    pub unique_together: &'static [&'static [&'static str]],
 }
 
 #[derive(Debug)]

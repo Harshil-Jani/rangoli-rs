@@ -2068,7 +2068,16 @@ mod tests {
         }
         static FIELDS: [FieldMeta; 3] =
             [field("title", FieldType::Text), field("body", FieldType::Text), field("author_id", FieldType::Int)];
-        let meta = ModelMeta { name: "Post", table: "blog_post", display: None, fields: &FIELDS, m2m: &[], indexes: &[], search: &[] };
+        let meta = ModelMeta {
+            name: "Post",
+            table: "blog_post",
+            display: None,
+            fields: &FIELDS,
+            m2m: &[],
+            indexes: &[],
+            search: &[],
+            unique_together: &[],
+        };
         let old = [Value::Text("a".into()), Value::Text("b".into()), Value::Int(1)];
         let cols = |t: &str, b: &str, a: i64| {
             vec![

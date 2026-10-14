@@ -272,6 +272,7 @@ pub async fn introspect() -> Result<Schema> {
             m2m: &[],
             indexes: &[],
             search: &[],
+            unique_together: &[],
         }));
         schema.models.push(meta);
     }

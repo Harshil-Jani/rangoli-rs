@@ -23,6 +23,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
     let mut m2m: Vec<(syn::Ident, syn::Path)> = vec![];
     let mut indexes: Vec<Vec<String>> = vec![];
     let mut search: Vec<String> = vec![];
+    let mut uniques: Vec<Vec<String>> = vec![];
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("model")) {
         attr.parse_nested_meta(|m| {
             if m.path.is_ident("table") {
@@ -36,6 +37,13 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     Ok(())
                 })?;
                 indexes.push(cols);
+            } else if m.path.is_ident("unique") {
+                let mut cols = vec![];
+                m.parse_nested_meta(|col| {
+                    cols.push(col.path.get_ident().ok_or_else(|| col.error("expected a field name"))?.to_string());
+                    Ok(())
+                })?;
+                uniques.push(cols);
             } else if m.path.is_ident("search") {
                 m.parse_nested_meta(|col| {
                     search.push(col.path.get_ident().ok_or_else(|| col.error("expected a field name"))?.to_string());
@@ -48,7 +56,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     Ok(())
                 })?;
             } else {
-                return Err(m.error("expected `table`, `display`, `index(a, b)`, `search(a, b)` or `m2m(name = Model)`"));
+                return Err(m.error("expected `table`, `display`, `index(a, b)`, `unique(a, b)`, `search(a, b)` or `m2m(name = Model)`"));
             }
             Ok(())
         })?;
@@ -267,12 +275,13 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
     }
 
     let field_names: Vec<String> = fields.named.iter().map(|f| f.ident.as_ref().unwrap().to_string()).collect();
-    for cols in &indexes {
+    for cols in indexes.iter().chain(&uniques) {
         if let Some(bad) = cols.iter().find(|c| !field_names.contains(c) || *c == "id") {
-            return Err(syn::Error::new_spanned(ident, format!("index(...) names unknown field `{bad}`")));
+            return Err(syn::Error::new_spanned(ident, format!("index(...)/unique(...) names unknown field `{bad}`")));
         }
     }
     let index_tokens = indexes.iter().map(|cols| quote!(&[#(#cols),*]));
+    let unique_tokens = uniques.iter().map(|cols| quote!(&[#(#cols),*]));
     for col in &search {
         let text = fields.named.iter().find(|f| f.ident.as_ref().is_some_and(|i| i == col)).is_some_and(|f| {
             let ty = &f.ty;
@@ -320,6 +329,7 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
                     name: #name_s, table: #table, display: #display, fields: &[#(#metas),*], m2m: &[#(#m2m_metas),*],
                     indexes: &[#(#index_tokens),*],
                     search: &[#(#search),*],
+                    unique_together: &[#(#unique_tokens),*],
                 };
                 &META
             }
