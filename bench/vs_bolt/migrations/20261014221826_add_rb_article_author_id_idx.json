@@ -1,0 +1,14 @@
+{
+  "operations": [
+    {
+      "op": "add_index",
+      "table": "rb_article",
+      "index": {
+        "name": "rb_article_author_id_idx",
+        "columns": [
+          "author_id"
+        ]
+      }
+    }
+  ]
+}

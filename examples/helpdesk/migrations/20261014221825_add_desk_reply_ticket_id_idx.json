@@ -1,0 +1,24 @@
+{
+  "operations": [
+    {
+      "op": "add_index",
+      "table": "desk_reply",
+      "index": {
+        "name": "desk_reply_ticket_id_idx",
+        "columns": [
+          "ticket_id"
+        ]
+      }
+    },
+    {
+      "op": "add_index",
+      "table": "desk_ticket",
+      "index": {
+        "name": "desk_ticket_customer_id_idx",
+        "columns": [
+          "customer_id"
+        ]
+      }
+    }
+  ]
+}

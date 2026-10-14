@@ -121,8 +121,11 @@ pub fn columns_of(meta: &ModelMeta) -> Vec<Column> {
 }
 
 fn indexes_of(meta: &ModelMeta) -> Vec<Index> {
-    let single = meta.fields.iter().filter(|f| f.index).map(|f| std::slice::from_ref(&f.name));
-    single
+    // Foreign keys are indexed, as in Django: owned_by lists, admin filters, reverse lookups
+    // and every cascade delete look rows up by them. (MySQL indexes them implicitly and drops
+    // that implicit index once this one exists, so there's never a duplicate.)
+    let single = meta.fields.iter().filter(|f| f.index || (f.fk.is_some() && !f.unique)).map(|f| std::slice::from_ref(&f.name));
+    let mut out: Vec<Index> = single
         .chain(meta.indexes.iter().copied())
         .map(|cols| Index {
             name: index_name(meta.table, cols, false),
@@ -136,7 +139,9 @@ fn indexes_of(meta: &ModelMeta) -> Vec<Index> {
             unique: false,
             fulltext: true,
         }))
-        .collect()
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 /// The join table behind a many-to-many relation: one row per pair, each pair once.
@@ -210,6 +215,7 @@ fn apply(state: &mut State, op: &Op) -> std::result::Result<(), String> {
                 return Err(format!("index `{}` uses unknown column `{table}.{c}`", index.name));
             }
             t.indexes.push(index.clone());
+            t.indexes.sort_by(|a, b| a.name.cmp(&b.name)); // order carries no meaning; keep states comparable
         }
         Op::DropIndex { table, name } => {
             let t = state.get_mut(table).ok_or(missing(table))?;
@@ -299,6 +305,7 @@ pub fn builtin() -> Vec<Migration> {
         ("00000000000009_rangoli_user_totp", include_str!("migrations/00000000000009_rangoli_user_totp.json")),
         ("00000000000010_rangoli_webhook", include_str!("migrations/00000000000010_rangoli_webhook.json")),
         ("00000000000011_rangoli_oauth", include_str!("migrations/00000000000011_rangoli_oauth.json")),
+        ("00000000000012_rangoli_fk_indexes", include_str!("migrations/00000000000012_rangoli_fk_indexes.json")),
     ]
     .into_iter()
     .map(|(name, json)| Migration { name: name.into(), ..serde_json::from_str(json).expect("built-in migration") })

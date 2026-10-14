@@ -1,0 +1,44 @@
+{
+  "operations": [
+    {
+      "op": "add_index",
+      "table": "rangoli_api_token",
+      "index": {
+        "name": "rangoli_api_token_user_id_idx",
+        "columns": [
+          "user_id"
+        ]
+      }
+    },
+    {
+      "op": "add_index",
+      "table": "rangoli_oauth_code",
+      "index": {
+        "name": "rangoli_oauth_code_user_id_idx",
+        "columns": [
+          "user_id"
+        ]
+      }
+    },
+    {
+      "op": "add_index",
+      "table": "rangoli_pending_change",
+      "index": {
+        "name": "rangoli_pending_change_user_id_idx",
+        "columns": [
+          "user_id"
+        ]
+      }
+    },
+    {
+      "op": "add_index",
+      "table": "rangoli_session",
+      "index": {
+        "name": "rangoli_session_user_id_idx",
+        "columns": [
+          "user_id"
+        ]
+      }
+    }
+  ]
+}

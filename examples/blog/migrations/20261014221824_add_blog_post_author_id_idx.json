@@ -1,0 +1,14 @@
+{
+  "operations": [
+    {
+      "op": "add_index",
+      "table": "blog_post",
+      "index": {
+        "name": "blog_post_author_id_idx",
+        "columns": [
+          "author_id"
+        ]
+      }
+    }
+  ]
+}
