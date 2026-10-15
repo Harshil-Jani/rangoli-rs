@@ -1241,6 +1241,17 @@ async fn schema(State(site): S) -> Json<JsonValue> {
             "post": { "summary": format!("Create a {}", meta.name), "requestBody": body,
                 "responses": responses("201", ok(item.clone()), &[("400", invalid.clone()), ("202", pending.clone())]) },
         }));
+        let fields_param = |name: &str, d: &str| json!({ "name": name, "in": "query", "schema": { "type": "string" }, "description": d });
+        paths.insert(format!("/api/{}/aggregate", meta.table), json!({
+            "get": { "summary": format!("Count and total {} rows", meta.name),
+                "description": "Takes the list's filters and search; totals cover exactly the rows that list would return.",
+                "parameters": [fields_param("sum", "Number fields to add up, comma-separated"), fields_param("avg", "Number fields to average"),
+                    fields_param("min", "Fields to find the smallest value of"), fields_param("max", "Fields to find the largest value of"),
+                    fields_param("group_by", "One field: `groups`, each with its value, count and totals")],
+                "responses": responses("200", ok(json!({ "type": "object", "properties": {
+                    "count": { "type": "integer" }, "sum": { "type": "object" }, "avg": { "type": "object" }, "min": { "type": "object" }, "max": { "type": "object" },
+                    "groups": { "type": "array", "items": { "type": "object" } }, "truncated": { "type": "boolean" } } })), &[("400", invalid.clone())]) },
+        }));
         paths.insert(format!("/api/{}/{{id}}", meta.table), json!({
             "parameters": id_param,
             "get": { "summary": format!("Get a {}", meta.name), "responses": responses("200", ok(item.clone()), &[("404", missing.clone())]) },
