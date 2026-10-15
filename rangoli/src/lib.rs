@@ -315,7 +315,10 @@ pub struct App {
     api_rate: Option<u32>,
     mcp_rate: Option<u32>,
     cors: Option<Arc<cors::Cors>>,
+    commands: Vec<(&'static str, &'static str, Command)>,
 }
+
+type Command = Box<dyn Fn(Vec<String>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> + Send + Sync>;
 
 impl Default for App {
     fn default() -> Self {
@@ -455,6 +458,7 @@ impl App {
             api_rate: None,
             mcp_rate: Some(120),
             cors: None,
+            commands: vec![],
             routes: Router::new(),
         }
     }
@@ -636,6 +640,26 @@ impl App {
         self
     }
 
+    /// A command of your own, run like the built-in ones (Django's management commands):
+    /// `cargo run -- close_stale 30` calls `run(vec!["30"])` with the database connected.
+    ///
+    /// ```ignore
+    /// app.command("close_stale", "close tickets idle for N days", |args| async move {
+    ///     let days: i64 = args.first().and_then(|d| d.parse().ok()).unwrap_or(30);
+    ///     let n = Ticket::objects().filter(Ticket::UPDATED_AT.lt(DateTime::now().add_days(-days))).update(..).await?;
+    ///     println!("closed {n}");
+    ///     Ok(())
+    /// })
+    /// ```
+    pub fn command<F, Fut>(mut self, name: &'static str, help: &'static str, run: F) -> Self
+    where
+        F: Fn(Vec<String>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
+        self.commands.push((name, help, Box::new(move |args| Box::pin(run(args)))));
+        self
+    }
+
     /// A tool of your own for AI agents, next to the generated ones (see [`mcp::Tool`]).
     pub fn mcp_tool(self, tool: mcp::Tool) -> Self {
         mcp::add_tool(tool);
@@ -751,6 +775,9 @@ impl App {
                 "commands:\n  runserver [addr]            serve the app (default {})\n  migrate [--check]           apply pending migrations\n  makemigrations [name] [--check]\n  createsuperuser [username]  password from RANGOLI_PASSWORD or a prompt\n  createtoken <username> [name] [--days N] [--read-only] [--needs-approval] [--tables a,b] [--max-writes N]  print a new API token (shown once)\n  worker                      run background tasks (RANGOLI_WORKERS loops)",
                 s.bind
             );
+            for (name, help, _) in &self.commands {
+                println!("  {name:<27} {help}");
+            }
             return Ok(());
         }
 
@@ -849,7 +876,10 @@ impl App {
                     })
                     .await?;
             }
-            other => return Err(Error::Config(format!("unknown command `{other}` (try `help`)"))),
+            other => match self.commands.iter().find(|(name, ..)| *name == other) {
+                Some((.., run)) => run(args[1..].to_vec()).await?,
+                None => return Err(Error::Config(format!("unknown command `{other}` (try `help`)"))),
+            },
         }
         Ok(())
     }

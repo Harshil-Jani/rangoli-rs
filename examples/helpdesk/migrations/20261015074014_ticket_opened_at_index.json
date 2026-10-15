@@ -1,0 +1,14 @@
+{
+  "operations": [
+    {
+      "op": "add_index",
+      "table": "desk_ticket",
+      "index": {
+        "name": "desk_ticket_opened_at_idx",
+        "columns": [
+          "opened_at"
+        ]
+      }
+    }
+  ]
+}
