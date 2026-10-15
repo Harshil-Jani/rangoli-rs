@@ -58,6 +58,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         ("import.html", include_str!("templates/import.html")),
         ("requests.html", include_str!("templates/requests.html")),
         ("password_reset.html", include_str!("templates/password_reset.html")),
+        ("bulk_edit.html", include_str!("templates/bulk_edit.html")),
     ] {
         env.add_template(name, src).expect("admin template");
     }
@@ -1088,6 +1089,85 @@ async fn requests_page(State(site): S, user: CurrentUser, uri: Uri) -> Page {
     render(&site, "requests.html", context! { title => "Requests", requests, enabled, repeat, ..chrome(&site, u, None) })
 }
 
+// ---------------------------------------------------------------- bulk edit
+
+/// "Edit selected": set some fields on many rows, each checked like a normal edit, all saved
+/// together (with a History entry each) or none.
+async fn bulk_edit(site: &Site, u: &User, meta: &'static ModelMeta, table: &str, rows: &[(i64, Vec<Value>)], f: &Pairs) -> Page {
+    let opts = options(site, meta);
+    let editable: Vec<&'static FieldMeta> = meta
+        .fields
+        .iter()
+        .filter(|fm| {
+            !fm.is_auto()
+                && !fm.password
+                && !fm.unique
+                && !matches!(fm.ty, FieldType::Opaque | FieldType::Vector(_) | FieldType::Encrypted)
+                && !opts.readonly_fields.contains(&fm.name)
+                && !opts.exclude.contains(&fm.name)
+        })
+        .collect();
+    let posted: HashMap<String, String> = f.iter().cloned().collect();
+    let chosen: Vec<&'static FieldMeta> = editable.iter().copied().filter(|fm| posted.contains_key(&format!("set_{}", fm.name))).collect();
+    let mut errors: Vec<String> = vec![];
+    if param(f, "post") == Some("yes") && !chosen.is_empty() {
+        let mut plans = vec![];
+        for (id, vals) in rows {
+            let mut form = raw_values(meta, vals);
+            for fm in &chosen {
+                match posted.get(fm.name) {
+                    Some(v) => form.insert(fm.name.to_string(), v.clone()),
+                    None => form.remove(fm.name), // an unticked checkbox: false
+                };
+            }
+            match validate_all(meta, &form, Some(*id), &fixed_fields(meta, opts, &form)).await {
+                Ok(cols) => plans.push((*id, cols)),
+                Err(errs) => {
+                    let mut msgs: Vec<String> = errs.into_iter().map(|(k, v)| format!("{k}: {v}")).collect();
+                    msgs.sort();
+                    errors.push(format!("{}: {}", repr(meta, *id, vals), msgs.join(" ")));
+                }
+            }
+        }
+        if errors.is_empty() {
+            let names: Vec<String> = chosen.iter().map(|fm| label(fm.name).to_lowercase()).collect();
+            let message = format!("Changed {} (bulk edit).", names.join(", "));
+            let saved = crate::atomic(async {
+                for (id, cols) in &plans {
+                    let mut q = Query::new(meta);
+                    q.filter.push(by_id(*id));
+                    q.update(cols).await?;
+                    still_visible(site, meta, u, *id).await?;
+                    let vals = row_values(meta, *id).await?;
+                    log(u, meta, *id, &repr(meta, *id, &vals), CHANGE, message.clone()).await?;
+                }
+                Ok(())
+            })
+            .await;
+            match saved {
+                Ok(()) => {
+                    let qs = serde_urlencoded::to_string([("applied", "edit_selected".to_string()), ("n", plans.len().to_string())]).unwrap();
+                    return Ok(Redirect::to(&format!("/admin/{table}/?{qs}")).into_response());
+                }
+                Err(e) => errors.push(db_error_message(&e).map_or_else(|| e.to_string(), str::to_string)),
+            }
+        }
+    }
+    let ids: Vec<i64> = rows.iter().map(|(id, _)| *id).collect();
+    let all = form_fields(site, meta, &posted, &HashMap::new(), false, &[], "", &[]).await?;
+    let fields: Vec<minijinja::Value> = all
+        .into_iter()
+        .filter(|v| v.get_attr("name").ok().and_then(|n| n.as_str().map(str::to_string)).is_some_and(|n| editable.iter().any(|fm| fm.name == n)))
+        .map(|v| {
+            let name = v.get_attr("name").ok().and_then(|n| n.as_str().map(str::to_string)).unwrap_or_default();
+            context! { set => posted.contains_key(&format!("set_{name}")), ..v }
+        })
+        .collect();
+    let title = format!("Edit {} {}", rows.len(), verbose_plural(meta.name));
+    let page = render(site, "bulk_edit.html", context! { title, n => rows.len(), ids, fields, errors, ..chrome(site, u, Some(meta)) })?;
+    Ok(if errors.is_empty() { page } else { (StatusCode::UNPROCESSABLE_ENTITY, page).into_response() })
+}
+
 // ---------------------------------------------------------------- foreign-key search
 
 /// GET /admin/<table>/autocomplete?q=: up to 20 `<option>`s for a foreign-key search box,
@@ -1331,9 +1411,12 @@ fn action_message(site: &Site, meta: &ModelMeta, p: &[(String, String)]) -> Opti
     if let Some(a) = param(p, "failed").and_then(find) {
         return Some(context! { level => "error", text => format!("The “{}” action failed, so nothing was changed.", a.label) });
     }
-    let a = param(p, "applied").and_then(find)?;
     let n: usize = param(p, "n")?.parse().ok()?;
     let what = if n == 1 { verbose(meta.name) } else { verbose_plural(meta.name) };
+    if param(p, "applied") == Some("edit_selected") {
+        return Some(context! { level => "success", text => format!("Changed {n} {what}.") });
+    }
+    let a = param(p, "applied").and_then(find)?;
     Some(context! { level => "success", text => format!("Applied “{}” to {n} {what}.", a.label) })
 }
 
@@ -1370,6 +1453,9 @@ async fn bulk(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
     let ids: Vec<i64> = rows.iter().map(|(id, _)| *id).collect(); // only rows this staff member may touch
     let chosen = param(&f, "action").unwrap_or("");
     allowed(meta.table, if chosen == "delete_selected" { "delete" } else { "change" })?;
+    if chosen == "edit_selected" {
+        return bulk_edit(&site, u, meta, &table, &rows, &f).await;
+    }
     if chosen != "delete_selected" {
         let Some(action) = options(&site, meta).actions.iter().find(|a| a.name == chosen).cloned() else {
             return Ok(Redirect::to(&format!("/admin/{table}/?warn=noaction")).into_response());

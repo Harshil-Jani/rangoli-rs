@@ -23,6 +23,7 @@
         <label for="action-select">Action</label>
         <select name="action" id="action-select">
           <option value="" selected>Choose an action</option>
+          <option value="edit_selected">Edit selected {{ plural|lower }}</option>
           <option value="delete_selected">Delete selected {{ plural|lower }}</option>
           {% for a in actions %}<option value="{{ a.name }}">{{ a.label }}</option>{% endfor %}
         </select>

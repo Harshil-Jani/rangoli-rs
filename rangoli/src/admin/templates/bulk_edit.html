@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block crumbs %}<span aria-hidden="true">›</span>Edit {{ n }} {{ plural|lower }}{% endblock %}
+{% block content %}
+{% if errors %}<div class="message error" role="alert"><p>Nothing was saved:</p><ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
+<p class="intro">Tick the fields to set on all {{ n }} selected {{ plural|lower }}. Untouched fields keep each row's own value. Every row is checked like a normal edit, and all of them save together or none do.</p>
+<form method="post" action="/admin/{{ table }}/" hx-boost="false">
+  <input type="hidden" name="action" value="edit_selected">
+  <input type="hidden" name="post" value="yes">
+  {% for id in ids %}<input type="hidden" name="_selected_action" value="{{ id }}">{% endfor %}
+  <fieldset class="panel fields">
+    {% for f in fields %}
+    <div class="field">
+      <label class="field-label"><input type="checkbox" name="set_{{ f.name }}"{% if f.set %} checked{% endif %}> {{ f.label }}</label>
+      <div class="field-control">
+        {% if f.kind == "select" %}<select name="{{ f.name }}" aria-label="{{ f.label }}">{% for o in f.options %}<option value="{{ o[0] }}"{% if o[0] == f.value %} selected{% endif %}>{{ o[1] }}</option>{% endfor %}</select>
+        {% elif f.kind == "checkbox" %}<label class="checkbox"><input type="checkbox" name="{{ f.name }}"{% if f.value %} checked{% endif %}> Yes</label>
+        {% elif f.kind == "textarea" or f.kind == "json" %}<textarea name="{{ f.name }}" rows="3" aria-label="{{ f.label }}">{{ f.value }}</textarea>
+        {% else %}<input name="{{ f.name }}" value="{{ f.value }}" aria-label="{{ f.label }}" type="{% if f.kind == "number" or f.kind == "float" %}number{% elif f.kind == "date" %}date{% elif f.kind == "datetime" %}datetime-local{% else %}text{% endif %}"{% if f.kind == "float" %} step="any"{% endif %}>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </fieldset>
+  <div class="submit-row"><button type="submit" class="btn primary">Save {{ n }} {{ plural|lower }}</button> <a href="/admin/{{ table }}/" class="btn">Cancel</a></div>
+</form>
+{% endblock %}
