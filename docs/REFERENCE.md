@@ -401,16 +401,20 @@ Operations: `create_table`, `drop_table`, `add_column`, `drop_column`, `alter_co
 
 ## What's not done yet
 
-This is the roadmap, in rough order. Nothing here is implemented yet:
+Still missing, roughly in order:
 
-1. **More admin customization**: inlines, fieldsets, per-model permissions, groups
-2. **Form rendering helpers** (widgets from model metadata); template filters for dates and choices
-3. **API permissions**: token scopes, and per-object rules beyond ownership
-4. **Model signals**; real-time across instances on MySQL and SQLite (Postgres has it)
-5. Password reset, groups, email, caching, i18n, multi-database routing
-6. **WebAssembly**, explored later: the same validation rules running in the browser and on the server, and sandboxed WASM plugins
+1. **Admin permissions per model, and groups.** Staff see every model registered in the admin. Row-level rules (`ModelAdmin::rows`) narrow the rows, but there's nothing like Django's `has_change_permission` per model, and no groups.
+2. **Fieldsets** in admin forms, form-rendering helpers for your own pages, and template filters for dates and choices.
+3. **Model signals,** and realtime across several servers on MySQL and SQLite (Postgres has it).
+4. **Internationalization and multi-database routing.**
+5. **WebAssembly,** explored later: the same validation rules running in the browser and on the server.
 
-Known limits today: the admin's foreign-key select loads at most 1000 rows, and changing `unique`/`fk` on an existing column needs an `sql` operation on Postgres and MySQL.
+**Known limits:**
+
+- The admin's foreign-key select loads at most 1,000 rows.
+- Changing a foreign key on an existing column needs an `sql` operation on Postgres and MySQL.
+- Vector search on MySQL and SQLite compares vectors in your app; it isn't indexed.
+- The cache lives in each process's memory.
 
 ## Only what you use
 

@@ -456,9 +456,8 @@ RANGOLI_DEBUG=1 cargo run</code></pre>
   <h2>Where Django is still ahead</h2>
   <ul class="gaps">
     <li><strong>Twenty years of ecosystem.</strong> Thousands of packages, books, hosting guides and people who know it. Rangoli is brand new.</li>
-    <li><strong>Joins.</strong> No <code>select_related</code> yet, so the example homepage takes 4 queries where tuned Django takes 2.</li>
-    <li><strong>Admin depth.</strong> No inlines, custom actions, fieldsets, per-model permissions or groups.</li>
-    <li><strong>The rest of the batteries.</strong> Internationalization, email, caching, password reset, savepoints in nested transactions, API tokens, and real-time groups across several servers are on the roadmap.</li>
+    <li><strong>Admin depth.</strong> No per-model permissions, groups or fieldsets yet (row-level permissions, inlines and custom actions are there).</li>
+    <li><strong>The rest of the batteries.</strong> Internationalization, model signals and multi-database routing aren't built yet.</li>
     <li><strong>SQLite tuning.</strong> Getting full SQLite throughput needs one config file in your project. Postgres and MySQL need nothing.</li>
   </ul>
   <p>The full list is in the <a href="{REPO}/blob/main/docs/REFERENCE.md#whats-not-done-yet">README</a>.</p>
