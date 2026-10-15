@@ -27,6 +27,7 @@ pub mod events;
 pub mod forms;
 mod health;
 pub mod hooks;
+pub mod i18n;
 pub mod inspect;
 pub mod jwt;
 pub mod limit;
@@ -613,6 +614,15 @@ impl App {
         self.task::<hooks::Run>()
     }
 
+    /// Translations from `dir` (`en.json`, `hi.json`, ...): see [`i18n`]. Each request gets the
+    /// best language for its `?lang=`, cookie or `Accept-Language`.
+    pub fn locales(self, dir: impl AsRef<std::path::Path>) -> Self {
+        if let Err(e) = i18n::load(dir.as_ref()) {
+            panic!("rangoli: translations: {e}");
+        }
+        self
+    }
+
     /// Sign requests in with JWTs (see [`jwt::JwtAuth`]): tokens you issue, or an identity
     /// provider's (Clerk, Auth0, Supabase Auth) checked against its JWKS keys.
     pub fn jwt(self, auth: jwt::JwtAuth) -> Self {
@@ -665,7 +675,8 @@ impl App {
             .merge(limited(mcp::router(self.api.clone()), self.mcp_rate))
             .layer(from_fn(auth::session_middleware))
             .layer(from_fn(security_middleware))
-            .layer(from_fn(inspect::middleware));
+            .layer(from_fn(inspect::middleware))
+            .layer(from_fn(i18n::middleware));
         if settings().debug {
             inspect::enable();
         }

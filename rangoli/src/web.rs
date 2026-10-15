@@ -28,6 +28,18 @@ pub(crate) fn set_dir(dir: PathBuf) {
 fn environment() -> Environment<'static> {
     let mut env = Environment::new();
     env.set_loader(minijinja::path_loader(DIR.get().cloned().unwrap_or_else(|| crate::settings().templates.clone())));
+    // Translations: {{ t("key") }}, {{ t("hello", name=user) }}, {{ t_n("cart.items", n) }}, {{ lang() }}.
+    env.add_function("t", |key: String, kwargs: minijinja::value::Kwargs| -> String {
+        let mut s = crate::i18n::t(&key);
+        for name in kwargs.args() {
+            if let Ok(v) = kwargs.get::<minijinja::Value>(name) {
+                s = s.replace(&format!("{{{name}}}"), &v.to_string());
+            }
+        }
+        s
+    });
+    env.add_function("t_n", |key: String, count: i64| crate::i18n::t_n(&key, count));
+    env.add_function("lang", crate::i18n::language);
     env
 }
 
