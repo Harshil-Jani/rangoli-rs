@@ -558,6 +558,12 @@ fn lookup(meta: &'static ModelMeta, key: &str, raw: &str) -> Result<Node, Respon
 fn filtered(meta: &'static ModelMeta, opts: &Options, user: &CurrentUser, p: &HashMap<String, String>) -> Result<Query, Response> {
     let mut q = Query::new(meta);
     q.filter.extend(restrict(opts, user));
+    add_filters(meta, &mut q, p)?;
+    Ok(q)
+}
+
+/// `?field__lookup=` filters and `?search=` onto `q` (the admin's "Ask" uses it too).
+pub(crate) fn add_filters(meta: &'static ModelMeta, q: &mut Query, p: &HashMap<String, String>) -> Result<(), Response> {
     // `?field=value`, or `?field__lookup=value` (Django's lookups), each value typed by the field.
     for (k, raw) in p {
         if matches!(
@@ -580,7 +586,7 @@ fn filtered(meta: &'static ModelMeta, opts: &Options, user: &CurrentUser, p: &Ha
             .collect();
         q.filter.push(Node::Or(text));
     }
-    Ok(q)
+    Ok(())
 }
 
 /// `GET /api/<table>/aggregate?sum=total&avg=total&group_by=status&paid=true`: counts and
@@ -596,11 +602,16 @@ async fn aggregate(
 ) -> Reply {
     let (meta, opts) = endpoint(&site, &table, &user, &scope, false)?;
     let q = filtered(meta, opts, &user, &p)?;
+    Ok(Json(aggregate_of(meta, &q, &p).await?).into_response())
+}
+
+/// The counts and totals `p` asks for over the rows `q` selects.
+pub(crate) async fn aggregate_of(meta: &'static ModelMeta, q: &Query, p: &HashMap<String, String>) -> Result<JsonValue, Response> {
     let bad = |msg: String| problem(StatusCode::BAD_REQUEST, &msg);
     let field = |name: &str| meta.field(name).filter(|f| f.exposed()).ok_or_else(|| bad(format!("Unknown field `{name}`.")));
     let mut measures: Vec<(&str, &'static FieldMeta)> = vec![];
     for func in ["sum", "avg", "min", "max"] {
-        for name in param(&p, func).unwrap_or("").split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        for name in param(p, func).unwrap_or("").split(',').map(str::trim).filter(|n| !n.is_empty()) {
             let f = field(name)?;
             let ok = match func {
                 "sum" | "avg" => matches!(f.ty, FieldType::Int | FieldType::Float | FieldType::Decimal(_)),
@@ -626,14 +637,14 @@ async fn aggregate(
         ("avg", Value::Float(x)) => json!(x / 10f64.powi(f.ty.decimal_places() as i32)),
         (_, v) => value_json(f, &v),
     };
-    let Some(key) = param(&p, "group_by") else {
+    let Some(key) = param(p, "group_by") else {
         let mut out = Map::new();
         out.insert("count".into(), json!(q.count().await.map_err(fail)?));
         for (func, f) in &measures {
             let v = q.aggregate(&func.to_uppercase(), f.name, f.ty).await.map_err(fail)?;
             out.entry(*func).or_insert_with(|| json!({}))[f.name] = value(func, f, v);
         }
-        return Ok(Json(JsonValue::Object(out)).into_response());
+        return Ok(JsonValue::Object(out));
     };
     let k = field(key)?;
     if matches!(k.ty, FieldType::Json | FieldType::Encrypted | FieldType::Vector(_)) {
@@ -658,7 +669,7 @@ async fn aggregate(
             }
         }
     }
-    Ok(Json(json!({ "groups": groups, "truncated": truncated })).into_response())
+    Ok(json!({ "groups": groups, "truncated": truncated }))
 }
 
 const MAX_GROUPS: usize = 1000;
@@ -728,6 +739,10 @@ async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &st
     let previous = (offset > 0).then(|| page(offset.saturating_sub(limit)));
     Ok(Json(json!({ "count": count, "next": next, "previous": previous, "results": results })).into_response())
 }
+
+/// Answers a prompt with text: any model you like (`App::llm`).
+pub type LlmFn = dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::Result<String>> + Send>> + Send + Sync;
+pub(crate) static LLM: std::sync::OnceLock<Box<LlmFn>> = std::sync::OnceLock::new();
 
 /// Turns text into the vectors a model's `#[field(vector = N)]` holds (`App::embed`).
 pub type EmbedFn = dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::Result<Vec<f32>>> + Send>> + Send + Sync;

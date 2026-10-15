@@ -53,6 +53,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         ("history.html", include_str!("templates/history.html")),
         ("password_change.html", include_str!("templates/password_change.html")),
         ("agents.html", include_str!("templates/agents.html")),
+        ("ask.html", include_str!("templates/ask.html")),
         ("two_factor.html", include_str!("templates/two_factor.html")),
         ("oauth.html", include_str!("templates/oauth.html")),
         ("import.html", include_str!("templates/import.html")),
@@ -72,6 +73,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         .route("/admin/password_change/", get(password_page).post(password_submit))
         .route("/admin/agents/", get(agents_page).post(agents_submit))
         .route("/admin/agents/pause", post(agents_pause))
+        .route("/admin/ask/", get(ask_page).post(ask_submit))
         .route("/admin/2fa/", get(two_factor_page).post(two_factor_submit))
         .route("/admin/oauth/authorize", get(oauth_page).post(oauth_submit))
         .route("/admin/requests/", get(requests_page))
@@ -250,6 +252,155 @@ async fn agents_submit(State(site): S, user: CurrentUser, uri: Uri, headers: axu
         "agents.html",
         context! { title => "Connect an AI agent", name, token, can, server => server_name(&url), url, tokens, choices, ..chrome(&site, u, None) },
     )
+}
+
+// ---------------------------------------------------------------- ask your data
+
+/// What the model may query: tables this staff member can view, described by name, type,
+/// choices and help text. No rows: nothing stored in the app ever reaches the model.
+fn ask_schema(site: &Site) -> (Vec<&'static ModelMeta>, String) {
+    let tables: Vec<&'static ModelMeta> = site
+        .admin
+        .iter()
+        .copied()
+        .filter(|m| (!m.table.starts_with("rangoli_") || m.table == "rangoli_user") && can(m.table, "view"))
+        .collect();
+    let mut out = String::new();
+    for m in &tables {
+        let hidden = &options(site, m).exclude;
+        out.push_str(&format!("table {} ({}):\n  id: int\n", m.table, verbose_plural(m.name)));
+        for f in
+            m.fields.iter().filter(|f| f.exposed() && !hidden.contains(&f.name) && !matches!(f.ty, FieldType::Encrypted | FieldType::Json))
+        {
+            let ty = match f.ty {
+                FieldType::Int if f.fk.is_some() => format!("id of a {} row", f.fk.unwrap_or("")),
+                FieldType::Int => "int".into(),
+                FieldType::Float => "float".into(),
+                FieldType::Bool => "bool".into(),
+                FieldType::DateTime => "datetime (YYYY-MM-DDTHH:MM:SS)".into(),
+                FieldType::Date => "date (YYYY-MM-DD)".into(),
+                FieldType::Decimal(_) => "decimal".into(),
+                _ => "text".into(),
+            };
+            let choices =
+                f.choices.map(|c| format!(", one of: {}", c.iter().map(|(v, _)| *v).collect::<Vec<_>>().join(", "))).unwrap_or_default();
+            let help = f.help.map(|h| format!(" ({h})")).unwrap_or_default();
+            out.push_str(&format!("  {}: {ty}{choices}{help}\n", f.name));
+        }
+    }
+    (tables, out)
+}
+
+fn ask_prompt(schema: &str, question: &str) -> String {
+    format!(
+        "You turn questions about a database into one JSON query. Today is {}.\n\nTables:\n{schema}\n\
+Reply with only a JSON object:\n\
+{{\"table\": \"...\", \"filters\": {{\"field\": value, \"field__gte\": value}}, \"search\": \"words\", \"ordering\": \"field or -field\", \"limit\": 20,\n \"sum\": \"fields\", \"avg\": \"fields\", \"min\": \"fields\", \"max\": \"fields\", \"group_by\": \"field\", \"count\": true}}\n\
+Leave out keys you don't need. Lookups: exact (no suffix), ne, gt, gte, lt, lte, in (comma-separated), contains, startswith, isnull.\n\
+For how many / how much questions use count, sum, avg, min, max or group_by; to list rows leave those out.\n\
+If the tables can't answer it, reply {{\"error\": \"why\"}}.\n\nQuestion: {question}",
+        crate::Date::today()
+    )
+}
+
+async fn ask_page(State(site): S, user: CurrentUser, uri: Uri) -> Page {
+    let u = staff(&user, &uri)?;
+    let ready = crate::api::LLM.get().is_some();
+    render(&site, "ask.html", context! { title => "Ask your data", ready, ..chrome(&site, u, None) })
+}
+
+async fn ask_submit(State(site): S, user: CurrentUser, uri: Uri, Form(f): Form<Pairs>) -> Page {
+    let u = staff(&user, &uri)?;
+    let question = param(&f, "q").unwrap_or("").trim().to_string();
+    let page = |ctx: minijinja::Value| {
+        render(
+            &site,
+            "ask.html",
+            context! { title => "Ask your data", ready => true, question, ..minijinja::value::merge_maps([ctx, chrome(&site, u, None)]) },
+        )
+    };
+    let Some(llm) = crate::api::LLM.get() else { return page(context! { error => "No language model is set up (App::llm)." }) };
+    if question.is_empty() || question.chars().count() > 500 {
+        return page(context! { error => "Ask a question of up to 500 characters." });
+    }
+    let (tables, schema) = ask_schema(&site);
+    let reply = match llm(ask_prompt(&schema, &question)).await {
+        Ok(r) => r,
+        Err(e) => return page(context! { error => format!("The model didn't answer: {e}") }),
+    };
+    // The reply is data: one JSON object, checked like any API request. It can only read.
+    let json = reply.find('{').zip(reply.rfind('}')).and_then(|(a, b)| serde_json::from_str::<serde_json::Value>(&reply[a..=b]).ok());
+    let Some(obj) = json.as_ref().and_then(|j| j.as_object()) else {
+        return page(context! { error => "The model's answer wasn't a query. Try rephrasing." });
+    };
+    if let Some(why) = obj.get("error").and_then(|e| e.as_str()) {
+        return page(context! { error => why });
+    }
+    let query = serde_json::to_string_pretty(obj).unwrap_or_default();
+    let Some(meta) = obj.get("table").and_then(|t| t.as_str()).and_then(|t| tables.iter().copied().find(|m| m.table == t)) else {
+        return page(context! { error => "The model picked a table you can't view.", query });
+    };
+    let text = |v: &serde_json::Value| v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+    let mut p: HashMap<String, String> =
+        obj.get("filters").and_then(|v| v.as_object()).into_iter().flatten().map(|(k, v)| (k.clone(), text(v))).collect();
+    let hidden = &options(&site, meta).exclude;
+    if p.keys().any(|k| hidden.contains(&k.split("__").next().unwrap_or(""))) {
+        return page(context! { error => "The model filtered on a field the admin hides.", query });
+    }
+    for k in ["search", "sum", "avg", "min", "max", "group_by"] {
+        if let Some(v) = obj.get(k).filter(|v| !v.is_null()) {
+            p.insert(k.into(), text(v));
+        }
+    }
+    let mut q = Query::new(meta);
+    q.filter.extend(row_filter(&site, meta, u));
+    let checked = crate::api::add_filters(meta, &mut q, &p);
+    let error_text = |r: Response| async move {
+        let bytes = axum::body::to_bytes(r.into_body(), 64 * 1024).await.unwrap_or_default();
+        let j: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        j["detail"].as_str().map_or_else(|| j.to_string(), str::to_owned)
+    };
+    if let Err(r) = checked {
+        return page(context! { error => format!("The query didn't check out: {}", error_text(r).await), query });
+    }
+    let noun = title_plural(meta.name);
+    let wants_totals = ["sum", "avg", "min", "max", "group_by"].iter().any(|k| p.contains_key(*k))
+        || obj.get("count") == Some(&serde_json::Value::Bool(true));
+    if wants_totals {
+        return match crate::api::aggregate_of(meta, &q, &p).await {
+            Ok(v) => page(context! { query, noun, totals => serde_json::to_string_pretty(&v).unwrap_or_default() }),
+            Err(r) => page(context! { error => format!("The query didn't check out: {}", error_text(r).await), query }),
+        };
+    }
+    if let Some(o) = obj.get("ordering").and_then(|o| o.as_str()) {
+        let (desc, name) = o.strip_prefix('-').map_or((false, o), |n| (true, n));
+        if let Some(f) = meta.field(name).filter(|f| f.exposed()) {
+            q.order = vec![(f.name, desc)];
+        }
+    }
+    let count = q.count().await.map_err(fail)?;
+    q.limit = Some(obj.get("limit").and_then(|l| l.as_u64()).unwrap_or(20).clamp(1, 100));
+    let shown: Vec<&FieldMeta> = meta
+        .fields
+        .iter()
+        .filter(|f| f.exposed() && !hidden.contains(&f.name) && !matches!(f.ty, FieldType::Text | FieldType::Json | FieldType::Encrypted))
+        .take(5)
+        .collect();
+    let rows: Vec<_> = q
+        .rows()
+        .await
+        .map_err(fail)?
+        .iter()
+        .map(|(id, vals)| {
+            let cells: Vec<String> = shown
+                .iter()
+                .map(|f| meta.fields.iter().position(|x| x.name == f.name).map_or(String::new(), |i| display(&vals[i], f)))
+                .collect();
+            context! { url => format!("/admin/{}/{id}/", meta.table), repr => repr(meta, *id, vals), cells }
+        })
+        .collect();
+    let headers: Vec<String> = shown.iter().map(|f| label(f.name)).collect();
+    page(context! { query, noun, count, rows, headers })
 }
 
 // ---------------------------------------------------------------- MCP sign-in (OAuth consent)

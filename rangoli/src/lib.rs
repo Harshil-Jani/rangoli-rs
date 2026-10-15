@@ -583,6 +583,25 @@ impl App {
         self
     }
 
+    /// A language model for the admin's "Ask": a question in plain English becomes a read-only
+    /// query, run as the staff member asking. Only table and field names go to the model, never
+    /// rows. Any provider works; this is the one function it calls:
+    ///
+    /// ```ignore
+    /// app.llm(|prompt| async move { my_provider::complete(&prompt).await.map_err(|e| rangoli::Error::Task(e.to_string())) })
+    /// ```
+    pub fn llm<F, Fut>(self, f: F) -> Self
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<String>> + Send + 'static,
+    {
+        let boxed: Box<api::LlmFn> = Box::new(move |prompt| Box::pin(f(prompt)));
+        if api::LLM.set(boxed).is_err() {
+            panic!("rangoli: App::llm can be set once per process");
+        }
+        self
+    }
+
     /// Keep `vector` in step with the text in `from`: when a write changes that text, the old
     /// vector is cleared in the same statement and a background task computes the new one with
     /// [`App::embed`]'s function (also once a minute, for anything a failed call left behind).

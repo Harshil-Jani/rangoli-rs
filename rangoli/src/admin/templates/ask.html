@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block crumbs %}<span aria-hidden="true">›</span>Ask your data{% endblock %}
+{% block content %}
+{% if not ready %}
+<p class="intro">Ask questions in plain English, like “paid orders over ₹500 this month” or “signups per day last week”. Set a language model with <code>App::llm</code> to turn this on.</p>
+{% else %}
+<form method="post" class="panel fields">
+  <div class="field">
+    <label class="field-label" for="id_q">Question</label>
+    <div class="field-control"><input type="text" name="q" id="id_q" maxlength="500" value="{{ question }}" placeholder="How many open tickets per status?" required autofocus>
+    <p class="help">The model sees only your table and field names, never your rows. It writes a read-only query, run with your permissions.</p></div>
+  </div>
+  <div class="submit-row"><button type="submit" class="btn primary">Ask</button></div>
+</form>
+{% endif %}
+{% if error %}<p class="message error" role="alert">{{ error }}</p>{% endif %}
+{% if totals %}<section class="panel"><h2>{{ noun }}</h2><pre><code>{{ totals }}</code></pre></section>{% endif %}
+{% if rows is defined %}
+<table class="panel">
+  <caption>{{ count }} {{ noun }}{% if count > rows|length %}, first {{ rows|length }}{% endif %}</caption>
+  <thead><tr><th scope="col">Row</th>{% for h in headers %}<th scope="col">{{ h }}</th>{% endfor %}</tr></thead>
+  <tbody>{% for r in rows %}<tr><th scope="row"><a href="{{ r.url }}">{{ r.repr }}</a></th>{% for c in r.cells %}<td>{{ c }}</td>{% endfor %}</tr>{% else %}<tr><td colspan="{{ headers|length + 1 }}">Nothing matches.</td></tr>{% endfor %}</tbody>
+</table>
+{% endif %}
+{% if query %}<details><summary>The query it ran</summary><pre><code>{{ query }}</code></pre></details>{% endif %}
+{% endblock %}
