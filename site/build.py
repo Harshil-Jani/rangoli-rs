@@ -533,6 +533,10 @@ home = f'''<!doctype html>
   </dl>
 </section>
 <section>
+  <h2>In the box</h2>
+  <p class="lede">Admin, typed ORM, JSON API, MCP server for AI agents, semantic search, jobs and cron, live updates, webhooks, email, 2FA, row-level permissions, full-text search, CSV import and export, S3 uploads, a self-clearing cache, an N+1 finder. One binary. No Celery, no Redis.</p>
+</section>
+<section>
   <h2>Try it</h2>
   <p>On your Django database (nothing in it changes):</p>
   <pre><code>RANGOLI_DATABASE_URL=postgres://user:pw@host/db cargo run -p rangoli-django</code></pre>
