@@ -206,6 +206,17 @@ fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonV
             }));
         }
     }
+    if user.0.as_ref().is_some_and(|u| u.is_staff) {
+        out.push(json!({
+            "name": "recent_changes",
+            "description": "What changed recently and who changed it (the admin's History): newest first, with the row, what changed, and whether it came from a person, the API or an AI agent.",
+            "inputSchema": { "type": "object", "properties": {
+                "table": { "type": "string", "description": "Only this table" },
+                "since": { "type": "string", "description": "Only changes from this date or time on, e.g. 2026-10-15 or 2026-10-15T09:00" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200, "description": "How many (default 50)" } } },
+            "annotations": { "readOnlyHint": true },
+        }));
+    }
     if may_inspect(user, scope) {
         out.push(json!({
             "name": "inspect_requests",
@@ -256,9 +267,51 @@ fn inspect_requests(args: &JsonValue) -> JsonValue {
     json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&structured).unwrap_or_default() }], "structuredContent": structured, "isError": false })
 }
 
+async fn recent_changes(scope: Option<&TokenScope>, args: &JsonValue) -> JsonValue {
+    use crate::admin::LogEntry;
+    use crate::orm::Model;
+    let limit = args["limit"].as_u64().unwrap_or(50).clamp(1, 200);
+    let mut q = LogEntry::objects().order_by(LogEntry::ID.desc()).limit(limit);
+    if let Some(t) = args["table"].as_str().filter(|t| !t.is_empty()) {
+        q = q.filter(LogEntry::TABLE_NAME.eq(t));
+    }
+    if let Some(since) = args["since"].as_str().and_then(crate::DateTime::parse) {
+        q = q.filter(LogEntry::AT.gte(since.unix()));
+    }
+    if let Some(tables) = scope.and_then(|s| s.tables.clone()) {
+        q = q.filter(LogEntry::TABLE_NAME.is_in(tables)); // a table-scoped token only sees its tables' history
+    }
+    let entries = match q.all().await {
+        Ok(e) => e,
+        Err(e) => return json!({ "content": [{ "type": "text", "text": e.to_string() }], "isError": true }),
+    };
+    let ids: Vec<i64> = entries.iter().map(|e| e.user_id).collect();
+    let names = crate::auth::User::in_bulk(ids).await.unwrap_or_default();
+    let changes: Vec<JsonValue> = entries
+        .iter()
+        .map(|e| {
+            json!({
+                "at": crate::DateTime::from_unix(e.at).to_string(),
+                "table": e.table_name, "id": e.object_id, "object": e.object_repr,
+                "action": match e.action { 1 => "added", 2 => "changed", _ => "deleted" },
+                "message": e.message,
+                "by": names.get(&e.user_id).map(|u| u.username.clone()),
+            })
+        })
+        .collect();
+    let structured = json!({ "changes": changes });
+    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&structured).unwrap_or_default() }], "structuredContent": structured, "isError": false })
+}
+
 async fn call(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>, name: &str, args: &JsonValue) -> Option<JsonValue> {
     if name == "approval_status" {
         return Some(approval_status(user, args).await);
+    }
+    if name == "recent_changes" {
+        if !user.0.as_ref().is_some_and(|u| u.is_staff) {
+            return None;
+        }
+        return Some(recent_changes(scope, args).await);
     }
     if name == "inspect_requests" {
         return may_inspect(user, scope).then(|| inspect_requests(args));
