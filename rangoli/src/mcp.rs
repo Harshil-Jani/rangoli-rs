@@ -166,9 +166,13 @@ fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonV
                         "ordering": { "type": "string", "description": "A field to sort by; prefix with - for descending" },
                         "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
                         "offset": { "type": "integer", "minimum": 0 },
-                        "cursor": { "type": "string", "description": "For big tables: pass \"\" for the first page, then each page's next cursor (ordered by id; no total count)" } } }),
+                        "cursor": { "type": "string", "description": "For big tables: pass \"\" for the first page, then each page's next cursor (ordered by id; no total count)" },
+                        "expand": { "type": "string", "description": "Foreign keys to include as whole rows, comma-separated, e.g. \"author_id\"" } } }),
                 ),
-                "get" => (format!("Fetch one {n} by id."), json!({ "type": "object", "properties": { "id": id }, "required": ["id"] })),
+                "get" => (
+                    format!("Fetch one {n} by id."),
+                    json!({ "type": "object", "properties": { "id": id, "expand": { "type": "string", "description": "Foreign keys to include as whole rows, comma-separated" } }, "required": ["id"] }),
+                ),
                 "create" => (
                     format!("Create a {n}. Returns the saved row."),
                     json!({ "type": "object", "properties": fields, "required": required }),
@@ -270,14 +274,17 @@ async fn call(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>, name: &
                     q.push((k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned)));
                 }
             }
-            for k in ["search", "ordering", "limit", "offset", "cursor"] {
+            for k in ["search", "ordering", "limit", "offset", "cursor", "expand"] {
                 if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
                     q.push((k.into(), v.as_str().map_or_else(|| v.to_string(), str::to_owned)));
                 }
             }
             (Method::GET, format!("/api/{table}/?{}", serde_urlencoded::to_string(&q).unwrap_or_default()), None)
         }
-        "get" => (Method::GET, format!("/api/{table}/{}", id()?), None),
+        "get" => {
+            let expand = args["expand"].as_str().map(|e| format!("?{}", serde_urlencoded::to_string([("expand", e)]).unwrap_or_default()));
+            (Method::GET, format!("/api/{table}/{}{}", id()?, expand.unwrap_or_default()), None)
+        }
         "create" => (Method::POST, format!("/api/{table}/"), Some(args.clone())),
         "update" => {
             let mut fields = args.clone();

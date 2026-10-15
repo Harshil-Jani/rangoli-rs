@@ -552,7 +552,7 @@ async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &st
     q.filter.extend(restrict(opts, user));
     // `?field=value`, or `?field__lookup=value` (Django's lookups), each value typed by the field.
     for (k, raw) in &p {
-        if matches!(k.as_str(), "limit" | "offset" | "ordering" | "search" | "cursor") {
+        if matches!(k.as_str(), "limit" | "offset" | "ordering" | "search" | "cursor" | "expand") {
             continue;
         }
         q.filter.push(lookup(meta, k, raw)?);
@@ -601,6 +601,7 @@ async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &st
         rows.truncate(limit as usize);
         let mut results: Vec<JsonValue> = rows.iter().map(|(id, v)| to_json(meta, *id, v)).collect();
         attach_links(meta, &mut results).await?;
+        expand(site, meta, user, scope, &mut results, param(&p, "expand")).await?;
         let next = more.then(|| {
             let mut pairs: Vec<(String, String)> = p.iter().filter(|(k, _)| *k != "cursor").map(|(k, v)| (k.clone(), v.clone())).collect();
             pairs.sort();
@@ -616,6 +617,7 @@ async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &st
     q.offset = Some(offset);
     let mut results: Vec<JsonValue> = q.rows().await.map_err(fail)?.iter().map(|(id, v)| to_json(meta, *id, v)).collect();
     attach_links(meta, &mut results).await?;
+    expand(site, meta, user, scope, &mut results, param(&p, "expand")).await?;
     // Like DRF's LimitOffsetPagination; links are relative so they work behind any host or proxy.
     let page = |off: u64| {
         let mut pairs: Vec<(String, String)> =
@@ -678,9 +680,45 @@ async fn similar(
     Ok(Json(json!({ "results": results })).into_response())
 }
 
-async fn detail(State(site): S, user: CurrentUser, scope: ScopeExt, Path((table, id)): Path<(String, i64)>) -> Reply {
+async fn detail(
+    State(site): S,
+    user: CurrentUser,
+    scope: ScopeExt,
+    Path((table, id)): Path<(String, i64)>,
+    UrlQuery(p): UrlQuery<HashMap<String, String>>,
+) -> Reply {
     let (meta, opts) = endpoint(&site, &table, &user, &scope, false)?;
-    Ok(Json(fetch(meta, id, restrict(opts, &user)).await?).into_response())
+    let mut one = [fetch(meta, id, restrict(opts, &user)).await?];
+    expand(&site, meta, &user, &scope, &mut one, param(&p, "expand")).await?;
+    let [row] = one;
+    Ok(Json(row).into_response())
+}
+
+/// `?expand=author_id,editor_id`: embed each foreign key's row as `"author": {...}`, one query
+/// per field. Only for related tables this caller may read through the API, with their access
+/// rules, owned_by, row permissions and private fields, so expand never shows more than
+/// fetching the row directly would. A row the caller can't see comes back as null.
+async fn expand(site: &Site, meta: &'static ModelMeta, user: &CurrentUser, scope: &ScopeExt, rows: &mut [JsonValue], fields: Option<&str>) -> Result<(), Response> {
+    let Some(fields) = fields.filter(|f| !f.is_empty()) else { return Ok(()) };
+    for name in fields.split(',').map(str::trim).filter(|n| !n.is_empty()).take(10) {
+        let bad = || problem(StatusCode::BAD_REQUEST, &format!("Can't expand `{name}`: it must be a foreign key to a table you can read through the API."));
+        let f = meta.field(name).filter(|f| f.exposed()).ok_or_else(bad)?;
+        let target = f.fk.ok_or_else(bad)?;
+        let (tmeta, topts) = endpoint(site, target, user, scope, false).map_err(|_| bad())?;
+        let ids: Vec<Value> = rows.iter().filter_map(|r| r[name].as_i64()).map(Value::Int).collect();
+        let mut q = Query::new(tmeta);
+        q.filter.push(Node::In("id", ids, FieldType::Int));
+        q.filter.extend(restrict(topts, user));
+        let found: HashMap<i64, JsonValue> = q.rows().await.map_err(fail)?.iter().map(|(id, v)| (*id, to_json(tmeta, *id, v))).collect();
+        let key = name.strip_suffix("_id").unwrap_or(name).to_string();
+        for r in rows.iter_mut() {
+            let related = r[name].as_i64().and_then(|id| found.get(&id).cloned()).unwrap_or(JsonValue::Null);
+            if let Some(obj) = r.as_object_mut() {
+                obj.insert(key.clone(), related);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// How a write arrived, for the admin History. Set by the MCP server on its internal requests
@@ -1005,6 +1043,7 @@ async fn schema(State(site): S) -> Json<JsonValue> {
             { "name": "offset", "in": "query", "schema": { "type": "integer" } },
             { "name": "ordering", "in": "query", "schema": { "type": "string" }, "description": "Field name, `-` prefix for descending" },
             { "name": "search", "in": "query", "schema": { "type": "string" } },
+            { "name": "expand", "in": "query", "schema": { "type": "string" }, "description": "Foreign keys to embed as whole rows, comma-separated (e.g. author_id)" },
             { "name": "cursor", "in": "query", "schema": { "type": "string" }, "description": "Keyset pagination by id: pass `next` from the previous page; no count is computed" }
         ]);
         paths.insert(format!("/api/{}/", meta.table), json!({
