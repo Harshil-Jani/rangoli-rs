@@ -37,6 +37,11 @@
         <textarea name="{{ f.name }}" id="id_{{ f.name }}" rows="8" class="code" spellcheck="false"{% if f.required %} required{% endif %}{% if f.error %} aria-invalid="true" aria-describedby="id_{{ f.name }}_error"{% endif %}>{{ f.value }}</textarea>
         {% elif f.kind == "textarea" %}
         <textarea name="{{ f.name }}" id="id_{{ f.name }}" rows="8"{% if f.required %} required{% endif %}{% if f.error %} aria-invalid="true" aria-describedby="id_{{ f.name }}_error"{% endif %}>{{ f.value }}</textarea>
+        {% elif f.kind == "autocomplete" %}
+        <input type="search" id="id_{{ f.name }}_search" list="dl_{{ f.name }}" value="{{ f.current }}{% if f.value %} (#{{ f.value }}){% endif %}" autocomplete="off" placeholder="Type to search" data-fk-for="id_{{ f.name }}"
+          name="q" hx-get="/admin/{{ f.target }}/autocomplete" hx-trigger="input changed delay:250ms" hx-target="#dl_{{ f.name }}" hx-swap="innerHTML" hx-include="this" hx-params="q">
+        <datalist id="dl_{{ f.name }}"></datalist>
+        <input type="hidden" name="{{ f.name }}" id="id_{{ f.name }}" value="{{ f.value }}">
         {% elif f.kind == "select" %}
         <select name="{{ f.name }}" id="id_{{ f.name }}"{% if f.required %} required{% endif %}{% if f.error %} aria-invalid="true" aria-describedby="id_{{ f.name }}_error"{% endif %}>
           <option value="">Choose {{ f.label|lower }}</option>

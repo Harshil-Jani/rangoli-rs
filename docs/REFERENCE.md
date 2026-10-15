@@ -409,7 +409,6 @@ Still missing, roughly in order:
 
 **Known limits:**
 
-- The admin's foreign-key select loads at most 1,000 rows.
 - Changing a foreign key on an existing column needs an `sql` operation on Postgres and MySQL.
 - Vector search on MySQL and SQLite compares vectors in your app; it isn't indexed.
 - The cache lives in each process's memory.

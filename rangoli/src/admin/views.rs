@@ -78,6 +78,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         .route("/admin/static/{file}", get(static_file))
         .route("/admin/{table}/", get(list).post(bulk))
         .route("/admin/{table}/export.csv", get(export_csv))
+        .route("/admin/{table}/autocomplete", get(autocomplete))
         .route("/admin/{table}/import", get(import_page).post(import_submit))
         .route("/admin/{table}/add", get(add_page).post(add_submit))
         .route("/admin/{table}/{id}/", get(change_page).post(change_submit))
@@ -1047,6 +1048,41 @@ async fn requests_page(State(site): S, user: CurrentUser, uri: Uri) -> Page {
     render(&site, "requests.html", context! { title => "Requests", requests, enabled, repeat, ..chrome(&site, u, None) })
 }
 
+// ---------------------------------------------------------------- foreign-key search
+
+/// GET /admin/<table>/autocomplete?q=: up to 20 `<option>`s for a foreign-key search box,
+/// matching the table's display field, within the staff member's permissions and rows.
+async fn autocomplete(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>, UrlQuery(p): UrlQuery<Pairs>) -> Page {
+    let u = staff(&user, &uri)?;
+    let meta = site.models.iter().copied().find(|m| m.table == table).ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
+    allowed(meta.table, "view")?;
+    let q = param(&p, "q").unwrap_or("").trim().to_string();
+    let disp = meta.display.and_then(|d| meta.fields.iter().find(|f| f.name == d));
+    let mut query = Query::new(meta);
+    query.fields = disp.map_or(&[][..], std::slice::from_ref);
+    query.filter.extend(row_filter(&site, meta, u));
+    match (q.parse::<i64>(), disp) {
+        (Ok(id), _) => query.filter.push(Node::Cmp("id", "=", Value::Int(id), FieldType::Int)),
+        (_, Some(f)) if !q.is_empty() => query.filter.push(Node::Like(f.name, format!("%{}%", like_escape(&q)))),
+        _ => {}
+    }
+    query.order = vec![("id", false)];
+    query.limit = Some(20);
+    let rows = query.rows().await.map_err(fail)?;
+    let esc = |s: &str| s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
+    let html: String = rows
+        .iter()
+        .map(|(id, vals)| {
+            let label = match (disp, vals.first()) {
+                (Some(f), Some(v)) => display(v, f),
+                _ => format!("{} object ({id})", meta.name),
+            };
+            format!("<option value=\"{} (#{id})\" data-id=\"{id}\"></option>", esc(&label))
+        })
+        .collect();
+    Ok(Html(html).into_response())
+}
+
 // ---------------------------------------------------------------- CSV import
 
 const IMPORT_MAX_ROWS: usize = 10_000;
@@ -1401,6 +1437,9 @@ fn raw_values(meta: &ModelMeta, vals: &[Value]) -> HashMap<String, String> {
 }
 
 /// `(id, label)` rows of `table`, optionally limited to `ids`.
+/// The most rows a foreign key's `<select>` lists; bigger tables get a search box.
+const SELECT_MAX: usize = 1000;
+
 async fn label_rows(site: &Site, table: &str, ids: Option<Vec<i64>>) -> Result<Vec<(i64, String)>, Response> {
     let Some(target) = site.models.iter().find(|m| m.table == table) else {
         return Ok(vec![]);
@@ -1411,7 +1450,7 @@ async fn label_rows(site: &Site, table: &str, ids: Option<Vec<i64>>) -> Result<V
     q.order = vec![("id", false)];
     match ids {
         Some(ids) => q.filter.push(Node::In("id", ids.into_iter().map(Value::Int).collect(), FieldType::Int)),
-        None => q.limit = Some(1000), // ponytail: plain <select>; switch to an autocomplete endpoint for huge tables
+        None => q.limit = Some(SELECT_MAX as u64 + 1), // one more than a <select> shows: past that, forms search instead
     }
     Ok(q.rows()
         .await
@@ -1450,8 +1489,17 @@ async fn form_fields(
 ) -> Result<Vec<minijinja::Value>, Response> {
     let mut out = vec![];
     for f in meta.fields.iter().filter(|f| !f.is_auto() && !hidden.contains(&f.name)) {
+        let mut search_in: Option<&str> = None;
         let options: Vec<(String, String)> = match (f.fk, f.choices) {
-            (Some(t), _) => label_rows(site, t, None).await?.into_iter().map(|(id, l)| (id.to_string(), l)).collect(),
+            (Some(t), _) => {
+                let rows = label_rows(site, t, None).await?;
+                if rows.len() > SELECT_MAX {
+                    search_in = Some(t); // too many for a <select>: a search box
+                    vec![]
+                } else {
+                    rows.into_iter().map(|(id, l)| (id.to_string(), l)).collect()
+                }
+            }
             (_, Some(choices)) => choices.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
             _ => vec![],
         };
@@ -1480,8 +1528,19 @@ async fn form_fields(
             _ => "text",
         };
         let value = raw.get(f.name).cloned().unwrap_or_default();
+        let (kind, current) = match search_in {
+            Some(t) => {
+                let shown = match value.parse::<i64>() {
+                    Ok(id) => label_rows(site, t, Some(vec![id])).await?.pop().map(|(_, l)| l).unwrap_or_default(),
+                    Err(_) => String::new(),
+                };
+                ("autocomplete", Some(shown))
+            }
+            None => (kind, None),
+        };
         out.push(context! {
             name => format!("{prefix}{}", f.name), label => label(f.name), kind, checked => !value.is_empty(), value, options,
+            target => search_in, current,
             required => !f.null && f.ty != FieldType::Bool && (is_add || !f.password),
             maxlength => match f.ty { FieldType::Varchar(n) => Some(n), _ => None },
             help => if f.password && !is_add { Some("Leave blank to keep the current password.") } else if f.ty == FieldType::DateTime { Some("Date and time in UTC.") } else { None },

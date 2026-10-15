@@ -46,3 +46,19 @@ htmx.onLoad(() => {
     };
   }
 });
+
+// Foreign-key search boxes: the chosen suggestion's id goes into the hidden field that's posted.
+htmx.onLoad(() => {
+  for (const box of document.querySelectorAll("input[data-fk-for]")) {
+    box.addEventListener("input", () => {
+      const hidden = document.getElementById(box.dataset.fkFor);
+      const picked = [...box.list.options].find((o) => o.value === box.value);
+      if (picked) hidden.value = picked.dataset.id;
+      else if (!box.value) hidden.value = "";
+      else {
+        const m = box.value.match(/\(#(\d+)\)$/);
+        if (m) hidden.value = m[1];
+      }
+    });
+  }
+});
