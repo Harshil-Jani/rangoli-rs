@@ -800,7 +800,17 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
     query.order = vec![(order_field, desc)];
     query.limit = Some(per_page);
     query.offset = Some((page - 1) * per_page);
-    let raw_rows = query.rows().await.map_err(fail)?;
+    // "By meaning": the closest rows to the search text (vector field + App::embed), same filters and rules.
+    let semantic = crate::api::vector_field(meta).zip(crate::api::EMBED.get());
+    let meaning = semantic.is_some() && param(&p, "meaning") == Some("1") && !q.is_empty();
+    let raw_rows = match semantic.filter(|_| meaning) {
+        Some((field, embed)) => {
+            let to = crate::Vector(embed(q.clone()).await.map_err(fail)?);
+            let base = changelist_query(&site, meta, u, &p, "");
+            base.nearest(field.name, &to, per_page as usize).await.map_err(fail)?.into_iter().map(|(id, v, _)| (id, v)).collect()
+        }
+        None => query.rows().await.map_err(fail)?,
+    };
 
     // Foreign keys show their target's label: one IN query per FK column, not one per row.
     let mut fk_labels: HashMap<usize, HashMap<i64, String>> = HashMap::new();
@@ -898,7 +908,7 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
             title => format!("Select {} to change", verbose(meta.name)),
             messages => match action_message(&site, meta, &p) { Some(m) => Some(m), None => message(&p, u, "list").await },
             actions => options(&site, meta).actions.iter().map(|a| context! { name => a.name, label => a.label }).collect::<Vec<_>>(),
-            q, keep, count, full_count, filtered, what, page_links, estimated, export_url,
+            q, keep, count, full_count, filtered, what, page_links, estimated, export_url, semantic => semantic.is_some(), meaning,
             columns => headers, rows, filters => filter_blocks, searchable => !searchable.is_empty() || !meta.search.is_empty(), clear_url => base.clone(),
             ..chrome(&site, u, Some(meta))
         },

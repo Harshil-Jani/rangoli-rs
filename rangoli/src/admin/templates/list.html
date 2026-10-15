@@ -5,7 +5,7 @@
 {% block content %}
 <div class="changelist{% if filters %} has-filters{% endif %}">
   <div class="changelist-main">
-    {% if searchable %}
+    {% if searchable or semantic %}
     <form id="changelist-search" class="toolbar" method="get" action="/admin/{{ table }}/" role="search">
       <label for="searchbar" class="sr">Search {{ plural|lower }}</label>
       <input type="search" name="q" value="{{ q }}" id="searchbar" placeholder="Search {{ plural|lower }}"
@@ -13,6 +13,7 @@
         hx-target="#changelist-form" hx-select="#changelist-form" hx-swap="outerHTML"
         hx-select-oob="#search-count,#changelist-filter" hx-push-url="true">
       {% for k, v in keep %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+      {% if semantic %}<label class="check"><input type="checkbox" name="meaning" value="1"{% if meaning %} checked{% endif %}> By meaning</label>{% endif %}
       <button type="submit" class="btn">Search</button>
       <span id="search-count" class="meta">{% if filtered %}{{ count }} result{% if count != 1 %}s{% endif %} of <a href="{{ clear_url }}">{% if estimated %}about {% endif %}{{ full_count }} total</a>{% endif %}</span>
     </form>
