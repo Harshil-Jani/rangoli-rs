@@ -58,7 +58,7 @@ impl RequestLog {
             .filter(|(_, (n, _))| *n >= REPEAT_WARNING)
             .map(|(sql, (times, ms))| Repeat { sql: sql.to_string(), times, ms })
             .collect();
-        out.sort_by(|a, b| b.times.cmp(&a.times));
+        out.sort_by_key(|r| std::cmp::Reverse(r.times));
         out
     }
 }
