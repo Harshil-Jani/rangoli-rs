@@ -635,6 +635,17 @@ impl App {
         self
     }
 
+    /// A ready-made prompt for MCP clients (they show up as slash commands in Claude, Cursor, ...).
+    /// `{name}` slots in `text` become the prompt's arguments:
+    ///
+    /// ```ignore
+    /// app.mcp_prompt("triage", "Sort open tickets by urgency", "List support tickets with status {status} and rank them by urgency.")
+    /// ```
+    pub fn mcp_prompt(self, name: &'static str, description: &'static str, text: &'static str) -> Self {
+        mcp::add_prompt(name, description, text);
+        self
+    }
+
     /// Sign requests in with JWTs (see [`jwt::JwtAuth`]): tokens you issue, or an identity
     /// provider's (Clerk, Auth0, Supabase Auth) checked against its JWKS keys.
     pub fn jwt(self, auth: jwt::JwtAuth) -> Self {

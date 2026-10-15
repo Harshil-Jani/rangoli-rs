@@ -92,7 +92,7 @@ async fn handle(
                 &id,
                 json!({
                     "protocolVersion": version,
-                    "capabilities": { "tools": { "listChanged": false } },
+                    "capabilities": { "tools": { "listChanged": false }, "prompts": { "listChanged": false }, "resources": {} },
                     "serverInfo": { "name": "rangoli", "version": env!("CARGO_PKG_VERSION") },
                     "instructions": "Tools read and change this app's data as the signed-in user. \
                         List tools take exact-match `filters`, a `search` text and `ordering` (a field, `-field` for descending).",
@@ -100,6 +100,39 @@ async fn handle(
             )
         }
         "ping" => reply(&id, json!({})),
+        "prompts/list" => reply(&id, json!({ "prompts": prompts_list() })),
+        "prompts/get" => match prompt_get(params["name"].as_str().unwrap_or(""), &params["arguments"]) {
+            Ok(result) => reply(&id, result),
+            Err(e) => rpc_error(&id, -32602, &e),
+        },
+        // Every row is a resource, `rangoli://<table>/<id>`, read through the same `get` tool
+        // (same user, scope and rules), so a person can attach a row to a chat as context.
+        "resources/list" => reply(&id, json!({ "resources": [] })),
+        "resources/templates/list" => {
+            let templates: Vec<JsonValue> = mcp
+                .models
+                .iter()
+                .filter(|(m, _)| scope.as_ref().is_none_or(|s| s.allows_table(m.table)))
+                .map(|(m, _)| json!({ "uriTemplate": format!("rangoli://{}/{{id}}", m.table), "name": format!("{}_row", m.table), "title": format!("A {}", noun(m)), "mimeType": "application/json" }))
+                .collect();
+            reply(&id, json!({ "resourceTemplates": templates }))
+        }
+        "resources/read" => {
+            let uri = params["uri"].as_str().unwrap_or("");
+            let parsed =
+                uri.strip_prefix("rangoli://").and_then(|r| r.split_once('/')).and_then(|(t, i)| Some((t, i.parse::<i64>().ok()?)));
+            let read = match parsed {
+                Some((table, row)) => call(&mcp, &user, scope.as_ref(), &format!("{table}_get"), &json!({ "id": row })).await,
+                None => None,
+            };
+            match read {
+                Some(r) if r["isError"] == false => {
+                    reply(&id, json!({ "contents": [{ "uri": uri, "mimeType": "application/json", "text": r["content"][0]["text"] }] }))
+                }
+                // -32002 is MCP's "resource not found"; a row the user can't see is not found too.
+                _ => rpc_error(&id, -32002, &format!("Resource not found: {uri}")),
+            }
+        }
         "tools/list" => reply(&id, json!({ "tools": tools(&mcp, &user, scope.as_ref()) })),
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
@@ -111,6 +144,48 @@ async fn handle(
         }
         _ => rpc_error(&id, -32601, &format!("Method not found: {method}")),
     }
+}
+
+/// Prompts registered with `App::mcp_prompt`: (name, description, text with `{arg}` slots).
+static PROMPTS: std::sync::RwLock<Vec<(&'static str, &'static str, &'static str)>> = std::sync::RwLock::new(Vec::new());
+
+pub(crate) fn add_prompt(name: &'static str, description: &'static str, text: &'static str) {
+    PROMPTS.write().unwrap_or_else(std::sync::PoisonError::into_inner).push((name, description, text));
+}
+
+/// The `{name}` slots in a prompt's text, in order, once each.
+fn slots(text: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = vec![];
+    for part in text.split('{').skip(1) {
+        if let Some((name, _)) = part.split_once('}') {
+            if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') && !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
+fn prompts_list() -> Vec<JsonValue> {
+    let prompts = PROMPTS.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    prompts
+        .iter()
+        .map(|(name, description, text)| {
+            let args: Vec<JsonValue> = slots(text).into_iter().map(|a| json!({ "name": a, "required": true })).collect();
+            json!({ "name": name, "description": description, "arguments": args })
+        })
+        .collect()
+}
+
+fn prompt_get(name: &str, args: &JsonValue) -> Result<JsonValue, String> {
+    let prompts = PROMPTS.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_, description, text) = prompts.iter().find(|(n, ..)| *n == name).ok_or_else(|| format!("Unknown prompt: {name}"))?;
+    let mut out = text.to_string();
+    for slot in slots(text) {
+        let value = args[slot].as_str().ok_or_else(|| format!("Missing argument: {slot}"))?;
+        out = out.replace(&format!("{{{slot}}}"), value);
+    }
+    Ok(json!({ "description": description, "messages": [{ "role": "user", "content": { "type": "text", "text": out } }] }))
 }
 
 /// The five tools of one model, as (operation, needs write access).
@@ -424,4 +499,13 @@ async fn approval_status(user: &CurrentUser, args: &JsonValue) -> JsonValue {
     };
     let is_error = structured.get("error").is_some();
     json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&structured).unwrap_or_default() }], "structuredContent": structured, "isError": is_error })
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    #[test]
+    fn slots_are_named_once_in_order() {
+        assert_eq!(super::slots("Triage {status} tickets for {team}; skip {status} ones from {}"), ["status", "team"]);
+        assert!(super::slots("JSON like {\"a\": 1}").is_empty(), "braces that aren't slots");
+    }
 }
