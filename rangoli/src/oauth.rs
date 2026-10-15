@@ -107,6 +107,9 @@ fn oauth_error(status: StatusCode, error: &str, description: &str) -> Response {
 /// Where a sign-in may send the person back: https anywhere, http only to this machine
 /// (OAuth 2.1, for desktop apps listening on a local port).
 fn redirect_ok(uri: &str) -> bool {
+    if uri.chars().any(char::is_control) {
+        return false;
+    }
     let Some((scheme, rest)) = uri.split_once("://") else { return false };
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
     let host = host.rsplit_once(':').map_or(host, |(h, p)| if p.chars().all(|c| c.is_ascii_digit()) { h } else { host });
@@ -181,8 +184,12 @@ pub(crate) enum AuthError {
 pub(crate) async fn check_request(p: &[(String, String)]) -> Result<std::result::Result<AuthRequest, AuthError>> {
     let get = |k: &str| p.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
     let client_id = get("client_id").unwrap_or("");
+    let unknown = || Ok(Err(AuthError::Show("This app isn't registered here. Start the connection again from the app.")));
+    if !hex(client_id, 32) {
+        return unknown(); // never a valid id, so don't ask the database (Postgres rejects NUL bytes in text)
+    }
     let Some(client) = OAuthClient::objects().filter(OAuthClient::CLIENT_ID.eq(client_id)).first().await? else {
-        return Ok(Err(AuthError::Show("This app isn't registered here. Start the connection again from the app.")));
+        return unknown();
     };
     let redirect_uri = match get("redirect_uri") {
         Some(u) if client.redirect_uris.lines().any(|r| r == u) => u.to_string(),
@@ -197,7 +204,7 @@ pub(crate) async fn check_request(p: &[(String, String)]) -> Result<std::result:
         return back("unsupported_response_type", "Only response_type=code is supported.");
     }
     let challenge = get("code_challenge").unwrap_or("");
-    if get("code_challenge_method") != Some("S256") || !(43..=128).contains(&challenge.len()) {
+    if get("code_challenge_method") != Some("S256") || !verifier_ok(challenge) {
         return back("invalid_request", "PKCE with code_challenge_method=S256 is required.");
     }
     Ok(Ok(AuthRequest { client, challenge: challenge.into(), redirect_uri, state }))
@@ -261,7 +268,20 @@ pub(crate) async fn token(Form(p): Form<Vec<(String, String)>>) -> Response {
     }
 }
 
+/// `n` lowercase hex digits: the shape of the ids and codes this server issues.
+fn hex(s: &str, n: usize) -> bool {
+    s.len() == n && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// RFC 7636: 43 to 128 of A-Z a-z 0-9 - . _ ~
+fn verifier_ok(v: &str) -> bool {
+    (43..=128).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
+}
+
 async fn redeem(code: &str, client_id: &str, redirect_uri: &str, verifier: &str) -> Result<Option<(String, &'static str)>> {
+    if !hex(code, 64) || !hex(client_id, 32) || !verifier_ok(verifier) || redirect_uri.chars().any(char::is_control) {
+        return Ok(None); // malformed: nothing to look up
+    }
     let Some(row) = OAuthCode::objects().filter(OAuthCode::CODE_HASH.eq(digest(code))).first().await? else { return Ok(None) };
     // Spend it first: of two racing redemptions, only one deletes the row.
     if OAuthCode::objects().filter(OAuthCode::ID.eq(row.id.unwrap_or_default())).delete().await? != 1 {
@@ -269,7 +289,7 @@ async fn redeem(code: &str, client_id: &str, redirect_uri: &str, verifier: &str)
     }
     let fresh = row.expires_at.unix() >= DateTime::now().unix();
     let matches = row.client_id == client_id && (redirect_uri.is_empty() || row.redirect_uri == redirect_uri);
-    if !fresh || !matches || verifier.len() < 43 || s256(verifier) != row.challenge {
+    if !fresh || !matches || s256(verifier) != row.challenge {
         return Ok(None);
     }
     let Some(client) = OAuthClient::objects().filter(OAuthClient::CLIENT_ID.eq(client_id)).first().await? else { return Ok(None) };

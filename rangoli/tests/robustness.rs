@@ -454,6 +454,110 @@ async fn the_framework_never_takes_the_server_down() {
             check("POST /admin/login".into(), s, &b);
         }
 
+        // API filter lookups: real and bogus fields, operators and values.
+        let lookups: Vec<(String, String)> = (0..rng.below(4))
+            .map(|_| {
+                let field = rng.pick(&[
+                    "id",
+                    "title",
+                    "views",
+                    "score",
+                    "flag",
+                    "author_id",
+                    "status",
+                    "published_at",
+                    "due",
+                    "price",
+                    "ref_id",
+                    "extra",
+                    "nope",
+                ]);
+                let op = rng.pick(&[
+                    "",
+                    "__exact",
+                    "__ne",
+                    "__gt",
+                    "__gte",
+                    "__lt",
+                    "__lte",
+                    "__in",
+                    "__contains",
+                    "__startswith",
+                    "__isnull",
+                    "__x",
+                ]);
+                let value = if op == "__in" && rng.chance(50) { format!("{},{}", rng.string(), rng.string()) } else { rng.string() };
+                (format!("{field}{op}"), value)
+            })
+            .collect();
+        let uri = format!("/api/fz_post/?{}", serde_urlencoded::to_string(&lookups).unwrap());
+        let (s, b) = send(get(uri.clone(), &cookie)).await;
+        check(format!("GET {uri}"), s, &b);
+
+        // CSV export with random filters, and import of random CSV (preview and confirm).
+        let uri = format!("/admin/fz_post/export.csv?{}", serde_urlencoded::to_string(&qs).unwrap());
+        let (s, b) = send(get(uri.clone(), &cookie)).await;
+        check(format!("GET {uri}"), s, &b);
+        let header: Vec<&str> = (0..1 + rng.below(4))
+            .map(|_| rng.pick(&["id", "title", "body", "views", "flag", "status", "due", "price", "author_id", "nope"]))
+            .collect();
+        let mut csv = header.join(",");
+        for _ in 0..rng.below(4) {
+            let cells: Vec<String> = header
+                .iter()
+                .map(|h| if *h == "id" && rng.chance(50) { pid.to_string() } else { rng.string().replace('"', "\"\"") })
+                .collect();
+            csv.push('\n');
+            csv.push_str(&cells.iter().map(|c| if rng.chance(30) { format!("\"{c}\"") } else { c.clone() }).collect::<Vec<_>>().join(","));
+        }
+        if rng.chance(10) {
+            csv = rng.string(); // not CSV at all
+        }
+        let mut form = vec![("csv".to_string(), csv.clone())];
+        if rng.chance(50) {
+            form.push(("confirm".into(), "1".into()));
+        }
+        let (s, b) = send(post(
+            "/admin/fz_post/import".into(),
+            &cookie,
+            "application/x-www-form-urlencoded",
+            serde_urlencoded::to_string(&form).unwrap(),
+        ))
+        .await;
+        check(format!("POST import {csv:?}"), s, &b);
+
+        // OAuth: registration, token exchange and the consent page with garbage.
+        let (s, b) = send(post("/oauth/register".into(), "", "application/json", rng.json(0).to_string())).await;
+        check("POST /oauth/register".into(), s, &b);
+        let token_form: Vec<(String, String)> = (0..rng.below(6))
+            .map(|_| (rng.pick(&["grant_type", "code", "client_id", "redirect_uri", "code_verifier", "x"]).to_string(), rng.string()))
+            .collect();
+        let (s, b) =
+            send(post("/oauth/token".into(), "", "application/x-www-form-urlencoded", serde_urlencoded::to_string(&token_form).unwrap()))
+                .await;
+        check(format!("POST /oauth/token {token_form:?}"), s, &b);
+        let auth_q: Vec<(String, String)> = (0..rng.below(7))
+            .map(|_| {
+                (
+                    rng.pick(&["response_type", "client_id", "redirect_uri", "code_challenge", "code_challenge_method", "state"])
+                        .to_string(),
+                    rng.string(),
+                )
+            })
+            .collect();
+        let uri = format!("/admin/oauth/authorize?{}", serde_urlencoded::to_string(&auth_q).unwrap());
+        let (s, b) = send(get(uri.clone(), &cookie)).await;
+        check(format!("GET {uri}"), s, &b);
+
+        // Semantic search and the query inspector.
+        let uri = format!("/api/fz_post/similar?text={}&k={}", percent(&rng.string()), percent(&rng.string()));
+        let (s, b) = send(get(uri.clone(), &cookie)).await;
+        check(format!("GET {uri}"), s, &b);
+        if i % 20 == 0 {
+            let (s, b) = send(get("/admin/requests/".into(), &cookie)).await;
+            check("GET /admin/requests/".into(), s, &b);
+        }
+
         // Parsers on their own.
         let _ = DateTime::parse(&rng.string());
         let _ = Date::parse(&rng.string());
