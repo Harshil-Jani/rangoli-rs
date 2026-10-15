@@ -102,6 +102,8 @@ pub struct Options {
     pub(crate) panels: Vec<Panel>,
     /// Columns edited right in the changelist (`ModelAdmin::list_editable`).
     pub(crate) list_editable: Vec<&'static str>,
+    /// A "Save as new" button on the change page (`ModelAdmin::save_as`).
+    pub(crate) save_as: bool,
 }
 
 type PanelFn = dyn Fn(i64) -> Pin<Box<dyn Future<Output = crate::Result<String>> + Send>> + Send + Sync;
@@ -253,6 +255,13 @@ impl<M: Model> ModelAdmin<M> {
                 Box::pin(async move { render(M::get(id).await?).await })
             }),
         });
+        self
+    }
+
+    /// A "Save as new" button on the change page: the form, edits included, becomes a new row
+    /// (Django's `save_as`). It goes through the add page's checks; inline rows aren't copied.
+    pub fn save_as(mut self) -> Self {
+        self.opts.save_as = true;
         self
     }
 

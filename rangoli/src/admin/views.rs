@@ -1949,7 +1949,7 @@ async fn form_page(
         "form.html",
         context! {
             title, obj, id, is_add, sections => sections(&o.fieldsets, fields), inlines, panels, messages, form_error => errors.get("__all__"),
-            error_count => errors.len(), ..chrome(site, u, Some(meta))
+            error_count => errors.len(), save_as => o.save_as && can(meta.table, "add"), ..chrome(site, u, Some(meta))
         },
     )?;
     Ok((status, page).into_response())

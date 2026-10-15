@@ -1,4 +1,5 @@
-//! `ModelAdmin::list_editable`: edit columns in the changelist, one Save, all or nothing.
+//! `ModelAdmin::list_editable` (edit columns in the changelist, one Save, all or nothing) and
+//! `ModelAdmin::save_as`.
 #![cfg(feature = "admin")]
 
 use rangoli::admin::ModelAdmin;
@@ -19,7 +20,10 @@ struct Task {
 async fn edit_in_the_list() {
     let app = App::new()
         .admin_with::<Task>(
-            ModelAdmin::new().list_display([&Task::TITLE, &Task::DONE, &Task::POINTS]).list_editable([&Task::DONE, &Task::POINTS]),
+            ModelAdmin::new()
+                .list_display([&Task::TITLE, &Task::DONE, &Task::POINTS])
+                .list_editable([&Task::DONE, &Task::POINTS])
+                .save_as(),
         )
         .validate::<Task>(|t| if t.points > 100 { Err(vec![("points", "Too many points.".into())]) } else { Ok(()) });
     testing::database(&app).await.unwrap();
@@ -55,5 +59,13 @@ async fn edit_in_the_list() {
     let refused = c.post_form("/admin/le_task/", &bad).await;
     assert!(refused.status == 422 && refused.body.contains("Too many points."), "row rules apply");
     assert_eq!(Task::objects().order_by(Task::ID.asc()).all().await.unwrap()[0].points, 7, "and nothing was saved");
+    let change = c.get(&format!("/admin/le_task/{}/", ids[0])).await;
+    assert!(change.body.contains("formaction=\"/admin/le_task/add\""), "save_as shows its button");
+    assert_eq!(
+        c.post_form("/admin/le_task/add", &[("title", "a copy"), ("points", "7")]).await.status,
+        303,
+        "and what it posts makes a new row"
+    );
+    assert_eq!(Task::objects().count().await.unwrap(), 3);
     sqlx::query("DROP TABLE le_task").execute(&rangoli::orm::db().pool).await.unwrap();
 }

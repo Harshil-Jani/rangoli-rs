@@ -98,6 +98,7 @@
     <button type="submit" class="btn primary" name="_save" value="1">Save</button>
     <button type="submit" class="btn" name="_continue" value="1">Save and continue editing</button>
     {% if can_add %}<button type="submit" class="btn" name="_addanother" value="1">Save and add another</button>{% endif %}
+    {% if save_as and not is_add %}<button type="submit" class="btn" formaction="/admin/{{ table }}/add" formnovalidate>Save as new</button>{% endif %}
     {% if not is_add %}<a href="/admin/{{ table }}/{{ id }}/delete" class="btn danger-outline">Delete</a>{% endif %}
   </div>
 </form>
