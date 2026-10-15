@@ -694,6 +694,28 @@ async fn detail(
     Ok(Json(row).into_response())
 }
 
+/// `?dry_run=1`: do the write in a transaction, report it, roll it back.
+fn dry_run(uri: &axum::http::Uri) -> bool {
+    uri.query().is_some_and(|q| q.split('&').any(|kv| kv == "dry_run=1" || kv == "dry_run=true"))
+}
+
+/// Inside a dry run's transaction: capture the row as it would be saved, then abort.
+async fn roll_back_if(dry: bool, meta: &'static ModelMeta, id: i64) -> crate::Result<()> {
+    if !dry {
+        return Ok(());
+    }
+    let row = fetch(meta, id, vec![]).await.map_err(|_| Error::NotFound)?;
+    Err(Error::DryRun(json!({ "dry_run": true, "would_be": row })))
+}
+
+/// A rolled-back dry run is a 200 with what would have happened; anything else is an error.
+fn dry_result(e: Error) -> Response {
+    match e {
+        Error::DryRun(report) => (StatusCode::OK, Json(report)).into_response(),
+        e => fail(e),
+    }
+}
+
 /// The model's whole-row rules (`App::validate`), as a 400 like field errors.
 async fn row_rules(meta: &'static ModelMeta, id: Option<i64>, cols: &[(&'static str, Value, FieldType)]) -> Result<(), Response> {
     match crate::validators::check(meta, id, cols).await.map_err(fail)? {
@@ -825,9 +847,11 @@ async fn create(
     scope: ScopeExt,
     via: ViaExt,
     Path(table): Path<String>,
+    uri: axum::http::Uri,
     Json(body): Json<JsonValue>,
 ) -> Reply {
     let via = via.map(|v| v.0);
+    let dry = dry_run(&uri);
     let (meta, opts) = endpoint(&site, &table, &user, &scope, true)?;
     if opts.owner.is_some() && user.0.is_none() {
         // An owned row needs an owner; with `write(Access::Public)` the body could otherwise name anyone.
@@ -837,8 +861,10 @@ async fn create(
     let cols = columns(meta, &body, true, false).await?;
     row_rules(meta, None, &cols).await?;
     let links = body_links(meta, &body)?;
-    if let Some(held) = hold(&scope, &user, &via, &table, "create", None, Some(&body)).await? {
-        return Ok(held);
+    if !dry {
+        if let Some(held) = hold(&scope, &user, &via, &table, "create", None, Some(&body)).await? {
+            return Ok(held);
+        }
     }
     let id = crate::atomic(async {
         let id = orm::insert_row(meta.table, &cols).await?;
@@ -847,10 +873,11 @@ async fn create(
         }
         still_visible(meta, opts, &user, id).await?;
         audit(&user, meta, id, 1, "Added", via, None).await?;
+        roll_back_if(dry, meta, id).await?;
         Ok(id)
     })
     .await
-    .map_err(fail)?;
+    .map_err(dry_result)?;
     Ok((StatusCode::CREATED, Json(fetch(meta, id, vec![]).await?)).into_response())
 }
 
@@ -864,6 +891,7 @@ async fn update(
     id: i64,
     body: &JsonValue,
     partial: bool,
+    dry: bool,
 ) -> Reply {
     let (meta, opts) = endpoint(site, table, user, scope, true)?;
     fetch(meta, id, restrict(opts, user)).await?; // 404 before validation, like DRF (and for others' rows)
@@ -871,8 +899,10 @@ async fn update(
     let cols = columns(meta, body, false, partial).await?;
     row_rules(meta, Some(id), &cols).await?;
     let links = body_links(meta, body)?;
-    if let Some(held) = hold(scope, user, &via, table, if partial { "update" } else { "replace" }, Some(id), Some(body)).await? {
-        return Ok(held);
+    if !dry {
+        if let Some(held) = hold(scope, user, &via, table, if partial { "update" } else { "replace" }, Some(id), Some(body)).await? {
+            return Ok(held);
+        }
     }
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
@@ -888,10 +918,11 @@ async fn update(
         }
         still_visible(meta, opts, user, id).await?;
         audit(user, meta, id, 2, "Changed", via, Some(before)).await?;
+        roll_back_if(dry, meta, id).await?;
         Ok(())
     })
     .await
-    .map_err(fail)?;
+    .map_err(dry_result)?;
     Ok(Json(fetch(meta, id, vec![]).await?).into_response())
 }
 
@@ -901,9 +932,10 @@ async fn replace(
     scope: ScopeExt,
     via: ViaExt,
     Path((table, id)): Path<(String, i64)>,
+    uri: axum::http::Uri,
     Json(body): Json<JsonValue>,
 ) -> Reply {
-    update(&site, &user, &scope, via.map(|v| v.0), &table, id, &body, false).await
+    update(&site, &user, &scope, via.map(|v| v.0), &table, id, &body, false, dry_run(&uri)).await
 }
 
 async fn patch(
@@ -912,19 +944,30 @@ async fn patch(
     scope: ScopeExt,
     via: ViaExt,
     Path((table, id)): Path<(String, i64)>,
+    uri: axum::http::Uri,
     Json(body): Json<JsonValue>,
 ) -> Reply {
-    update(&site, &user, &scope, via.map(|v| v.0), &table, id, &body, true).await
+    update(&site, &user, &scope, via.map(|v| v.0), &table, id, &body, true, dry_run(&uri)).await
 }
 
-async fn remove(State(site): S, user: CurrentUser, scope: ScopeExt, via: ViaExt, Path((table, id)): Path<(String, i64)>) -> Reply {
+async fn remove(
+    State(site): S,
+    user: CurrentUser,
+    scope: ScopeExt,
+    via: ViaExt,
+    Path((table, id)): Path<(String, i64)>,
+    uri: axum::http::Uri,
+) -> Reply {
     let (meta, opts) = endpoint(&site, &table, &user, &scope, true)?;
     let via = via.map(|v| v.0);
+    let dry = dry_run(&uri);
     if scope.as_ref().is_some_and(|s| s.needs_approval) {
         fetch(meta, id, restrict(opts, &user)).await?; // only queue a delete of a row the caller can see
     }
-    if let Some(held) = hold(&scope, &user, &via, &table, "delete", Some(id), None).await? {
-        return Ok(held);
+    if !dry {
+        if let Some(held) = hold(&scope, &user, &via, &table, "delete", Some(id), None).await? {
+            return Ok(held);
+        }
     }
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
@@ -933,13 +976,15 @@ async fn remove(State(site): S, user: CurrentUser, scope: ScopeExt, via: ViaExt,
     crate::atomic(async {
         let before = snapshot(meta, id).await?;
         audit(&user, meta, id, 3, "Deleted", via, Some(before)).await?;
+        let row = fetch(meta, id, vec![]).await.ok();
         match q.delete().await? {
             0 => Err(Error::NotFound),
+            _ if dry => Err(Error::DryRun(json!({ "dry_run": true, "would_delete": row }))),
             _ => Ok(()),
         }
     })
     .await
-    .map_err(fail)?;
+    .map_err(dry_result)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

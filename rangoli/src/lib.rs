@@ -97,6 +97,8 @@ pub enum Error {
     Task(String),
     /// Not allowed, with the reason to show (403).
     Forbidden(String),
+    /// A dry run's report, carried out of its transaction to roll it back (never shown as an error).
+    DryRun(serde_json::Value),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -116,6 +118,7 @@ impl std::fmt::Display for Error {
             Error::Template(m) => write!(f, "template error: {m}"),
             Error::Task(m) => write!(f, "task error: {m}"),
             Error::Forbidden(m) => f.write_str(m),
+            Error::DryRun(_) => f.write_str("dry run"),
         }
     }
 }

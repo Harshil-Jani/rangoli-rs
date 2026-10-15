@@ -187,6 +187,10 @@ fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonV
                 }
                 _ => (format!("Delete a {n} by id."), json!({ "type": "object", "properties": { "id": id }, "required": ["id"] })),
             };
+            let mut schema = schema;
+            if write {
+                schema["properties"]["dry_run"] = json!({ "type": "boolean", "description": "Check the change and see the result without saving anything" });
+            }
             let mut tool = json!({ "name": format!("{}_{op}", meta.table), "description": description, "inputSchema": schema });
             if !write {
                 tool["annotations"] = json!({ "readOnlyHint": true });
@@ -354,6 +358,15 @@ async fn call(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>, name: &
         }
         _ => return None,
     };
+    // A dry run: everything checked and the result reported, nothing saved.
+    let dry = args["dry_run"].as_bool() == Some(true) && method != Method::GET;
+    let path = if dry { format!("{path}{}dry_run=1", if path.contains('?') { '&' } else { '?' }) } else { path };
+    let body = body.map(|mut b| {
+        if let Some(o) = b.as_object_mut() {
+            o.remove("dry_run");
+        }
+        b
+    });
     let mut req = Request::builder().method(method).uri(path).header(header::CONTENT_TYPE, "application/json");
     let ext = req.extensions_mut()?;
     ext.insert(user.clone());

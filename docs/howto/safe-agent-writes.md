@@ -44,6 +44,10 @@ Every change or delete made through the API or MCP stores the row as it was. Ope
 - An undone change is put back.
 - An undone delete returns with the same id.
 
+## 5. Dry runs
+
+An agent (or any API client) can check a change before making it: `"dry_run": true` in a tool call, or `?dry_run=1` on the API. The write runs for real inside a transaction, with every permission, validation and row rule applied. The response says what the row *would be*, and then the transaction is rolled back, so no History entry, hook or webhook is left behind.
+
 ## Why this holds up against prompt injection
 
 The test suite replays the 2025 Supabase MCP attack: a support ticket tells the agent to copy secrets into a new message. A fully obedient agent still fails at every step:
