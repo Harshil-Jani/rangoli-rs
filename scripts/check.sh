@@ -14,6 +14,7 @@ cargo clippy -q --workspace --all-targets -- -D warnings || fail "clippy"
 for f in postgres mysql sqlite sqlite,admin sqlite,web postgres,realtime; do
   cargo clippy -q -p rangoli --no-default-features --features "$f" --all-targets -- -D warnings || fail "clippy with only $f"
 done
+cargo test -q -p rangoli --no-default-features --features sqlite >/dev/null 2>&1 || fail "tests with only the sqlite feature"
 for u in "" ${PG:-} ${MY:-}; do
   name=${u%%:*}; name=${name:-sqlite}
   out=$(RANGOLI_TEST_DATABASE_URL=$u cargo test -q --workspace 2>&1) || { echo "$out" | tail -40; fail "tests on $name"; }

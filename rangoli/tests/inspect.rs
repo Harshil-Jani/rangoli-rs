@@ -95,10 +95,12 @@ async fn finds_the_n_plus_one() {
     let stamp = std::process::id();
     let boss = auth::create_user(&format!("in_boss_{stamp}"), "correct horse", true).await.unwrap();
     let clerk = auth::create_user(&format!("in_clerk_{stamp}"), "correct horse", false).await.unwrap();
-    let cookie = auth::login(&boss).await.unwrap().split(';').next().unwrap().to_string();
-    let (_, page) = send(&router, "/admin/requests/", Some(cookie), None).await;
-    let page = page.replace("&#x2f;", "/");
-    assert!(page.contains("GET /slow") && page.contains("repeated") && page.contains("8×"), "the admin page shows it");
+    let cookie = auth::login(&boss).await.unwrap().split(';').next().unwrap().to_string(); // the admin page needs the admin feature
+    if cfg!(feature = "admin") {
+        let (_, page) = send(&router, "/admin/requests/", Some(cookie), None).await;
+        let page = page.replace("&#x2f;", "/");
+        assert!(page.contains("GET /slow") && page.contains("repeated") && page.contains("8×"), "the admin page shows it");
+    }
     let tools = r#"{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}"#.to_string();
     let call =
         r#"{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "inspect_requests", "arguments": {"path": "/slow"}}}"#
