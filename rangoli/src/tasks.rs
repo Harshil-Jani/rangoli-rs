@@ -389,7 +389,7 @@ async fn finish(mut record: TaskRecord, now: DateTime) -> Result<()> {
     let handler = REGISTRY.read().unwrap_or_else(std::sync::PoisonError::into_inner).get(record.name.as_str()).copied();
     let outcome = match handler {
         None => Err(format!("no task registered named `{}` in this process", record.name)),
-        Some(run) => match tokio::spawn(run(record.payload.clone())).await {
+        Some(run) => match tokio::spawn(crate::orm::track_writes(run(record.payload.clone()))).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(e.to_string()),
             Err(join) => Err(match join.try_into_panic() {

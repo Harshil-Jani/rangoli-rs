@@ -676,7 +676,8 @@ impl App {
             .layer(from_fn(auth::session_middleware))
             .layer(from_fn(security_middleware))
             .layer(from_fn(inspect::middleware))
-            .layer(from_fn(i18n::middleware));
+            .layer(from_fn(i18n::middleware))
+            .layer(from_fn(orm::request_scope));
         if settings().debug {
             inspect::enable();
         }

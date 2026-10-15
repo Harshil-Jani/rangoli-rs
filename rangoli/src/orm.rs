@@ -536,9 +536,57 @@ pub async fn connect(url: &str) -> Result<&'static Db> {
         })
         .connect(url)
         .await?;
-    // ponytail: one global pool per process, like Django's default alias; multi-db routing when someone needs it.
+    // A read replica, if configured: plain SELECTs that can't miss this task's own writes go there.
+    if let Some(replica) = std::env::var("RANGOLI_DATABASE_REPLICA_URL").ok().filter(|u| !u.is_empty()) {
+        if Dialect::from_url(&replica)? != dialect {
+            return Err(Error::Config("RANGOLI_DATABASE_REPLICA_URL must be the same kind of database as the primary".into()));
+        }
+        let r = AnyPoolOptions::new()
+            .max_connections(crate::settings().db_pool)
+            .acquire_timeout(std::time::Duration::from_secs(crate::settings().db_timeout))
+            .connect(&replica)
+            .await?;
+        let _ = REPLICA.set(r);
+    }
     let _ = DB.set(Db { pool, dialect });
     Ok(DB.get().unwrap())
+}
+
+static REPLICA: OnceLock<AnyPool> = OnceLock::new();
+
+tokio::task_local! {
+    /// Set once this request or task has written: its reads then stay on the primary, so they
+    /// see their own writes despite replica lag.
+    static WROTE: std::cell::Cell<bool>;
+    static PRIMARY_ONLY: ();
+}
+
+/// Run `body` with read-your-writes tracking (one per request and per task run).
+pub(crate) async fn track_writes<T>(body: impl Future<Output = T>) -> T {
+    WROTE.scope(std::cell::Cell::new(false), body).await
+}
+
+/// Run `body` entirely on the primary, even its reads (for reads that must not lag).
+pub async fn on_primary<T>(body: impl Future<Output = T>) -> T {
+    PRIMARY_ONLY.scope((), body).await
+}
+
+/// The pool for a statement outside a transaction: the replica for plain SELECTs, unless this
+/// request or task already wrote or asked for the primary.
+fn pool_for(sql: &str) -> &'static AnyPool {
+    let read = sql.trim_start().get(..6).is_some_and(|w| w.eq_ignore_ascii_case("select"));
+    if !read {
+        let _ = WROTE.try_with(|w| w.set(true));
+    }
+    match REPLICA.get() {
+        Some(r) if read && !WROTE.try_with(|w| w.get()).unwrap_or(false) && PRIMARY_ONLY.try_with(|_| ()).is_err() => r,
+        _ => &db().pool,
+    }
+}
+
+/// Requests run with read-your-writes tracking.
+pub(crate) async fn request_scope(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    track_writes(next.run(req)).await
 }
 
 pub fn db() -> &'static Db {
@@ -607,6 +655,7 @@ pub async fn atomic<T, F: Future<Output = Result<T>>>(body: F) -> Result<T> {
         raw(format!("{end} {sp}")).await?;
         return out;
     }
+    let _ = WROTE.try_with(|w| w.set(true)); // reads after a transaction stay on the primary
     let tx: SharedTx = Arc::new(tokio::sync::Mutex::new(db().pool.begin().await?));
     let (out, written) = crate::cache::track(TX.scope(tx.clone(), body)).await;
     let tx = Arc::try_unwrap(tx).map_err(|_| Error::Config("a transaction outlived its atomic block".into()))?.into_inner();
@@ -658,7 +707,7 @@ pub(crate) async fn fetch_all(sql: &str, params: &Params) -> Result<Vec<AnyRow>>
     let started = std::time::Instant::now();
     let out = match TX.try_with(Arc::clone) {
         Ok(tx) => build(sql, params).fetch_all(&mut **tx.lock().await).await,
-        Err(_) => build(sql, params).fetch_all(&db().pool).await,
+        Err(_) => build(sql, params).fetch_all(pool_for(sql)).await,
     };
     crate::inspect::record(sql, started);
     Ok(out?)
@@ -669,7 +718,7 @@ pub(crate) async fn execute(sql: &str, params: &Params) -> Result<AnyQueryResult
     let started = std::time::Instant::now();
     let out = match TX.try_with(Arc::clone) {
         Ok(tx) => build(sql, params).execute(&mut **tx.lock().await).await,
-        Err(_) => build(sql, params).execute(&db().pool).await,
+        Err(_) => build(sql, params).execute(pool_for(sql)).await,
     };
     crate::inspect::record(sql, started);
     Ok(out?)
