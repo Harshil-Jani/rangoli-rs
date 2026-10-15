@@ -694,6 +694,20 @@ async fn detail(
     Ok(Json(row).into_response())
 }
 
+/// The model's whole-row rules (`App::validate`), as a 400 like field errors.
+async fn row_rules(meta: &'static ModelMeta, id: Option<i64>, cols: &[(&'static str, Value, FieldType)]) -> Result<(), Response> {
+    match crate::validators::check(meta, id, cols).await.map_err(fail)? {
+        Ok(()) => Ok(()),
+        Err(errors) => {
+            let body: Map<String, JsonValue> = errors
+                .into_iter()
+                .map(|(k, v)| (if k == "__all__" { "non_field_errors".to_string() } else { k }, json!([v])))
+                .collect();
+            Err((StatusCode::BAD_REQUEST, Json(JsonValue::Object(body))).into_response())
+        }
+    }
+}
+
 /// `?expand=author_id,editor_id`: embed each foreign key's row as `"author": {...}`, one query
 /// per field. Only for related tables this caller may read through the API, with their access
 /// rules, owned_by, row permissions and private fields, so expand never shows more than
@@ -821,6 +835,7 @@ async fn create(
     }
     let body = claim(opts, &user, &body, true);
     let cols = columns(meta, &body, true, false).await?;
+    row_rules(meta, None, &cols).await?;
     let links = body_links(meta, &body)?;
     if let Some(held) = hold(&scope, &user, &via, &table, "create", None, Some(&body)).await? {
         return Ok(held);
@@ -854,6 +869,7 @@ async fn update(
     fetch(meta, id, restrict(opts, user)).await?; // 404 before validation, like DRF (and for others' rows)
     let body = &claim(opts, user, body, false);
     let cols = columns(meta, body, false, partial).await?;
+    row_rules(meta, Some(id), &cols).await?;
     let links = body_links(meta, body)?;
     if let Some(held) = hold(scope, user, &via, table, if partial { "update" } else { "replace" }, Some(id), Some(body)).await? {
         return Ok(held);

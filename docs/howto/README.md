@@ -19,3 +19,4 @@ Short, task-first guides. Every API they use is exercised by the test suite on P
 - [Run code when data changes](on-change.md)
 - [Translations](translations.md)
 - [Read replicas](read-replicas.md)
+- [Rules about a whole row](validation.md)

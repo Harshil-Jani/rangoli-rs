@@ -43,6 +43,7 @@ pub mod tasks;
 pub mod testing;
 pub mod totp;
 pub mod uuid;
+pub mod validators;
 #[cfg(feature = "web")]
 pub mod web;
 pub mod webhooks;
@@ -620,6 +621,13 @@ impl App {
         if let Err(e) = i18n::load(dir.as_ref()) {
             panic!("rangoli: translations: {e}");
         }
+        self
+    }
+
+    /// A rule about a whole row of `M`, checked before every admin, API and import write:
+    /// see [`validators`]. Return field/message pairs to refuse the write.
+    pub fn validate<M: orm::Model>(self, rule: impl Fn(&M) -> std::result::Result<(), validators::Errors> + Send + Sync + 'static) -> Self {
+        validators::register::<M>(rule);
         self
     }
 

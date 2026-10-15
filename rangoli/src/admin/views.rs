@@ -1083,6 +1083,21 @@ async fn autocomplete(State(site): S, user: CurrentUser, uri: Uri, Path(table): 
     Ok(Html(html).into_response())
 }
 
+/// The admin form's field validation, then the model's whole-row rules (`App::validate`).
+async fn validate_all(
+    meta: &'static ModelMeta,
+    form: &HashMap<String, String>,
+    id: Option<i64>,
+    fixed: &[&str],
+) -> Result<Vec<(&'static str, Value, FieldType)>, HashMap<String, String>> {
+    let cols = validate(meta, form, id.is_none(), fixed).await?;
+    match crate::validators::check(meta, id, &cols).await {
+        Ok(Ok(())) => Ok(cols),
+        Ok(Err(errors)) => Err(errors),
+        Err(e) => Err([("__all__".to_string(), e.to_string())].into()),
+    }
+}
+
 // ---------------------------------------------------------------- CSV import
 
 const IMPORT_MAX_ROWS: usize = 10_000;
@@ -1183,7 +1198,7 @@ async fn plan_import(site: &Site, meta: &'static ModelMeta, u: &User, text: &str
                 form.insert(f.name.to_string(), cell.clone());
             }
         }
-        match crate::forms::validate(meta, &form, existing.is_none(), &fixed_fields(meta, opts, &form)).await {
+        match validate_all(meta, &form, id, &fixed_fields(meta, opts, &form)).await {
             Err(errors) => {
                 let mut msgs: Vec<String> = errors.into_iter().map(|(k, v)| format!("{k}: {v}")).collect();
                 msgs.sort();
@@ -1730,7 +1745,7 @@ async fn add_submit(State(site): S, user: CurrentUser, uri: Uri, Path(table): Pa
     let meta = addable(&site, &table)?;
     let form: HashMap<String, String> = pairs.iter().cloned().collect();
     let links = submitted_links(meta, &pairs);
-    let errors = match validate(meta, &form, true, &fixed_fields(meta, options(&site, meta), &form)).await {
+    let errors = match validate_all(meta, &form, None, &fixed_fields(meta, options(&site, meta), &form)).await {
         Ok(cols) => match crate::atomic(async {
             let id = orm::insert_row(meta.table, &cols).await?;
             save_links(meta, id, &links).await?;
@@ -1780,7 +1795,7 @@ async fn change_submit(
     let old = fetch_row(meta, id).await?;
     let old_links = current_links(meta, id).await.map_err(fail)?;
     let (inline_ops, inline_errors) = inline_changes(&site, meta, id, &form).await;
-    let errors = match validate(meta, &form, false, &fixed_fields(meta, options(&site, meta), &form)).await {
+    let errors = match validate_all(meta, &form, Some(id), &fixed_fields(meta, options(&site, meta), &form)).await {
         Ok(_) if !inline_errors.is_empty() => inline_errors,
         Ok(cols) => {
             let mut q = Query::new(meta);
