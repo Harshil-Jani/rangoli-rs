@@ -216,8 +216,14 @@ impl<M: Model> ModelForm<M> {
                 format!("<select name=\"{}\" id=\"{id}\"{required}>{opts}</select>", f.name)
             } else {
                 match f.ty {
-                    FieldType::Bool => format!("<input type=\"checkbox\" name=\"{}\" id=\"{id}\"{}>", f.name, if value.is_empty() { "" } else { " checked" }),
-                    FieldType::Text | FieldType::Json => format!("<textarea name=\"{}\" id=\"{id}\" rows=\"6\"{required}>{}</textarea>", f.name, esc(&value)),
+                    FieldType::Bool => format!(
+                        "<input type=\"checkbox\" name=\"{}\" id=\"{id}\"{}>",
+                        f.name,
+                        if value.is_empty() { "" } else { " checked" }
+                    ),
+                    FieldType::Text | FieldType::Json => {
+                        format!("<textarea name=\"{}\" id=\"{id}\" rows=\"6\"{required}>{}</textarea>", f.name, esc(&value))
+                    }
                     ty => {
                         let kind = match (f.password, ty) {
                             (true, _) => "password",
@@ -236,7 +242,8 @@ impl<M: Model> ModelForm<M> {
                 }
             };
             let help = f.help.map(|h| format!("<small id=\"{id}_help\">{}</small>", esc(h))).unwrap_or_default();
-            let error = errors.get(f.name).map(|e| format!("<span class=\"field-error\" id=\"{id}_error\">{}</span>", esc(e))).unwrap_or_default();
+            let error =
+                errors.get(f.name).map(|e| format!("<span class=\"field-error\" id=\"{id}_error\">{}</span>", esc(e))).unwrap_or_default();
             out.push_str(&format!("<p><label for=\"{id}\">{}</label> {control} {help}{error}</p>\n", esc(&label)));
         }
         out

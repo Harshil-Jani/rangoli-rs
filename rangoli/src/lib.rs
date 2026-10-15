@@ -779,7 +779,10 @@ impl App {
             }
             "createtoken" => {
                 let username = positional.ok_or_else(|| {
-                    Error::Config("usage: createtoken <username> [name] [--days N] [--read-only] [--needs-approval] [--tables a,b] [--max-writes N]".into())
+                    Error::Config(
+                        "usage: createtoken <username> [name] [--days N] [--read-only] [--needs-approval] [--tables a,b] [--max-writes N]"
+                            .into(),
+                    )
                 })?;
                 let user = auth::User::objects().filter(auth::User::USERNAME.eq(username)).get().await?;
                 let args: Vec<String> = std::env::args().collect();

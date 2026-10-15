@@ -189,7 +189,8 @@ fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonV
             };
             let mut schema = schema;
             if write {
-                schema["properties"]["dry_run"] = json!({ "type": "boolean", "description": "Check the change and see the result without saving anything" });
+                schema["properties"]["dry_run"] =
+                    json!({ "type": "boolean", "description": "Check the change and see the result without saving anything" });
             }
             let mut tool = json!({ "name": format!("{}_{op}", meta.table), "description": description, "inputSchema": schema });
             if !write {

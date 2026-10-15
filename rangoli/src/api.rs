@@ -701,7 +701,9 @@ async fn spend(scope: &ScopeExt, dry: bool) -> Result<(), Response> {
         return Ok(());
     }
     let until = 86_400 - crate::auth::now().rem_euclid(86_400);
-    let body = Json(json!({ "detail": format!("This token's daily limit of {} changes is used up; it resets at midnight UTC.", scope.max_writes_per_day.unwrap_or(0)) }));
+    let body = Json(
+        json!({ "detail": format!("This token's daily limit of {} changes is used up; it resets at midnight UTC.", scope.max_writes_per_day.unwrap_or(0)) }),
+    );
     Err((StatusCode::TOO_MANY_REQUESTS, [(axum::http::header::RETRY_AFTER, until.to_string())], body).into_response())
 }
 
@@ -732,10 +734,8 @@ async fn row_rules(meta: &'static ModelMeta, id: Option<i64>, cols: &[(&'static 
     match crate::validators::check(meta, id, cols).await.map_err(fail)? {
         Ok(()) => Ok(()),
         Err(errors) => {
-            let body: Map<String, JsonValue> = errors
-                .into_iter()
-                .map(|(k, v)| (if k == "__all__" { "non_field_errors".to_string() } else { k }, json!([v])))
-                .collect();
+            let body: Map<String, JsonValue> =
+                errors.into_iter().map(|(k, v)| (if k == "__all__" { "non_field_errors".to_string() } else { k }, json!([v]))).collect();
             Err((StatusCode::BAD_REQUEST, Json(JsonValue::Object(body))).into_response())
         }
     }
@@ -745,10 +745,22 @@ async fn row_rules(meta: &'static ModelMeta, id: Option<i64>, cols: &[(&'static 
 /// per field. Only for related tables this caller may read through the API, with their access
 /// rules, owned_by, row permissions and private fields, so expand never shows more than
 /// fetching the row directly would. A row the caller can't see comes back as null.
-async fn expand(site: &Site, meta: &'static ModelMeta, user: &CurrentUser, scope: &ScopeExt, rows: &mut [JsonValue], fields: Option<&str>) -> Result<(), Response> {
+async fn expand(
+    site: &Site,
+    meta: &'static ModelMeta,
+    user: &CurrentUser,
+    scope: &ScopeExt,
+    rows: &mut [JsonValue],
+    fields: Option<&str>,
+) -> Result<(), Response> {
     let Some(fields) = fields.filter(|f| !f.is_empty()) else { return Ok(()) };
     for name in fields.split(',').map(str::trim).filter(|n| !n.is_empty()).take(10) {
-        let bad = || problem(StatusCode::BAD_REQUEST, &format!("Can't expand `{name}`: it must be a foreign key to a table you can read through the API."));
+        let bad = || {
+            problem(
+                StatusCode::BAD_REQUEST,
+                &format!("Can't expand `{name}`: it must be a foreign key to a table you can read through the API."),
+            )
+        };
         let f = meta.field(name).filter(|f| f.exposed()).ok_or_else(bad)?;
         let target = f.fk.ok_or_else(bad)?;
         let (tmeta, topts) = endpoint(site, target, user, scope, false).map_err(|_| bad())?;

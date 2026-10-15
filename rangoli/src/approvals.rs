@@ -160,7 +160,8 @@ pub async fn preview_html(change: PendingChange) -> Result<String> {
             if let Some(ext) = req.extensions_mut() {
                 ext.insert(CurrentUser(user));
             }
-            let req = req.body(body.map_or_else(axum::body::Body::empty, axum::body::Body::from)).map_err(|e| Error::Config(e.to_string()))?;
+            let req =
+                req.body(body.map_or_else(axum::body::Body::empty, axum::body::Body::from)).map_err(|e| Error::Config(e.to_string()))?;
             let res = match api.oneshot(req).await {
                 Ok(r) => r,
                 Err(never) => match never {},
@@ -195,7 +196,8 @@ pub async fn preview_html(change: PendingChange) -> Result<String> {
     }
     let after = report.get("would_be").cloned().unwrap_or(serde_json::Value::Null);
     let deleting = report.get("would_delete").is_some();
-    let mut keys: Vec<String> = now.as_object().into_iter().flatten().chain(after.as_object().into_iter().flatten()).map(|(k, _)| k.clone()).collect();
+    let mut keys: Vec<String> =
+        now.as_object().into_iter().flatten().chain(after.as_object().into_iter().flatten()).map(|(k, _)| k.clone()).collect();
     keys.sort();
     keys.dedup();
     let rows: String = keys
@@ -204,10 +206,22 @@ pub async fn preview_html(change: PendingChange) -> Result<String> {
         .map(|k| {
             let (a, b) = (now.get(k), if deleting { None } else { after.get(k) });
             let changed = a != b;
-            format!("<tr{}><th scope=\"row\">{}</th><td>{}</td><td>{}</td></tr>", if changed { " class=\"changed\"" } else { "" }, esc(k), show(a), show(b))
+            format!(
+                "<tr{}><th scope=\"row\">{}</th><td>{}</td><td>{}</td></tr>",
+                if changed { " class=\"changed\"" } else { "" },
+                esc(k),
+                show(a),
+                show(b)
+            )
         })
         .collect();
-    let head = if deleting { "This deletes the row." } else if change.object_id.is_none() { "This adds a row." } else { "This changes the row." };
+    let head = if deleting {
+        "This deletes the row."
+    } else if change.object_id.is_none() {
+        "This adds a row."
+    } else {
+        "This changes the row."
+    };
     Ok(format!("<p>{head} Changed fields are highlighted.</p><table class=\"diff\"><thead><tr><th scope=\"col\">Field</th><th scope=\"col\">Now</th><th scope=\"col\">After</th></tr></thead><tbody>{rows}</tbody></table>"))
 }
 

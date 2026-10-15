@@ -17,9 +17,13 @@ struct Task {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn edit_many_rows_at_once() {
-    let app = App::new()
-        .admin_with::<Task>(ModelAdmin::new())
-        .validate::<Task>(|t| if t.points > 100 { Err(vec![("points", "Too many points.".into())]) } else { Ok(()) });
+    let app = App::new().admin_with::<Task>(ModelAdmin::new()).validate::<Task>(|t| {
+        if t.points > 100 {
+            Err(vec![("points", "Too many points.".into())])
+        } else {
+            Ok(())
+        }
+    });
     testing::database(&app).await.unwrap();
     let mut ids = vec![];
     for (title, points) in [("a", 1), ("b", 2), ("c", 99)] {

@@ -695,18 +695,46 @@ async fn attention() -> crate::Result<Vec<minijinja::Value>> {
         }
     };
     let pending = PendingChange::objects().filter(PendingChange::STATUS.eq(ApprovalStatus::Pending)).count().await?;
-    add(pending, "agent change waits for your approval", "agent changes wait for your approval", "/admin/rangoli_pending_change/?f.status=pending", "rangoli_pending_change", "warning");
+    add(
+        pending,
+        "agent change waits for your approval",
+        "agent changes wait for your approval",
+        "/admin/rangoli_pending_change/?f.status=pending",
+        "rangoli_pending_change",
+        "warning",
+    );
     let failed = |name: &'static str| async move {
         let mut q = TaskRecord::objects().filter(TaskRecord::STATUS.eq(TaskStatus::Failed) & TaskRecord::FINISHED_AT.gte(day_ago));
         q = if name.is_empty() { q.exclude(TaskRecord::NAME.eq("rangoli.webhook")) } else { q.filter(TaskRecord::NAME.eq(name)) };
         q.count().await
     };
     let jobs = failed("").await?;
-    add(jobs, "background job failed today", "background jobs failed today", "/admin/rangoli_task/?f.status=failed", "rangoli_task", "error");
+    add(
+        jobs,
+        "background job failed today",
+        "background jobs failed today",
+        "/admin/rangoli_task/?f.status=failed",
+        "rangoli_task",
+        "error",
+    );
     let hooks = failed("rangoli.webhook").await?;
-    add(hooks, "webhook delivery failed today", "webhook deliveries failed today", "/admin/rangoli_task/?f.status=failed&q=rangoli.webhook", "rangoli_task", "error");
+    add(
+        hooks,
+        "webhook delivery failed today",
+        "webhook deliveries failed today",
+        "/admin/rangoli_task/?f.status=failed&q=rangoli.webhook",
+        "rangoli_task",
+        "error",
+    );
     let agents = crate::auth::ApiToken::objects().filter(crate::auth::ApiToken::LAST_USED_AT.gte(day_ago)).count().await?;
-    add(agents, "agent or API token used today", "agents or API tokens used today", "/admin/rangoli_api_token/", "rangoli_api_token", "info");
+    add(
+        agents,
+        "agent or API token used today",
+        "agents or API tokens used today",
+        "/admin/rangoli_api_token/",
+        "rangoli_api_token",
+        "info",
+    );
     Ok(out)
 }
 
@@ -824,6 +852,7 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
             fk_labels.insert(i, labels(&site, target, ids.collect()).await?);
         }
     }
+    let editable: Vec<&str> = if can(meta.table, "change") { opts.list_editable.clone() } else { vec![] };
     let rows: Vec<_> = raw_rows
         .iter()
         .map(|(id, vals)| {
@@ -831,6 +860,19 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
                 .iter()
                 .map(|c| match *c {
                     Column::Id => context! { text => id.to_string() },
+                    Column::Field(_, f) if editable.contains(&f.name) => {
+                        let raw = raw_values(meta, vals).remove(f.name).unwrap_or_default();
+                        let kind = match (f.choices, f.ty) {
+                            (Some(_), _) => "select",
+                            (_, FieldType::Bool) => "checkbox",
+                            (_, FieldType::Int | FieldType::Float | FieldType::Decimal(_)) => "number",
+                            (_, FieldType::Date) => "date",
+                            _ => "text",
+                        };
+                        let options: Vec<(String, String)> =
+                            f.choices.into_iter().flatten().map(|(v, l)| (v.to_string(), l.to_string())).collect();
+                        context! { edit => true, name => format!("e{id}_{}", f.name), label => label(f.name), value => raw, kind, options }
+                    }
                     Column::Field(i, f) => match (&vals[i], fk_labels.get(&i)) {
                         (Value::Bool(b), _) => context! { bool => b },
                         (Value::Int(fid), Some(names)) => context! { text => names.get(fid).cloned().unwrap_or_else(|| fid.to_string()) },
@@ -910,6 +952,7 @@ async fn list(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
             messages => match action_message(&site, meta, &p) { Some(m) => Some(m), None => message(&p, u, "list").await },
             actions => options(&site, meta).actions.iter().map(|a| context! { name => a.name, label => a.label }).collect::<Vec<_>>(),
             q, keep, count, full_count, filtered, what, page_links, estimated, export_url, semantic => semantic.is_some(), meaning,
+            editable => !editable.is_empty(),
             columns => headers, rows, filters => filter_blocks, searchable => !searchable.is_empty() || !meta.search.is_empty(), clear_url => base.clone(),
             ..chrome(&site, u, Some(meta))
         },
@@ -1089,6 +1132,70 @@ async fn requests_page(State(site): S, user: CurrentUser, uri: Uri) -> Page {
     render(&site, "requests.html", context! { title => "Requests", requests, enabled, repeat, ..chrome(&site, u, None) })
 }
 
+// ---------------------------------------------------------------- editing in the list
+
+/// Save the changelist's editable columns: rows listed in `_list_row`, fields `e<id>_<name>`.
+/// Changed rows are checked like normal edits and saved together, or none are.
+async fn list_save(site: &Site, u: &User, meta: &'static ModelMeta, table: &str, f: &Pairs) -> Page {
+    let opts = options(site, meta);
+    let posted: HashMap<String, String> = f.iter().cloned().collect();
+    let shown: Vec<i64> = f.iter().filter(|(k, _)| k == "_list_row").filter_map(|(_, v)| v.parse().ok()).collect();
+    let mut q = Query::new(meta);
+    q.filter.push(Node::In("id", shown.iter().map(|i| Value::Int(*i)).collect(), FieldType::Int));
+    q.filter.extend(row_filter(site, meta, u));
+    let rows = q.rows().await.map_err(fail)?;
+    let (mut plans, mut errors) = (vec![], vec![]);
+    for (id, vals) in &rows {
+        let before = raw_values(meta, vals);
+        let mut form = before.clone();
+        for name in &opts.list_editable {
+            let is_bool = meta.field(name).is_some_and(|fm| fm.ty == FieldType::Bool);
+            match posted.get(&format!("e{id}_{name}")) {
+                Some(v) => form.insert(name.to_string(), v.clone()),
+                None if is_bool => form.remove(*name),
+                None => None,
+            };
+        }
+        if form == before {
+            continue; // unchanged rows aren't touched (no History noise)
+        }
+        match validate_all(meta, &form, Some(*id), &fixed_fields(meta, opts, &form)).await {
+            Ok(cols) => plans.push((*id, cols)),
+            Err(errs) => {
+                let mut msgs: Vec<String> = errs.into_iter().map(|(k, v)| format!("{k}: {v}")).collect();
+                msgs.sort();
+                errors.push(format!("{}: {}", repr(meta, *id, vals), msgs.join(" ")));
+            }
+        }
+    }
+    if errors.is_empty() {
+        let saved = crate::atomic(async {
+            for (id, cols) in &plans {
+                let mut uq = Query::new(meta);
+                uq.filter.push(by_id(*id));
+                let old = row_values(meta, *id).await?;
+                uq.update(cols).await?;
+                still_visible(site, meta, u, *id).await?;
+                let vals = row_values(meta, *id).await?;
+                log(u, meta, *id, &repr(meta, *id, &vals), CHANGE, change_message(meta, &old, cols, &[])).await?;
+            }
+            Ok(())
+        })
+        .await;
+        match saved {
+            Ok(()) => {
+                let qs = serde_urlencoded::to_string([("applied", "edit_selected".to_string()), ("n", plans.len().to_string())]).unwrap();
+                return Ok(Redirect::to(&format!("/admin/{table}/?{qs}")).into_response());
+            }
+            Err(e) => errors.push(db_error_message(&e).map_or_else(|| e.to_string(), str::to_string)),
+        }
+    }
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let list: String = errors.iter().map(|e| format!("<li>{}</li>", esc(e))).collect();
+    let html = format!("<h1>Nothing was saved</h1><ul>{list}</ul><p><a href=\"/admin/{table}/\">Back to the list</a></p>");
+    Ok((StatusCode::UNPROCESSABLE_ENTITY, Html(html)).into_response())
+}
+
 // ---------------------------------------------------------------- bulk edit
 
 /// "Edit selected": set some fields on many rows, each checked like a normal edit, all saved
@@ -1146,7 +1253,8 @@ async fn bulk_edit(site: &Site, u: &User, meta: &'static ModelMeta, table: &str,
             .await;
             match saved {
                 Ok(()) => {
-                    let qs = serde_urlencoded::to_string([("applied", "edit_selected".to_string()), ("n", plans.len().to_string())]).unwrap();
+                    let qs =
+                        serde_urlencoded::to_string([("applied", "edit_selected".to_string()), ("n", plans.len().to_string())]).unwrap();
                     return Ok(Redirect::to(&format!("/admin/{table}/?{qs}")).into_response());
                 }
                 Err(e) => errors.push(db_error_message(&e).map_or_else(|| e.to_string(), str::to_string)),
@@ -1157,7 +1265,9 @@ async fn bulk_edit(site: &Site, u: &User, meta: &'static ModelMeta, table: &str,
     let all = form_fields(site, meta, &posted, &HashMap::new(), false, &[], "", &[]).await?;
     let fields: Vec<minijinja::Value> = all
         .into_iter()
-        .filter(|v| v.get_attr("name").ok().and_then(|n| n.as_str().map(str::to_string)).is_some_and(|n| editable.iter().any(|fm| fm.name == n)))
+        .filter(|v| {
+            v.get_attr("name").ok().and_then(|n| n.as_str().map(str::to_string)).is_some_and(|n| editable.iter().any(|fm| fm.name == n))
+        })
         .map(|v| {
             let name = v.get_attr("name").ok().and_then(|n| n.as_str().map(str::to_string)).unwrap_or_default();
             context! { set => posted.contains_key(&format!("set_{name}")), ..v }
@@ -1439,6 +1549,10 @@ fn date_range_start(v: &str) -> Option<DateTime> {
 async fn bulk(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<String>, Form(f): Form<Pairs>) -> Page {
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
+    if param(&f, "_save_list").is_some() {
+        allowed(meta.table, "change")?;
+        return list_save(&site, u, meta, &table, &f).await;
+    }
     let ids: Vec<i64> = f.iter().filter(|(k, _)| k == "_selected_action").filter_map(|(_, v)| v.parse().ok()).collect();
     if param(&f, "action").unwrap_or("").is_empty() {
         return Ok(Redirect::to(&format!("/admin/{table}/?warn=noaction")).into_response());
@@ -1812,7 +1926,8 @@ async fn form_page(
     let mut panels = vec![];
     if let Some(id) = id {
         for p in &o.panels {
-            let html = (p.render)(id).await.unwrap_or_else(|e| format!("<p class=\"field-error\">{}</p>", e.to_string().replace('<', "&lt;")));
+            let html =
+                (p.render)(id).await.unwrap_or_else(|e| format!("<p class=\"field-error\">{}</p>", e.to_string().replace('<', "&lt;")));
             panels.push(context! { title => p.title, html => minijinja::Value::from_safe_string(html) });
         }
     }

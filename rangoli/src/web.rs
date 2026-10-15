@@ -82,7 +82,8 @@ mod filters {
     use minijinja::value::Value;
     use minijinja::Environment;
 
-    const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const MONTHS: [&str; 12] =
+        ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
     const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
     fn when(v: &Value) -> Option<DateTime> {
@@ -191,7 +192,11 @@ mod filters {
             size /= 1024.0;
             u += 1;
         }
-        if u == 0 { format!("{n} bytes") } else { format!("{size:.1} {}", units[u]) }
+        if u == 0 {
+            format!("{n} bytes")
+        } else {
+            format!("{size:.1} {}", units[u])
+        }
     }
 
     pub(super) fn add(env: &mut Environment<'static>) {
@@ -213,7 +218,10 @@ mod filters {
             assert_eq!(date(Value::from("2027-01-15T08:00:00Z"), Some("%a %e %B %Y, %H:%M".into())), "Fri 15 January 2027, 08:00");
             assert_eq!(intcomma(Value::from(1234567)), "1,234,567");
             assert_eq!(intcomma(Value::from(-1234.5)), "-1,234.5");
-            assert_eq!((pluralize(Value::from(1), None), pluralize(Value::from(2), Some("y,ies".into()))), ("".to_string(), "ies".to_string()));
+            assert_eq!(
+                (pluralize(Value::from(1), None), pluralize(Value::from(2), Some("y,ies".into()))),
+                ("".to_string(), "ies".to_string())
+            );
             assert_eq!(truncatewords("one two three".into(), 2), "one two …");
             assert_eq!(linebreaksbr("a<b>\nc".into()).to_string(), "a&lt;b&gt;<br>c");
             assert_eq!(filesizeformat(Value::from(1536)), "1.5 KB");

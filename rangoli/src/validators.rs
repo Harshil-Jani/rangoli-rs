@@ -34,7 +34,11 @@ pub(crate) fn register<M: Model>(rule: impl Fn(&M) -> Result<(), Errors> + Send 
 
 /// Check a write of `cols` to `meta` (row `id` when updating), against the row as it would be
 /// saved: the stored values with `cols` on top, or the type's zero value for a new row.
-pub(crate) async fn check(meta: &'static ModelMeta, id: Option<i64>, cols: &[(&'static str, Value, FieldType)]) -> crate::Result<Result<(), HashMap<String, String>>> {
+pub(crate) async fn check(
+    meta: &'static ModelMeta,
+    id: Option<i64>,
+    cols: &[(&'static str, Value, FieldType)],
+) -> crate::Result<Result<(), HashMap<String, String>>> {
     let rules: Vec<Rule> =
         RULES.read().unwrap_or_else(PoisonError::into_inner).iter().filter(|(t, _)| *t == meta.table).map(|(_, r)| r.clone()).collect();
     if rules.is_empty() {

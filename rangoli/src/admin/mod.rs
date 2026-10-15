@@ -100,6 +100,8 @@ pub struct Options {
     pub(crate) fieldsets: Vec<(&'static str, Vec<&'static str>)>,
     /// Read-only panels on the change page (`ModelAdmin::panel`).
     pub(crate) panels: Vec<Panel>,
+    /// Columns edited right in the changelist (`ModelAdmin::list_editable`).
+    pub(crate) list_editable: Vec<&'static str>,
 }
 
 type PanelFn = dyn Fn(i64) -> Pin<Box<dyn Future<Output = crate::Result<String>> + Send>> + Send + Sync;
@@ -251,6 +253,13 @@ impl<M: Model> ModelAdmin<M> {
                 Box::pin(async move { render(M::get(id).await?).await })
             }),
         });
+        self
+    }
+
+    /// Edit these columns right in the changelist, with one Save for the page (Django's
+    /// `list_editable`). Each changed row is checked like a normal edit; all save or none do.
+    pub fn list_editable<const N: usize>(mut self, cols: [&dyn Field<M>; N]) -> Self {
+        self.opts.list_editable = Self::names(cols);
         self
     }
 

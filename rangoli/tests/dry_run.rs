@@ -37,8 +37,14 @@ async fn dry_runs_change_nothing() {
     assert_eq!(r.json()["would_delete"]["name"], "Tea");
     assert!(Item::get(id).await.is_ok(), "nor the delete");
 
-    let mcp = c.post_json("/mcp", &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": { "name": "dr_item_update", "arguments": { "id": id, "qty": 7, "dry_run": true } } })).await.json();
+    let mcp = c
+        .post_json(
+            "/mcp",
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "dr_item_update", "arguments": { "id": id, "qty": 7, "dry_run": true } } }),
+        )
+        .await
+        .json();
     assert!(mcp["result"]["content"][0]["text"].as_str().unwrap().contains("would_be"), "{mcp}");
     assert_eq!(Item::get(id).await.unwrap().qty, 2, "agents can dry-run too");
     sqlx::query("DROP TABLE dr_item").execute(&rangoli::orm::db().pool).await.unwrap();

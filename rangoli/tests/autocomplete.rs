@@ -39,7 +39,10 @@ async fn big_foreign_keys_search_instead_of_listing() {
     c.login(&boss).await;
 
     let form = c.get("/admin/ac_order/add").await.body;
-    assert!(form.contains("data-fk-for=\"id_customer_id\"") && !form.contains("Customer 1499</option>"), "1,500 customers: a search box, not a 1,500-item list");
+    assert!(
+        form.contains("data-fk-for=\"id_customer_id\"") && !form.contains("Customer 1499</option>"),
+        "1,500 customers: a search box, not a 1,500-item list"
+    );
     let found = c.get("/admin/ac_customer/autocomplete?q=Customer+1234").await.body;
     assert!(found.contains(&format!("data-id=\"{target}\"")) && found.matches("<option").count() == 1, "{found}");
     let by_id = c.get(&format!("/admin/ac_customer/autocomplete?q={target}")).await.body;

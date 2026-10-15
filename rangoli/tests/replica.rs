@@ -31,10 +31,13 @@ async fn reads_go_to_the_replica_until_you_write() {
     let app = App::new().model::<Item>().routes(
         Router::new()
             .route("/read", get(names))
-            .route("/write-then-read", get(|| async {
-                Item { id: None, name: "fresh".into() }.save().await.unwrap();
-                names().await
-            }))
+            .route(
+                "/write-then-read",
+                get(|| async {
+                    Item { id: None, name: "fresh".into() }.save().await.unwrap();
+                    names().await
+                }),
+            )
             .route("/forced", get(|| on_primary(names()))),
     );
     testing::database(&app).await.unwrap();

@@ -28,6 +28,7 @@
           {% for a in actions %}<option value="{{ a.name }}">{{ a.label }}</option>{% endfor %}
         </select>
         <button type="submit" class="btn">Go</button>
+        {% if editable %}<button type="submit" name="_save_list" value="1" class="btn primary">Save changes</button>{% endif %}
         <span class="action-counter meta">0 of {{ rows|length }} selected</span>
       </div>
       <div class="table-wrap">
@@ -41,9 +42,10 @@
           <tbody>
             {% for r in rows %}
             <tr>
-              <td class="check"><input type="checkbox" name="_selected_action" value="{{ r.id }}" class="action-select" aria-label="Select {{ r.repr }}"></td>
+              <td class="check"><input type="checkbox" name="_selected_action" value="{{ r.id }}" class="action-select" aria-label="Select {{ r.repr }}"></td>{% if editable %}<input type="hidden" name="_list_row" value="{{ r.id }}">{% endif %}
               {% for cell in r.cells %}
-              {% if loop.first %}<th scope="row"><a href="{{ r.url }}">{% else %}<td>{% endif %}{% if cell.bool is defined %}<img src="/admin/static/icon-{% if cell.bool %}yes{% else %}no{% endif %}.svg?v={{ v }}" alt="{% if cell.bool %}Yes{% else %}No{% endif %}" width="14" height="14">{% else %}{{ cell.text }}{% endif %}{% if loop.first %}</a></th>{% else %}</td>{% endif %}
+              {% if cell.edit %}<td>{% if cell.kind == "checkbox" %}<input type="checkbox" name="{{ cell.name }}" aria-label="{{ cell.label }}"{% if cell.value %} checked{% endif %}>{% elif cell.kind == "select" %}<select name="{{ cell.name }}" aria-label="{{ cell.label }}">{% for o in cell.options %}<option value="{{ o[0] }}"{% if o[0] == cell.value %} selected{% endif %}>{{ o[1] }}</option>{% endfor %}</select>{% else %}<input name="{{ cell.name }}" value="{{ cell.value }}" aria-label="{{ cell.label }}" type="{{ cell.kind }}"{% if cell.kind == "number" %} step="any"{% endif %} class="narrow">{% endif %}</td>{% else %}
+              {% if loop.first %}<th scope="row"><a href="{{ r.url }}">{% else %}<td>{% endif %}{% if cell.bool is defined %}<img src="/admin/static/icon-{% if cell.bool %}yes{% else %}no{% endif %}.svg?v={{ v }}" alt="{% if cell.bool %}Yes{% else %}No{% endif %}" width="14" height="14">{% else %}{{ cell.text }}{% endif %}{% if loop.first %}</a></th>{% else %}</td>{% endif %}{% endif %}
               {% endfor %}
             </tr>
             {% else %}

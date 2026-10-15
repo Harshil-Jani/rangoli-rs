@@ -143,7 +143,12 @@ fn from_accept(header: &str, have: &HashMap<String, HashMap<String, String>>) ->
 
 pub(crate) async fn middleware(req: Request, next: Next) -> Response {
     let Some(c) = CATALOGS.get() else { return next.run(req).await };
-    let asked = req.uri().query().and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("lang="))).map(str::to_lowercase).filter(|l| c.langs.contains_key(l));
+    let asked = req
+        .uri()
+        .query()
+        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("lang=")))
+        .map(str::to_lowercase)
+        .filter(|l| c.langs.contains_key(l));
     let cookie = req
         .headers()
         .get(header::COOKIE)
@@ -169,7 +174,8 @@ mod tests {
 
     #[test]
     fn accept_language_picks_the_best_loaded() {
-        let have: HashMap<String, HashMap<String, String>> = [("en".to_string(), HashMap::new()), ("hi".to_string(), HashMap::new())].into();
+        let have: HashMap<String, HashMap<String, String>> =
+            [("en".to_string(), HashMap::new()), ("hi".to_string(), HashMap::new())].into();
         assert_eq!(from_accept("hi-IN,hi;q=0.9,en;q=0.8", &have).as_deref(), Some("hi"), "a region falls back to its language");
         assert_eq!(from_accept("fr;q=1,en;q=0.5", &have).as_deref(), Some("en"), "skips what isn't loaded");
         assert_eq!(from_accept("en;q=0.2,hi;q=0.9", &have).as_deref(), Some("hi"), "by weight, not order");

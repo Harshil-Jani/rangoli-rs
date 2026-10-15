@@ -14,9 +14,13 @@ struct Booking {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rules_see_the_whole_row() {
-    let app = App::new()
-        .api::<Booking>(Api::new().read(Access::Public).write(Access::Public))
-        .validate::<Booking>(|b| if b.ends_at <= b.starts_at { Err(vec![("ends_at", "Must be after the start.".into())]) } else { Ok(()) });
+    let app = App::new().api::<Booking>(Api::new().read(Access::Public).write(Access::Public)).validate::<Booking>(|b| {
+        if b.ends_at <= b.starts_at {
+            Err(vec![("ends_at", "Must be after the start.".into())])
+        } else {
+            Ok(())
+        }
+    });
     testing::database(&app).await.unwrap();
     let c = testing::Client::new(&app);
 

@@ -36,7 +36,11 @@ async fn reviewers_see_the_diff() {
     let mut admin = testing::Client::new(&app);
     admin.login(&boss).await;
     let page = admin.get(&format!("/admin/rangoli_pending_change/{}/", pending.id.unwrap())).await.body;
-    assert!(page.contains("What would change") && page.contains("<tr class=\"changed\"><th scope=\"row\">cents</th><td>250</td><td>9900</td></tr>"), "{page}");
+    assert!(
+        page.contains("What would change")
+            && page.contains("<tr class=\"changed\"><th scope=\"row\">cents</th><td>250</td><td>9900</td></tr>"),
+        "{page}"
+    );
     assert!(page.contains("<tr><th scope=\"row\">item</th><td>Tea</td><td>Tea</td></tr>"), "unchanged fields aren't highlighted");
     assert_eq!(Price::get(p.id.unwrap()).await.unwrap().cents, 250, "previewing changed nothing");
     sqlx::query("DROP TABLE pv_price").execute(&rangoli::orm::db().pool).await.unwrap();

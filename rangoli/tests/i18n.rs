@@ -8,11 +8,24 @@ use rangoli::{i18n, testing, App};
 async fn each_request_in_its_language() {
     let dir = std::env::temp_dir().join(format!("rangoli-locales-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("en.json"), r#"{"hello": "Hello, {name}!", "cart": {"items": {"one": "{count} item", "other": "{count} items"}}, "only_en": "English only"}"#).unwrap();
-    std::fs::write(dir.join("hi.json"), r#"{"hello": "नमस्ते, {name}!", "cart": {"items": {"one": "{count} चीज़", "other": "{count} चीज़ें"}}}"#).unwrap();
+    std::fs::write(
+        dir.join("en.json"),
+        r#"{"hello": "Hello, {name}!", "cart": {"items": {"one": "{count} item", "other": "{count} items"}}, "only_en": "English only"}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("hi.json"), r#"{"hello": "नमस्ते, {name}!", "cart": {"items": {"one": "{count} चीज़", "other": "{count} चीज़ें"}}}"#)
+        .unwrap();
     let app = App::new().locales(&dir).routes(Router::new().route(
         "/greet",
-        get(|| async { format!("{} | {} | {} | {}", i18n::tr("hello", &[("name", &"Asha")]), i18n::t_n("cart.items", 3), i18n::t("only_en"), i18n::t("missing.key")) }),
+        get(|| async {
+            format!(
+                "{} | {} | {} | {}",
+                i18n::tr("hello", &[("name", &"Asha")]),
+                i18n::t_n("cart.items", 3),
+                i18n::t("only_en"),
+                i18n::t("missing.key")
+            )
+        }),
     ));
     testing::database(&app).await.unwrap();
     let c = testing::Client::new(&app);
