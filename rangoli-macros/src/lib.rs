@@ -225,12 +225,27 @@ fn expand(input: DeriveInput) -> syn::Result<Tokens> {
             Some(p) => quote!(Some(<#p as ::rangoli::orm::Model>::TABLE)),
             None => quote!(None),
         };
+        // `///` doc comments become the field's help text everywhere it's shown.
+        let doc: Vec<String> = f
+            .attrs
+            .iter()
+            .filter(|a| a.path().is_ident("doc"))
+            .filter_map(|a| match &a.meta {
+                syn::Meta::NameValue(nv) => match &nv.value {
+                    syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => Some(s.value().trim().to_string()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let help_text = doc.join(" ").trim().to_string();
+        let help_tokens = if help_text.is_empty() { quote!(None) } else { quote!(Some(#help_text)) };
         metas.push(quote! {
             ::rangoli::orm::FieldMeta {
                 name: #name_s, ty: ::rangoli::orm::FieldType::#ty, null: #null,
                 unique: #unique, password: #password, private: #private, fk: #fk_tokens, cascade: #cascade,
                 auto_now: #auto_now, auto_now_add: #framework_fills, index: #index,
-                choices: #choices_tokens, default: #default_tokens,
+                choices: #choices_tokens, default: #default_tokens, help: #help_tokens,
             }
         });
         reads.push(quote! {

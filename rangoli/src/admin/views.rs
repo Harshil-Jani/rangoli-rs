@@ -1543,7 +1543,7 @@ async fn form_fields(
             target => search_in, current,
             required => !f.null && f.ty != FieldType::Bool && (is_add || !f.password),
             maxlength => match f.ty { FieldType::Varchar(n) => Some(n), _ => None },
-            help => if f.password && !is_add { Some("Leave blank to keep the current password.") } else if f.ty == FieldType::DateTime { Some("Date and time in UTC.") } else { None },
+            help => if f.password && !is_add { Some("Leave blank to keep the current password.") } else if f.help.is_some() { f.help } else if f.ty == FieldType::DateTime { Some("Date and time in UTC.") } else { None },
             error => errors.get(f.name),
         });
     }
@@ -2247,6 +2247,7 @@ mod tests {
                 index: false,
                 choices: None,
                 default: None,
+                help: None,
             }
         }
         static FIELDS: [FieldMeta; 3] =

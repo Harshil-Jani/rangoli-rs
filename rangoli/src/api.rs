@@ -971,6 +971,12 @@ pub(crate) fn field_schema(f: &FieldMeta) -> JsonValue {
     if let Some(t) = f.fk {
         s["description"] = json!(format!("id of a {t} row"));
     }
+    if let Some(h) = f.help {
+        s["description"] = json!(match s["description"].as_str() {
+            Some(d) => format!("{h} ({d})"),
+            None => h.to_string(),
+        });
+    }
     s
 }
 

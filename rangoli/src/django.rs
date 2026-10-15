@@ -257,6 +257,7 @@ pub async fn introspect() -> Result<Schema> {
                     index: false,
                     choices: None,
                     default: None,
+                    help: None,
                 }
             })
             .collect();

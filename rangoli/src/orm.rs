@@ -72,6 +72,9 @@ pub struct FieldMeta {
     pub choices: Option<&'static [(&'static str, &'static str)]>,
     /// `#[field(default = ...)]`: fills existing rows in migrations, new forms and API creates.
     pub default: Option<Lit>,
+    /// The field's `///` doc comment: help text in the admin, a description in OpenAPI and in
+    /// the MCP tools agents see.
+    pub help: Option<&'static str>,
 }
 
 /// A literal default value, usable in `'static` metadata.
@@ -1807,6 +1810,7 @@ pub(crate) const fn link_meta(name: &'static str) -> FieldMeta {
         index: false,
         choices: None,
         default: None,
+        help: None,
     }
 }
 

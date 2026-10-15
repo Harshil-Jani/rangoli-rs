@@ -27,10 +27,12 @@ pub struct Post {
     pub title: String,
     #[field(text)]
     pub body: String,
+    /// Shown on the public site; drafts stay in the admin.
     #[field(index)]
     pub published: bool,
     #[field(fk = Author)]
     pub author_id: i64,
+    /// Readers' average score, 0 to 5.
     pub rating: Option<f64>,
     #[field(auto_now_add, index)] // the admin lists newest first
     pub created_at: DateTime,
