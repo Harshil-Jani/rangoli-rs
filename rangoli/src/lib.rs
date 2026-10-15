@@ -36,6 +36,7 @@ pub mod orm;
 pub mod realtime;
 pub mod storage;
 pub mod tasks;
+pub mod testing;
 pub mod totp;
 pub mod uuid;
 #[cfg(feature = "web")]
