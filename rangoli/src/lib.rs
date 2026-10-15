@@ -613,8 +613,42 @@ impl App {
             vector: admin::Field::<M>::name(&vector),
             sources,
             fields: M::meta().fields,
+            ask: None,
         });
-        self.task::<embed::Fill>().schedule("* * * * *", embed::Fill { table: M::TABLE.to_string() })
+        let column = admin::Field::<M>::name(&vector).to_string();
+        self.model::<M>().task::<embed::Fill>().schedule("* * * * *", embed::Fill { table: M::TABLE.to_string(), column })
+    }
+
+    /// A text field the language model ([`App::llm`]) keeps filled from other fields, redone
+    /// only when they change: a ticket's category, a summary, a detected language.
+    ///
+    /// ```ignore
+    /// app.ai_field(&Ticket::CATEGORY, [&Ticket::SUBJECT, &Ticket::BODY], "Which team should handle this support ticket?")
+    /// ```
+    ///
+    /// The field must be optional text (`Option<String>`): empty while the answer is pending.
+    /// With `choices` the answer must be one of them (anything else is stored as ""); a
+    /// `max_length` cuts it. The row's text goes to the model marked as data, not instructions.
+    pub fn ai_field<M: orm::Model, const N: usize>(
+        self,
+        field: &dyn admin::Field<M>,
+        from: [&dyn admin::Field<M>; N],
+        instruction: &'static str,
+    ) -> Self {
+        let name = field.name();
+        let meta = M::meta().field(name).unwrap_or_else(|| panic!("rangoli: ai_field: no field {name}"));
+        assert!(
+            meta.null && matches!(meta.ty, orm::FieldType::Varchar(_) | orm::FieldType::Text),
+            "rangoli: ai_field `{name}` must be an Option<String>"
+        );
+        embed::AUTO.write().unwrap_or_else(std::sync::PoisonError::into_inner).push(embed::Auto {
+            table: M::TABLE,
+            vector: name,
+            sources: from.iter().map(|f| f.name()).collect(),
+            fields: M::meta().fields,
+            ask: Some(instruction),
+        });
+        self.model::<M>().task::<embed::Fill>().schedule("* * * * *", embed::Fill { table: M::TABLE.to_string(), column: name.to_string() })
     }
 
     /// Record every request's SQL (on by default with `RANGOLI_DEBUG=1`): staff see it under

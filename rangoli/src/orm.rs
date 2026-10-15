@@ -1272,9 +1272,9 @@ impl Query {
         let d = db().dialect;
         let mut p: Params = vec![];
         let mut assigns: Vec<String> = vec![];
-        // An auto-embedded vector goes first: it compares the sources with the row as it was.
-        let guard = crate::embed::guard(self.table, sets, d);
-        if let Some((col, template, params)) = &guard {
+        // Kept-current columns go first: they compare the sources with the row as it was.
+        let guards = crate::embed::guards(self.table, sets, d);
+        for (col, template, params) in &guards {
             let mut expr = String::new();
             let mut parts = template.split("{}");
             expr.push_str(parts.next().unwrap_or(""));
@@ -1286,7 +1286,7 @@ impl Query {
             assigns.push(format!("{} = {expr}", d.quote(col)));
         }
         for (c, v, t) in sets {
-            if guard.as_ref().is_some_and(|(col, ..)| col == c) {
+            if guards.iter().any(|(col, ..)| col == c) {
                 continue;
             }
             p.push((v.clone(), *t));
@@ -1296,7 +1296,8 @@ impl Query {
         self.push_where(d, &mut sql, &mut p);
         let n = execute(&sql, &p).await?.rows_affected();
         crate::cache::changed(self.table);
-        if guard.is_some() {
+        if !guards.is_empty() {
+            crate::embed::forget(self.table);
             crate::embed::after_write(self.table).await?;
         }
         Ok(n)
