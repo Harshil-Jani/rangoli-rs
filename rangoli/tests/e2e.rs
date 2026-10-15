@@ -420,6 +420,7 @@ async fn scenario() {
                 .ordering(PostV2::TITLE.asc())
                 .readonly_fields([&PostV2::VIEWS])
                 .show_when(&PostV2::PUBLISH_AT, &PostV2::STATUS, ["published"])
+                .fieldsets([("Publishing", vec![&PostV2::STATUS, &PostV2::PUBLISH_AT])])
                 .list_per_page(2)
                 .action("publish", "Mark selected as published", |selected| async move {
                     selected.update([PostV2::PUBLISHED.set(true)]).await.map(drop)
@@ -719,6 +720,15 @@ async fn scenario() {
     let (_, _, body) = send(get(&format!("{post_url}history"), &cookie)).await;
     assert!(body.contains("Changed title, body, published, publish at, meta and tags."), "relation changes are logged");
     assert_eq!(PostV2::get(long.id.unwrap()).await.unwrap().meta, Some(Json(serde_json::json!({ "a": 1 }))));
+
+    // Fieldsets: listed fields under their title, the rest first.
+    let (_, _, page) = send(get(&post_url, &cookie)).await;
+    let (legend, title_input, status_select) =
+        (page.find("<legend class=\"section-title\">Publishing</legend>"), page.find("name=\"title\""), page.find("name=\"status\""));
+    assert!(
+        legend.is_some() && title_input < legend && legend < status_select,
+        "sections in order: {legend:?} {title_input:?} {status_select:?}"
+    );
 
     // Conditional fields: "publish at" shows only while the status is published.
     let (_, _, body) = send(get("/admin/blog_post/add", &cookie)).await;

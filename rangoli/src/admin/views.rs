@@ -1549,6 +1549,24 @@ fn change_message(meta: &ModelMeta, old: &[Value], cols: &[(&'static str, Value,
     }
 }
 
+/// The form's fields grouped into its fieldsets: unlisted fields first, untitled.
+fn sections(sets: &[(&'static str, Vec<&'static str>)], fields: Vec<minijinja::Value>) -> Vec<minijinja::Value> {
+    let name = |f: &minijinja::Value| f.get_attr("name").ok().and_then(|n| n.as_str().map(str::to_string)).unwrap_or_default();
+    let listed = |n: &str| sets.iter().any(|(_, fs)| fs.contains(&n));
+    let mut out = vec![];
+    let rest: Vec<_> = fields.iter().filter(|f| !listed(&name(f))).cloned().collect();
+    if !rest.is_empty() || sets.is_empty() {
+        out.push(context! { title => None::<&str>, fields => rest });
+    }
+    for (title, names) in sets {
+        let fs: Vec<_> = names.iter().filter_map(|n| fields.iter().find(|f| name(f) == *n).cloned()).collect();
+        if !fs.is_empty() {
+            out.push(context! { title, fields => fs });
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn form_page(
     site: &Site,
@@ -1596,7 +1614,7 @@ async fn form_page(
         site,
         "form.html",
         context! {
-            title, obj, id, is_add, fields, inlines, messages, form_error => errors.get("__all__"),
+            title, obj, id, is_add, sections => sections(&o.fieldsets, fields), inlines, messages, form_error => errors.get("__all__"),
             error_count => errors.len(), ..chrome(site, u, Some(meta))
         },
     )?;

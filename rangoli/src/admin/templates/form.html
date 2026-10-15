@@ -8,8 +8,10 @@
   {% if error_count %}
   <p class="message error" role="alert">Please correct the error{% if error_count > 1 %}s{% endif %} below.{% if form_error %} {{ form_error }}{% endif %}</p>
   {% endif %}
+  {% for sec in sections %}
   <fieldset class="panel fields">
-    {% for f in fields %}
+    {% if sec.title %}<legend class="section-title">{{ sec.title }}</legend>{% endif %}
+    {% for f in sec.fields %}
     <div class="field{% if f.error %} has-error{% endif %}"{% if f.show_when %} data-show-when="{{ f.show_when }}" data-show-values="{{ f.show_values }}"{% if f.hidden %} hidden{% endif %}{% endif %}>
       {% if f.kind == "readonly" %}
       <span class="field-label">{{ f.label }}</span>
@@ -52,6 +54,7 @@
     </div>
     {% endfor %}
   </fieldset>
+  {% endfor %}
   {% for inl in inlines %}
   <section class="panel inline-group" aria-labelledby="inline-{{ inl.table }}">
     <h2 id="inline-{{ inl.table }}">{{ inl.label }}</h2>

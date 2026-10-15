@@ -403,7 +403,7 @@ Operations: `create_table`, `drop_table`, `add_column`, `drop_column`, `alter_co
 
 Still missing, roughly in order:
 
-1. **Fieldsets** in admin forms, form-rendering helpers for your own pages, and template filters for dates and choices.
+1. **Form-rendering helpers** for your own pages, and template filters for dates and choices.
 2. **Model signals,** and realtime across several servers on MySQL and SQLite (Postgres has it).
 3. **Internationalization and multi-database routing.**
 4. **WebAssembly,** explored later: the same validation rules running in the browser and on the server.

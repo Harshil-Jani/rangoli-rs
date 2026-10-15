@@ -436,3 +436,5 @@ fieldset { margin: 0; padding: 0; min-width: 0; }
 table.inline td { vertical-align: top; }
 table.inline input[type=text], table.inline input[type=number], table.inline select { width: 100%; min-width: 6em; }
 [hidden] { display: none !important; }
+
+.section-title { font-weight: 700; font-size: 15px; padding: 0 0 8px; }

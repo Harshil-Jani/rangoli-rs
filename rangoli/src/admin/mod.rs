@@ -96,6 +96,8 @@ pub struct Options {
     pub(crate) show_when: Vec<(&'static str, &'static str, Vec<String>)>,
     /// Which rows each staff member may see and change (`ModelAdmin::rows`).
     pub(crate) rows: Option<crate::orm::Policy>,
+    /// Form sections: (title, fields), in order (`ModelAdmin::fieldsets`).
+    pub(crate) fieldsets: Vec<(&'static str, Vec<&'static str>)>,
 }
 
 /// Child rows edited on the parent's page: the child model and its foreign key to the parent.
@@ -211,6 +213,14 @@ impl<M: Model> ModelAdmin<M> {
         M: 'static,
     {
         self.opts.rows = Some(crate::orm::Policy::new(policy));
+        self
+    }
+
+    /// Group the add and change forms into titled sections (Django's `fieldsets`):
+    /// `.fieldsets([("Content", vec![&Post::TITLE, &Post::BODY]), ("Publishing", vec![&Post::STATUS])])`.
+    /// Fields you don't list (and many-to-many fields) come first, untitled.
+    pub fn fieldsets<const N: usize>(mut self, sets: [(&'static str, Vec<&dyn Field<M>>); N]) -> Self {
+        self.opts.fieldsets = sets.into_iter().map(|(title, fields)| (title, fields.iter().map(|f| f.name()).collect())).collect();
         self
     }
 
