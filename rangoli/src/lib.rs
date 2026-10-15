@@ -25,6 +25,7 @@ pub mod django;
 mod embed;
 pub mod forms;
 mod health;
+pub mod hooks;
 pub mod inspect;
 pub mod jwt;
 pub mod limit;
@@ -586,6 +587,18 @@ impl App {
     pub fn admin_permissions(self) -> Self {
         auth::ENFORCE_PERMISSIONS.store(true, std::sync::atomic::Ordering::Relaxed);
         self
+    }
+
+    /// Run `hook` after each change to `M` made through the admin, the API, MCP or a CSV
+    /// import (Django's post_save/post_delete, made reliable): queued in the change's own
+    /// transaction, run on the worker with retries. See [`hooks`].
+    pub fn on_change<M: orm::Model, F, Fut>(self, hook: F) -> Self
+    where
+        F: Fn(hooks::Change) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
+        hooks::register(M::TABLE, hook);
+        self.task::<hooks::Run>()
     }
 
     /// Sign requests in with JWTs (see [`jwt::JwtAuth`]): tokens you issue, or an identity

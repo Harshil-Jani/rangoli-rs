@@ -52,6 +52,7 @@ fn event_name(action: i64) -> &'static str {
 /// Queue deliveries for one History entry to every matching active webhook. Called where the
 /// entry is written, inside the change's transaction: a rolled-back change sends nothing.
 pub(crate) async fn fire(entry: &crate::admin::LogEntry) -> Result<()> {
+    crate::hooks::queue(entry).await?;
     if !cfg!(feature = "webhooks") {
         return Ok(());
     }

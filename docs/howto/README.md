@@ -16,3 +16,4 @@ Short, task-first guides. Every API they use is exercised by the test suite on P
 - [Testing your app](testing.md)
 - [Sending email, and "Forgot your password?"](email.md)
 - [Staff permissions and groups](admin-permissions.md)
+- [Run code when data changes](on-change.md)

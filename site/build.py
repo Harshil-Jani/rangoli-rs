@@ -456,7 +456,7 @@ RANGOLI_DEBUG=1 cargo run</code></pre>
   <h2>Where Django is still ahead</h2>
   <ul class="gaps">
     <li><strong>Twenty years of ecosystem.</strong> Thousands of packages, books, hosting guides and people who know it. Rangoli is brand new.</li>
-    <li><strong>The rest of the batteries.</strong> Internationalization, model signals and multi-database routing aren't built yet.</li>
+    <li><strong>The rest of the batteries.</strong> Internationalization and multi-database routing aren't built yet.</li>
     <li><strong>SQLite tuning.</strong> Getting full SQLite throughput needs one config file in your project. Postgres and MySQL need nothing.</li>
   </ul>
   <p>The full list is in the <a href="{REPO}/blob/main/docs/REFERENCE.md#whats-not-done-yet">README</a>.</p>
