@@ -677,7 +677,36 @@ async fn index(State(site): S, user: CurrentUser, uri: Uri) -> Page {
             }
         })
         .collect();
-    render(&site, "index.html", context! { title => "Site administration", recent, ..chrome(&site, u, None) })
+    let attention = attention().await.map_err(fail)?;
+    render(&site, "index.html", context! { title => "Site administration", recent, attention, ..chrome(&site, u, None) })
+}
+
+/// What a person should look at: waiting approvals, failed jobs and webhooks, active agents.
+/// Only shown to staff who can view the model it links to.
+async fn attention() -> crate::Result<Vec<minijinja::Value>> {
+    use crate::approvals::{ApprovalStatus, PendingChange};
+    use crate::tasks::{TaskRecord, TaskStatus};
+    let day_ago = DateTime::from_unix(DateTime::now().unix() - 86_400);
+    let mut out = vec![];
+    let mut add = |n: i64, one: &str, many: &str, url: &str, table: &str, level: &str| {
+        if n > 0 && can(table, "view") {
+            out.push(context! { text => format!("{n} {}", if n == 1 { one } else { many }), url, level });
+        }
+    };
+    let pending = PendingChange::objects().filter(PendingChange::STATUS.eq(ApprovalStatus::Pending)).count().await?;
+    add(pending, "agent change waits for your approval", "agent changes wait for your approval", "/admin/rangoli_pending_change/?f.status=pending", "rangoli_pending_change", "warning");
+    let failed = |name: &'static str| async move {
+        let mut q = TaskRecord::objects().filter(TaskRecord::STATUS.eq(TaskStatus::Failed) & TaskRecord::FINISHED_AT.gte(day_ago));
+        q = if name.is_empty() { q.exclude(TaskRecord::NAME.eq("rangoli.webhook")) } else { q.filter(TaskRecord::NAME.eq(name)) };
+        q.count().await
+    };
+    let jobs = failed("").await?;
+    add(jobs, "background job failed today", "background jobs failed today", "/admin/rangoli_task/?f.status=failed", "rangoli_task", "error");
+    let hooks = failed("rangoli.webhook").await?;
+    add(hooks, "webhook delivery failed today", "webhook deliveries failed today", "/admin/rangoli_task/?f.status=failed&q=rangoli.webhook", "rangoli_task", "error");
+    let agents = crate::auth::ApiToken::objects().filter(crate::auth::ApiToken::LAST_USED_AT.gte(day_ago)).count().await?;
+    add(agents, "agent or API token used today", "agents or API tokens used today", "/admin/rangoli_api_token/", "rangoli_api_token", "info");
+    Ok(out)
 }
 
 // ---------------------------------------------------------------- changelist

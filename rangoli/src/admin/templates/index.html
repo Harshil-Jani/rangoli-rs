@@ -22,6 +22,12 @@
     {% endfor %}
   </div>
   <div>
+  {% if attention %}
+  <section class="panel attention" aria-labelledby="attention-title">
+    <h2 id="attention-title">Needs attention</h2>
+    <ul>{% for a in attention %}<li class="{{ a.level }}"><a href="{{ a.url }}">{{ a.text }}</a></li>{% endfor %}</ul>
+  </section>
+  {% endif %}
   <section class="panel agents-cta" aria-labelledby="agents-title">
     <h2 id="agents-title">AI agents</h2>
     <p>Let Claude, Cursor or another assistant work with this data, as you.</p>

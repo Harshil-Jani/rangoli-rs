@@ -443,3 +443,7 @@ table.inline input[type=text], table.inline input[type=number], table.inline sel
 .admin-panel h2 { font-size: 15px; margin: 0 0 8px; }
 .diff td, .diff th { padding: 4px 8px; text-align: left; vertical-align: top; }
 .diff tr.changed td { background: color-mix(in srgb, #f5dd5d 25%, transparent); }
+
+.attention ul { margin: 0; padding-left: 18px; }
+.attention li { margin: 4px 0; }
+.attention li.warning a, .attention li.error a { font-weight: 600; }
