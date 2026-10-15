@@ -456,7 +456,7 @@ RANGOLI_DEBUG=1 cargo run</code></pre>
   <h2>Where Django is still ahead</h2>
   <ul class="gaps">
     <li><strong>Twenty years of ecosystem.</strong> Thousands of packages, books, hosting guides and people who know it. Rangoli is brand new.</li>
-    <li><strong>The rest of the batteries.</strong> Internationalization and multi-database routing aren't built yet.</li>
+    <li><strong>The rest of the batteries.</strong> The admin's own pages aren't translated yet (your app's can be), and there's one primary database plus read replicas, not full multi-database routing.</li>
     <li><strong>SQLite tuning.</strong> Getting full SQLite throughput needs one config file in your project. Postgres and MySQL need nothing.</li>
   </ul>
   <p>The full list is in the <a href="{REPO}/blob/main/docs/REFERENCE.md#whats-not-done-yet">README</a>.</p>
@@ -524,10 +524,19 @@ home = f'''<!doctype html>
 <section>
   <h2>Safe by default</h2>
   <dl class="why">
-    <div><dt>Read-only</dt><dd>Agents can't change anything until you allow it.</dd></div>
+    <div><dt>Read-only, then limited</dt><dd>Agents can't change anything until you allow it. Then cap their changes per day, or pause them all at once.</dd></div>
     <div><dt>You approve</dt><dd>Changes can wait for a person. Every change can be undone.</dd></div>
     <div><dt>Secrets stay put</dt><dd>Private columns never leave the server.</dd></div>
     <div><dt>Only their rows</dt><dd>One rule decides what each user and agent sees.</dd></div>
+  </dl>
+</section>
+<section>
+  <h2>AI built in</h2>
+  <dl class="why">
+    <div><dt>Ask your data</dt><dd>Type a question in the admin, get the rows or totals. The model sees field names, never rows.</dd></div>
+    <div><dt>AI-filled fields</dt><dd>A ticket's team or a summary, kept current when the text changes.</dd></div>
+    <div><dt>Your own agent tools</dt><dd>Add <code>refund_order</code> next to the generated tools, under the same rules.</dd></div>
+    <div><dt>Any model</dt><dd>Anthropic, OpenAI or a local Ollama, in one line.</dd></div>
   </dl>
 </section>
 <section>
