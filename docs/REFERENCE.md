@@ -403,9 +403,8 @@ Operations: `create_table`, `drop_table`, `add_column`, `drop_column`, `alter_co
 
 Still missing, roughly in order:
 
-1. **Form-rendering helpers** for your own pages (template filters like `date`, `timesince`, `intcomma` are built in).
-2. **Translations for the admin's own pages** (apps translate theirs with `App::locales`), and routing to more than one primary database (a read replica is supported).
-3. **WebAssembly,** explored later: the same validation rules running in the browser and on the server.
+1. **Translations for the admin's own pages** (apps translate theirs with `App::locales`), and routing to more than one primary database (a read replica is supported).
+2. **WebAssembly,** explored later: the same validation rules running in the browser and on the server.
 
 **Known limits:**
 
