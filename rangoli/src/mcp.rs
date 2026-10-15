@@ -30,7 +30,7 @@ struct Mcp {
 }
 
 pub(crate) fn router(exposed: Vec<(&'static ModelMeta, Options)>) -> Router {
-    if exposed.is_empty() {
+    if exposed.is_empty() && TOOLS.read().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty() {
         return Router::new();
     }
     let mcp = Arc::new(Mcp { api: crate::api::router(exposed.clone()), models: exposed });
@@ -144,6 +144,128 @@ async fn handle(
         }
         _ => rpc_error(&id, -32601, &format!("Method not found: {method}")),
     }
+}
+
+type Handler = Arc<
+    dyn Fn(crate::auth::User, JsonValue) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<JsonValue, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// A tool of your own for agents, next to the generated ones (`App::mcp_tool`):
+///
+/// ```ignore
+/// app.mcp_tool(
+///     mcp::Tool::new("refund_order", "Refund a paid order in full", json!({
+///         "order_id": { "type": "integer" },
+///         "reason": { "type": "string" } }), |user, args| async move {
+///         let order = Order::get(args["order_id"].as_i64().ok_or("order_id is required")?).await.map_err(|e| e.to_string())?;
+///         refund(&order, &user).await.map_err(|e| e.to_string())?;
+///         Ok(json!({ "refunded": order.total }))
+///     })
+///     .tables(["shop_order"])
+///     .staff_only(),
+/// )
+/// ```
+///
+/// Only signed-in users see it. A tool that changes things (anything not marked `read_only`)
+/// is hidden from read-only tokens and tokens whose changes need approval (a closure can't wait
+/// for a reviewer), and spends one of the token's daily writes per call. A token limited to some
+/// tables sees it only if it declares `tables` and all of them are allowed. Errors (`Err(msg)`)
+/// reach the agent as the tool's error text.
+#[derive(Clone)]
+pub struct Tool {
+    name: &'static str,
+    description: &'static str,
+    properties: JsonValue,
+    read_only: bool,
+    staff_only: bool,
+    tables: Option<Vec<&'static str>>,
+    handler: Handler,
+}
+
+impl Tool {
+    /// `properties` is the JSON Schema of each argument; all of them are required.
+    pub fn new<F, Fut>(name: &'static str, description: &'static str, properties: JsonValue, handler: F) -> Tool
+    where
+        F: Fn(crate::auth::User, JsonValue) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<JsonValue, String>> + Send + 'static,
+    {
+        let handler: Handler = Arc::new(move |u, a| Box::pin(handler(u, a)));
+        Tool { name, description, properties, read_only: false, staff_only: false, tables: None, handler }
+    }
+    /// It only reads: shown to read-only tokens, costs no write budget.
+    pub fn read_only(mut self) -> Tool {
+        self.read_only = true;
+        self
+    }
+    pub fn staff_only(mut self) -> Tool {
+        self.staff_only = true;
+        self
+    }
+    /// The tables it reads or changes, checked against a token's table limits.
+    pub fn tables<const N: usize>(mut self, tables: [&'static str; N]) -> Tool {
+        self.tables = Some(tables.to_vec());
+        self
+    }
+
+    fn visible(&self, user: &CurrentUser, scope: Option<&TokenScope>) -> bool {
+        let Some(u) = &user.0 else { return false };
+        if self.staff_only && !u.is_staff {
+            return false;
+        }
+        match scope {
+            None => true,
+            Some(s) => {
+                (self.read_only || (!s.read_only && !s.needs_approval))
+                    && (s.tables.is_none() || self.tables.as_ref().is_some_and(|ts| ts.iter().all(|t| s.allows_table(t))))
+            }
+        }
+    }
+
+    fn schema(&self) -> JsonValue {
+        let required: Vec<&String> = self.properties.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+        json!({ "name": self.name, "description": self.description,
+            "inputSchema": { "type": "object", "properties": self.properties, "required": required },
+            "annotations": { "readOnlyHint": self.read_only } })
+    }
+}
+
+static TOOLS: std::sync::RwLock<Vec<Tool>> = std::sync::RwLock::new(Vec::new());
+
+pub(crate) fn add_tool(tool: Tool) {
+    TOOLS.write().unwrap_or_else(std::sync::PoisonError::into_inner).push(tool);
+}
+
+async fn call_custom(user: &CurrentUser, scope: Option<&TokenScope>, name: &str, args: &JsonValue) -> Option<JsonValue> {
+    let tool = TOOLS.read().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|t| t.name == name)?.clone();
+    if !tool.visible(user, scope) {
+        return None; // as unknown as it looks in tools/list
+    }
+    let error = |msg: String| json!({ "content": [{ "type": "text", "text": msg }], "isError": true });
+    if let Some(missing) = tool.properties.as_object().and_then(|o| o.keys().find(|k| args.get(k.as_str()).is_none_or(JsonValue::is_null)))
+    {
+        return Some(error(format!("Missing argument: {missing}")));
+    }
+    if let (Some(s), false) = (scope, tool.read_only) {
+        match crate::auth::spend_write_budget(s).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return Some(error(format!(
+                    "This token's daily limit of {} changes is used up; it resets at midnight UTC.",
+                    s.max_writes_per_day.unwrap_or(0)
+                )))
+            }
+            Err(e) => return Some(error(e.to_string())),
+        }
+    }
+    let user = user.0.clone()?;
+    Some(match (tool.handler)(user, args.clone()).await {
+        Ok(v) => {
+            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }], "structuredContent": v, "isError": false })
+        }
+        Err(msg) => error(msg),
+    })
 }
 
 /// Prompts registered with `App::mcp_prompt`: (name, description, text with `{arg}` slots).
@@ -307,6 +429,7 @@ fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonV
             "annotations": { "readOnlyHint": true },
         }));
     }
+    out.extend(TOOLS.read().unwrap_or_else(std::sync::PoisonError::into_inner).iter().filter(|t| t.visible(user, scope)).map(Tool::schema));
     if scope.is_some_and(|s| s.needs_approval) {
         out.push(json!({
             "name": "approval_status",
@@ -386,6 +509,9 @@ async fn recent_changes(scope: Option<&TokenScope>, args: &JsonValue) -> JsonVal
 async fn call(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>, name: &str, args: &JsonValue) -> Option<JsonValue> {
     if name == "approval_status" {
         return Some(approval_status(user, args).await);
+    }
+    if let Some(result) = call_custom(user, scope, name, args).await {
+        return Some(result);
     }
     if name == "recent_changes" {
         if !user.0.as_ref().is_some_and(|u| u.is_staff) {

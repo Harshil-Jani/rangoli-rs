@@ -635,6 +635,12 @@ impl App {
         self
     }
 
+    /// A tool of your own for AI agents, next to the generated ones (see [`mcp::Tool`]).
+    pub fn mcp_tool(self, tool: mcp::Tool) -> Self {
+        mcp::add_tool(tool);
+        self
+    }
+
     /// A ready-made prompt for MCP clients (they show up as slash commands in Claude, Cursor, ...).
     /// `{name}` slots in `text` become the prompt's arguments:
     ///
