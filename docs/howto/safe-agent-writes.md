@@ -20,7 +20,7 @@ Leave **Ask me before each change** on (it is by default once changes are allowe
 {"pending": true, "approval_id": 12, "detail": "Waiting for a person to approve this in the admin (Pending changes)."}
 ```
 
-Staff select changes and run **Approve selected changes** or **Reject selected changes**. An approved change runs as the user who asked, with permissions checked again, and History says `Added via MCP, approved by alice.` The agent can check with the `approval_id` it got:
+Staff select changes and run **Approve selected changes** or **Reject selected changes**. Each pending change's page shows **what would change**: the row now and after, field by field, from a dry run of the change, so a change that would fail says why before you approve it. An approved change runs as the user who asked, with permissions checked again, and History says `Added via MCP, approved by alice.` The agent can check with the `approval_id` it got:
 
 ```json
 {"name": "approval_status", "arguments": {"approval_id": 12}}

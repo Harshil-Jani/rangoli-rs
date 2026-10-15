@@ -438,3 +438,8 @@ table.inline input[type=text], table.inline input[type=number], table.inline sel
 [hidden] { display: none !important; }
 
 .section-title { font-weight: 700; font-size: 15px; padding: 0 0 8px; }
+
+.admin-panel { padding: 12px 16px; margin: 16px 0; }
+.admin-panel h2 { font-size: 15px; margin: 0 0 8px; }
+.diff td, .diff th { padding: 4px 8px; text-align: left; vertical-align: top; }
+.diff tr.changed td { background: color-mix(in srgb, #f5dd5d 25%, transparent); }

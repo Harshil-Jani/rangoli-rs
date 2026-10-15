@@ -407,6 +407,7 @@ impl App {
                             "Reject selected changes",
                             |selected| async move { approvals::reject(selected.all().await?).await },
                         )
+                        .panel("What would change", approvals::preview_html)
                         .opts,
                 ),
                 (

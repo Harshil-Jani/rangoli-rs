@@ -98,6 +98,24 @@ pub struct Options {
     pub(crate) rows: Option<crate::orm::Policy>,
     /// Form sections: (title, fields), in order (`ModelAdmin::fieldsets`).
     pub(crate) fieldsets: Vec<(&'static str, Vec<&'static str>)>,
+    /// Read-only panels on the change page (`ModelAdmin::panel`).
+    pub(crate) panels: Vec<Panel>,
+}
+
+type PanelFn = dyn Fn(i64) -> Pin<Box<dyn Future<Output = crate::Result<String>> + Send>> + Send + Sync;
+
+/// A titled block of HTML on a row's change page.
+#[cfg_attr(not(feature = "admin"), allow(dead_code))]
+#[derive(Clone)]
+pub(crate) struct Panel {
+    pub(crate) title: &'static str,
+    pub(crate) render: Arc<PanelFn>,
+}
+
+impl std::fmt::Debug for Panel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Panel({})", self.title)
+    }
 }
 
 /// Child rows edited on the parent's page: the child model and its foreign key to the parent.
@@ -213,6 +231,26 @@ impl<M: Model> ModelAdmin<M> {
         M: 'static,
     {
         self.opts.rows = Some(crate::orm::Policy::new(policy));
+        self
+    }
+
+    /// A read-only panel on each row's change page, from your own HTML (escape what you insert):
+    /// a summary, a chart, related numbers. The approval queue uses one to show what a pending
+    /// change would do.
+    pub fn panel<F, Fut>(mut self, title: &'static str, render: F) -> Self
+    where
+        F: Fn(M) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = crate::Result<String>> + Send + 'static,
+        M: 'static,
+    {
+        let render = Arc::new(render);
+        self.opts.panels.push(Panel {
+            title,
+            render: Arc::new(move |id| {
+                let render = render.clone();
+                Box::pin(async move { render(M::get(id).await?).await })
+            }),
+        });
         self
     }
 

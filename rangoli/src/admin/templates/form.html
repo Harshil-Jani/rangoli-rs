@@ -60,6 +60,9 @@
     {% endfor %}
   </fieldset>
   {% endfor %}
+  {% for p in panels %}
+  <section class="panel admin-panel"><h2>{{ p.title }}</h2>{{ p.html }}</section>
+  {% endfor %}
   {% for inl in inlines %}
   <section class="panel inline-group" aria-labelledby="inline-{{ inl.table }}">
     <h2 id="inline-{{ inl.table }}">{{ inl.label }}</h2>

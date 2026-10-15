@@ -1683,12 +1683,19 @@ async fn form_page(
         Some(id) => Some(repr(meta, id, &fetch_row(meta, id).await?)),
         None => None,
     };
+    let mut panels = vec![];
+    if let Some(id) = id {
+        for p in &o.panels {
+            let html = (p.render)(id).await.unwrap_or_else(|e| format!("<p class=\"field-error\">{}</p>", e.to_string().replace('<', "&lt;")));
+            panels.push(context! { title => p.title, html => minijinja::Value::from_safe_string(html) });
+        }
+    }
     let title = if is_add { format!("Add {}", verbose(meta.name)) } else { format!("Change {}", verbose(meta.name)) };
     let page = render(
         site,
         "form.html",
         context! {
-            title, obj, id, is_add, sections => sections(&o.fieldsets, fields), inlines, messages, form_error => errors.get("__all__"),
+            title, obj, id, is_add, sections => sections(&o.fieldsets, fields), inlines, panels, messages, form_error => errors.get("__all__"),
             error_count => errors.len(), ..chrome(site, u, Some(meta))
         },
     )?;

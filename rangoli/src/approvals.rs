@@ -145,6 +145,72 @@ pub async fn approve(changes: Vec<PendingChange>) -> Result<()> {
     Ok(())
 }
 
+/// What a pending change would do, as an HTML table for its admin page: the row now, and the
+/// row after, from a dry run of the change as its requester (so defaults, row rules and
+/// validation are real, and a change that would fail says why), changed fields highlighted.
+pub async fn preview_html(change: PendingChange) -> Result<String> {
+    use tower::ServiceExt;
+    let Some(api) = API.get() else { return Ok(String::new()) };
+    let user = User::objects().filter(User::ID.eq(change.user_id) & User::IS_ACTIVE.eq(true)).first().await?;
+    let call = |method: &'static str, path: String, body: Option<String>| {
+        let user = user.clone();
+        let api = api.clone();
+        async move {
+            let mut req = axum::http::Request::builder().method(method).uri(path).header("content-type", "application/json");
+            if let Some(ext) = req.extensions_mut() {
+                ext.insert(CurrentUser(user));
+            }
+            let req = req.body(body.map_or_else(axum::body::Body::empty, axum::body::Body::from)).map_err(|e| Error::Config(e.to_string()))?;
+            let res = match api.oneshot(req).await {
+                Ok(r) => r,
+                Err(never) => match never {},
+            };
+            let ok = res.status().is_success();
+            let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap_or_default();
+            Ok::<_, Error>((ok, serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default()))
+        }
+    };
+    let t = &change.table_name;
+    let now = match change.object_id {
+        Some(id) => call("GET", format!("/api/{t}/{id}"), None).await?.1,
+        None => serde_json::Value::Null,
+    };
+    let (method, path) = match (change.action.as_str(), change.object_id) {
+        ("create", _) => ("POST", format!("/api/{t}/?dry_run=1")),
+        ("update", Some(id)) => ("PATCH", format!("/api/{t}/{id}?dry_run=1")),
+        ("replace", Some(id)) => ("PUT", format!("/api/{t}/{id}?dry_run=1")),
+        ("delete", Some(id)) => ("DELETE", format!("/api/{t}/{id}?dry_run=1")),
+        _ => return Ok("<p>This change is malformed.</p>".into()),
+    };
+    let body = (!change.payload.is_empty()).then(|| change.payload.clone());
+    let (ok, report) = call(method, path, body).await?;
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let show = |v: Option<&serde_json::Value>| match v {
+        None | Some(serde_json::Value::Null) => "<em>empty</em>".to_string(),
+        Some(serde_json::Value::String(s)) => esc(s),
+        Some(other) => esc(&other.to_string()),
+    };
+    if !ok {
+        return Ok(format!("<p class=\"field-error\">Approving this would fail right now: <code>{}</code></p>", esc(&report.to_string())));
+    }
+    let after = report.get("would_be").cloned().unwrap_or(serde_json::Value::Null);
+    let deleting = report.get("would_delete").is_some();
+    let mut keys: Vec<String> = now.as_object().into_iter().flatten().chain(after.as_object().into_iter().flatten()).map(|(k, _)| k.clone()).collect();
+    keys.sort();
+    keys.dedup();
+    let rows: String = keys
+        .iter()
+        .filter(|k| k.as_str() != "id")
+        .map(|k| {
+            let (a, b) = (now.get(k), if deleting { None } else { after.get(k) });
+            let changed = a != b;
+            format!("<tr{}><th scope=\"row\">{}</th><td>{}</td><td>{}</td></tr>", if changed { " class=\"changed\"" } else { "" }, esc(k), show(a), show(b))
+        })
+        .collect();
+    let head = if deleting { "This deletes the row." } else if change.object_id.is_none() { "This adds a row." } else { "This changes the row." };
+    Ok(format!("<p>{head} Changed fields are highlighted.</p><table class=\"diff\"><thead><tr><th scope=\"col\">Field</th><th scope=\"col\">Now</th><th scope=\"col\">After</th></tr></thead><tbody>{rows}</tbody></table>"))
+}
+
 /// Turn pending changes down. Already decided ones are skipped.
 pub async fn reject(changes: Vec<PendingChange>) -> Result<()> {
     let by = approver().ok_or_else(|| Error::Config("rejecting needs a signed-in admin".into()))?;
