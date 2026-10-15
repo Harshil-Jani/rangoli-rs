@@ -1551,7 +1551,7 @@ impl<const P: u32> Ordered for crate::Decimal<P> {}
 
 /// `FUNC(col)`, cast to a type every database hands back in a decodable form: Postgres's
 /// SUM(bigint) is `numeric`, MySQL's is DECIMAL, and sqlx's Any driver reads neither.
-fn agg_expr(d: Dialect, func: &str, col: &str, ty: FieldType) -> String {
+pub(crate) fn agg_expr(d: Dialect, func: &str, col: &str, ty: FieldType) -> String {
     let (int, float) = match d {
         Dialect::Postgres => ("BIGINT", "DOUBLE PRECISION"),
         Dialect::Mysql => ("SIGNED", "DOUBLE"),
@@ -1577,7 +1577,7 @@ impl Query {
     }
 
     /// The same, per value of `key`, in key order.
-    async fn grouped(&self, key: &str, key_ty: FieldType, value: &str, decode: FieldType) -> Result<Vec<(Value, Value)>> {
+    pub(crate) async fn grouped(&self, key: &str, key_ty: FieldType, value: &str, decode: FieldType) -> Result<Vec<(Value, Value)>> {
         let d = db().dialect;
         let k = d.quote(key);
         let (mut p, mut sql) = (vec![], format!("SELECT {k} AS g, {value} AS v FROM {}", d.quote(self.table)));

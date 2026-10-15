@@ -179,6 +179,7 @@ pub(crate) fn router(exposed: Vec<(&'static ModelMeta, Options)>) -> Router {
         .route("/api/schema.json", get(schema))
         .route("/api/{table}/", get(list).post(create).fallback(query_method))
         .route("/api/{table}/similar", get(similar))
+        .route("/api/{table}/aggregate", get(aggregate))
         .route("/api/{table}/{id}", get(detail).put(replace).patch(patch).delete(remove))
         .with_state(site)
 }
@@ -242,7 +243,15 @@ fn to_json(meta: &ModelMeta, id: i64, vals: &[Value]) -> JsonValue {
     let mut obj = Map::new();
     obj.insert("id".into(), json!(id));
     for (f, v) in meta.fields.iter().zip(vals).filter(|(f, _)| f.exposed()) {
-        let j = match v {
+        obj.insert(f.name.into(), value_json(f, v));
+    }
+    JsonValue::Object(obj)
+}
+
+/// One stored value as the API shows it.
+fn value_json(f: &FieldMeta, v: &Value) -> JsonValue {
+    {
+        match v {
             Value::Null => JsonValue::Null,
             Value::Int(i) if f.ty == FieldType::DateTime => json!(DateTime::from_unix(*i).to_string()),
             Value::Int(i) if f.ty == FieldType::Date => json!(crate::Date::from_days(*i).to_string()),
@@ -254,10 +263,8 @@ fn to_json(meta: &ModelMeta, id: i64, vals: &[Value]) -> JsonValue {
             Value::Bool(b) => json!(b),
             Value::Text(s) if f.ty == FieldType::Json => serde_json::from_str(s).unwrap_or(JsonValue::Null),
             Value::Text(s) => json!(s),
-        };
-        obj.insert(f.name.into(), j);
+        }
     }
-    JsonValue::Object(obj)
 }
 
 /// Parse one JSON value for a field, with the admin's validation rules.
@@ -546,13 +553,17 @@ fn lookup(meta: &'static ModelMeta, key: &str, raw: &str) -> Result<Node, Respon
     })
 }
 
-async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &str, p: HashMap<String, String>) -> Reply {
-    let (meta, opts) = endpoint(site, table, user, scope, false)?;
+/// The rows a list request asks for and this user may see: access rules, `?field__lookup=`
+/// filters and `?search=`. Shared by lists and aggregates, so a total never counts a hidden row.
+fn filtered(meta: &'static ModelMeta, opts: &Options, user: &CurrentUser, p: &HashMap<String, String>) -> Result<Query, Response> {
     let mut q = Query::new(meta);
     q.filter.extend(restrict(opts, user));
     // `?field=value`, or `?field__lookup=value` (Django's lookups), each value typed by the field.
-    for (k, raw) in &p {
-        if matches!(k.as_str(), "limit" | "offset" | "ordering" | "search" | "cursor" | "expand") {
+    for (k, raw) in p {
+        if matches!(
+            k.as_str(),
+            "limit" | "offset" | "ordering" | "search" | "cursor" | "expand" | "sum" | "avg" | "min" | "max" | "group_by"
+        ) {
             continue;
         }
         q.filter.push(lookup(meta, k, raw)?);
@@ -569,6 +580,92 @@ async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &st
             .collect();
         q.filter.push(Node::Or(text));
     }
+    Ok(q)
+}
+
+/// `GET /api/<table>/aggregate?sum=total&avg=total&group_by=status&paid=true`: counts and
+/// totals over the rows a list with the same filters would return, so an agent asking "how much
+/// did we sell" gets one number instead of paging through every order. `sum`/`avg` take number
+/// fields, `min`/`max` numbers, text and dates; each takes a comma-separated list.
+async fn aggregate(
+    State(site): S,
+    user: CurrentUser,
+    scope: ScopeExt,
+    Path(table): Path<String>,
+    UrlQuery(p): UrlQuery<HashMap<String, String>>,
+) -> Reply {
+    let (meta, opts) = endpoint(&site, &table, &user, &scope, false)?;
+    let q = filtered(meta, opts, &user, &p)?;
+    let bad = |msg: String| problem(StatusCode::BAD_REQUEST, &msg);
+    let field = |name: &str| meta.field(name).filter(|f| f.exposed()).ok_or_else(|| bad(format!("Unknown field `{name}`.")));
+    let mut measures: Vec<(&str, &'static FieldMeta)> = vec![];
+    for func in ["sum", "avg", "min", "max"] {
+        for name in param(&p, func).unwrap_or("").split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            let f = field(name)?;
+            let ok = match func {
+                "sum" | "avg" => matches!(f.ty, FieldType::Int | FieldType::Float | FieldType::Decimal(_)),
+                _ => matches!(
+                    f.ty,
+                    FieldType::Int
+                        | FieldType::Float
+                        | FieldType::Decimal(_)
+                        | FieldType::Varchar(_)
+                        | FieldType::Text
+                        | FieldType::Date
+                        | FieldType::DateTime
+                ),
+            };
+            if !ok {
+                return Err(bad(format!("Cannot {func} `{name}`.")));
+            }
+            measures.push((func, f));
+        }
+    }
+    let d = orm::db().dialect;
+    let value = |func: &str, f: &FieldMeta, v: Value| match (func, v) {
+        ("avg", Value::Float(x)) => json!(x / 10f64.powi(f.ty.decimal_places() as i32)),
+        (_, v) => value_json(f, &v),
+    };
+    let Some(key) = param(&p, "group_by") else {
+        let mut out = Map::new();
+        out.insert("count".into(), json!(q.count().await.map_err(fail)?));
+        for (func, f) in &measures {
+            let v = q.aggregate(&func.to_uppercase(), f.name, f.ty).await.map_err(fail)?;
+            out.entry(*func).or_insert_with(|| json!({}))[f.name] = value(func, f, v);
+        }
+        return Ok(Json(JsonValue::Object(out)).into_response());
+    };
+    let k = field(key)?;
+    if matches!(k.ty, FieldType::Json | FieldType::Encrypted | FieldType::Vector(_)) {
+        return Err(bad(format!("Cannot group by `{key}`.")));
+    }
+    let int = if d == orm::Dialect::Mysql { "SIGNED" } else { "BIGINT" };
+    // ponytail: one GROUP BY query per measure, merged here; capped at MAX_GROUPS groups.
+    let counts = q.grouped(k.name, k.ty, &format!("CAST(COUNT(*) AS {int})"), FieldType::Int).await.map_err(fail)?;
+    let truncated = counts.len() > MAX_GROUPS;
+    let mut groups: Vec<JsonValue> = counts
+        .into_iter()
+        .take(MAX_GROUPS)
+        .map(|(g, n)| json!({ k.name: value_json(k, &g), "count": match n { Value::Int(n) => n, _ => 0 } }))
+        .collect();
+    for (func, f) in &measures {
+        let decode = if *func == "avg" { FieldType::Float } else { f.ty };
+        let rows = q.grouped(k.name, k.ty, &orm::agg_expr(d, &func.to_uppercase(), f.name, f.ty), decode).await.map_err(fail)?;
+        for (g, v) in rows {
+            let gj = value_json(k, &g);
+            if let Some(group) = groups.iter_mut().find(|x| x[k.name] == gj) {
+                group.as_object_mut().unwrap().entry(*func).or_insert_with(|| json!({}))[f.name] = value(func, f, v);
+            }
+        }
+    }
+    Ok(Json(json!({ "groups": groups, "truncated": truncated })).into_response())
+}
+
+const MAX_GROUPS: usize = 1000;
+
+async fn list_rows(site: &Site, user: &CurrentUser, scope: &ScopeExt, table: &str, p: HashMap<String, String>) -> Reply {
+    let (meta, opts) = endpoint(site, table, user, scope, false)?;
+    let mut q = filtered(meta, opts, user, &p)?;
     if let Some(o) = param(&p, "ordering") {
         let (desc, name) = o.strip_prefix('-').map_or((false, o), |n| (true, n));
         let field = if name == "id" {

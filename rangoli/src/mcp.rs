@@ -311,7 +311,8 @@ fn prompt_get(name: &str, args: &JsonValue) -> Result<JsonValue, String> {
 }
 
 /// The five tools of one model, as (operation, needs write access).
-const OPS: [(&str, bool); 5] = [("list", false), ("get", false), ("create", true), ("update", true), ("delete", true)];
+const OPS: [(&str, bool); 6] =
+    [("list", false), ("get", false), ("aggregate", false), ("create", true), ("update", true), ("delete", true)];
 
 fn noun(meta: &ModelMeta) -> String {
     let mut words = String::new();
@@ -365,6 +366,17 @@ fn tools(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>) -> Vec<JsonV
                         "offset": { "type": "integer", "minimum": 0 },
                         "cursor": { "type": "string", "description": "For big tables: pass \"\" for the first page, then each page's next cursor (ordered by id; no total count)" },
                         "expand": { "type": "string", "description": "Foreign keys to include as whole rows, comma-separated, e.g. \"author_id\"" } } }),
+                ),
+                "aggregate" => (
+                    format!("Count {n} rows and add up, average or find the min/max of fields, optionally per value of one field. Use it instead of listing rows to answer \"how many\" or \"how much\"."),
+                    json!({ "type": "object", "properties": {
+                        "filters": { "type": "object", "description": "Which rows, as in the list tool, e.g. {\"paid\": true, \"created_at__gte\": \"2026-10-01\"}", "additionalProperties": true },
+                        "search": { "type": "string" },
+                        "sum": { "type": "string", "description": "Number fields to add up, comma-separated" },
+                        "avg": { "type": "string", "description": "Number fields to average, comma-separated" },
+                        "min": { "type": "string", "description": "Fields to find the smallest value of" },
+                        "max": { "type": "string", "description": "Fields to find the largest value of" },
+                        "group_by": { "type": "string", "description": "One field: a count and the totals per value of it" } } }),
                 ),
                 "get" => (
                     format!("Fetch one {n} by id."),
@@ -526,19 +538,20 @@ async fn call(mcp: &Mcp, user: &CurrentUser, scope: Option<&TokenScope>, name: &
     mcp.models.iter().find(|(m, _)| m.table == table)?;
     let id = || args["id"].as_i64();
     let (method, path, body) = match op {
-        "list" => {
+        "list" | "aggregate" => {
             let mut q: Vec<(String, String)> = vec![];
             if let Some(filters) = args["filters"].as_object() {
                 for (k, v) in filters {
                     q.push((k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned)));
                 }
             }
-            for k in ["search", "ordering", "limit", "offset", "cursor", "expand"] {
+            for k in ["search", "ordering", "limit", "offset", "cursor", "expand", "sum", "avg", "min", "max", "group_by"] {
                 if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
                     q.push((k.into(), v.as_str().map_or_else(|| v.to_string(), str::to_owned)));
                 }
             }
-            (Method::GET, format!("/api/{table}/?{}", serde_urlencoded::to_string(&q).unwrap_or_default()), None)
+            let path = if op == "aggregate" { "aggregate" } else { "" };
+            (Method::GET, format!("/api/{table}/{path}?{}", serde_urlencoded::to_string(&q).unwrap_or_default()), None)
         }
         "get" => {
             let expand = args["expand"].as_str().map(|e| format!("?{}", serde_urlencoded::to_string([("expand", e)]).unwrap_or_default()));
