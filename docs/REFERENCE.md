@@ -404,9 +404,8 @@ Operations: `create_table`, `drop_table`, `add_column`, `drop_column`, `alter_co
 Still missing, roughly in order:
 
 1. **Form-rendering helpers** for your own pages, and template filters for dates and choices.
-2. **Realtime across several servers on MySQL and SQLite** (Postgres has it). Change hooks (`App::on_change`) cover what Django's signals are mostly used for.
-3. **Internationalization and multi-database routing.**
-4. **WebAssembly,** explored later: the same validation rules running in the browser and on the server.
+2. **Internationalization and multi-database routing.**
+3. **WebAssembly,** explored later: the same validation rules running in the browser and on the server.
 
 **Known limits:**
 

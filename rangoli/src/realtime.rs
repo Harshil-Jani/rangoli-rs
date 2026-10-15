@@ -41,12 +41,11 @@ fn sender(group: &str) -> broadcast::Sender<String> {
     groups.entry(group.to_string()).or_insert_with(|| broadcast::channel(BUFFER).0).clone()
 }
 
-/// Send `message` to everyone subscribed to `group`, in this process and (on Postgres) every
-/// other instance. Returns how many local subscribers received it.
+/// Send `message` to everyone subscribed to `group`, in this process and every other instance
+/// (once `runserver` or `worker` has joined them). Returns how many local subscribers received it.
 pub fn publish(group: &str, message: impl Into<String>) -> usize {
     let message = message.into();
-    #[cfg(feature = "postgres")]
-    cluster::forward(group, &message);
+    publish_to_others(group, &message);
     sender(group).send(message).unwrap_or(0)
 }
 
@@ -57,8 +56,79 @@ pub use cluster::join_cluster;
 pub(crate) fn publish_to_others(group: &str, message: &str) {
     #[cfg(feature = "postgres")]
     cluster::forward(group, message);
-    #[cfg(not(feature = "postgres"))]
-    let _ = (group, message);
+    polled::forward(group, message);
+}
+
+/// On MySQL and SQLite, fan publishes out through the `rangoli_event` table: each instance
+/// inserts what it publishes and polls for the others' every 200 ms. `runserver` and `worker`
+/// call it; calling it again does nothing.
+pub fn join_polled() {
+    polled::join();
+}
+
+mod polled {
+    use crate::events::Event;
+    use crate::orm::Model;
+    use std::sync::OnceLock;
+    use tokio::sync::mpsc;
+
+    static OUTBOX: OnceLock<mpsc::Sender<(String, String)>> = OnceLock::new();
+    static ME: OnceLock<String> = OnceLock::new();
+    const KEEP_SECS: i64 = 60;
+
+    pub(super) fn forward(group: &str, message: &str) {
+        if let Some(out) = OUTBOX.get() {
+            if out.try_send((group.to_string(), message.to_string())).is_err() {
+                eprintln!("rangoli realtime: event queue full (is the database down?); delivered on this instance only");
+            }
+        }
+    }
+
+    pub(super) fn join() {
+        let Ok(me) = crate::auth::random_hex(8) else { return };
+        if ME.set(me.clone()).is_err() {
+            return;
+        }
+        let (tx, mut rx) = mpsc::channel::<(String, String)>(4096);
+        let _ = OUTBOX.set(tx);
+        let origin = me.clone();
+        // Out: one writer, so events keep their order.
+        tokio::spawn(async move {
+            while let Some((channel, message)) = rx.recv().await {
+                let mut e = Event { id: None, channel, message, origin: origin.clone(), at: crate::auth::now() };
+                if let Err(err) = e.save().await {
+                    eprintln!("rangoli realtime: could not share an event: {err}");
+                }
+            }
+        });
+        // In: poll for newer rows from other instances; prune old ones now and then.
+        tokio::spawn(async move {
+            let mut last = Event::objects().order_by(Event::ID.desc()).first().await.ok().flatten().and_then(|e| e.id).unwrap_or(0);
+            let mut ticks = 0u64;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                match Event::objects().filter(Event::ID.gt(last)).order_by(Event::ID.asc()).limit(500).all().await {
+                    Ok(rows) => {
+                        for e in rows {
+                            last = last.max(e.id.unwrap_or(0));
+                            if e.origin != me {
+                                let _ = super::sender(&e.channel).send(e.message);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("rangoli realtime: polling events: {err}");
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
+                ticks += 1;
+                if ticks % 150 == 0 {
+                    let old = crate::auth::now() - KEEP_SECS;
+                    let _ = Event::objects().filter(Event::AT.lt(old)).delete().await;
+                }
+            }
+        });
+    }
 }
 
 #[cfg(feature = "postgres")]

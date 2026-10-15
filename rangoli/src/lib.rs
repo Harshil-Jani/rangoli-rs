@@ -23,6 +23,7 @@ pub mod datetime;
 pub mod decimal;
 pub mod django;
 mod embed;
+pub mod events;
 pub mod forms;
 mod health;
 pub mod hooks;
@@ -204,12 +205,22 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// On Postgres, let `realtime::publish` reach every instance. A failure only costs that.
+    /// Let `realtime::publish` (and cache clears) reach every instance: LISTEN/NOTIFY on
+    /// Postgres, a shared table on MySQL (and SQLite with `RANGOLI_CLUSTER=1`, for several
+    /// processes on one file). A failure only costs that.
     async fn join_cluster(&self) {
-        #[cfg(all(feature = "realtime", feature = "postgres"))]
-        if orm::db().dialect == orm::Dialect::Postgres {
-            if let Err(e) = realtime::join_cluster(&self.database_url).await {
-                eprintln!("warning: realtime stays on this instance: {e}");
+        #[cfg(feature = "realtime")]
+        {
+            #[cfg(feature = "postgres")]
+            if orm::db().dialect == orm::Dialect::Postgres {
+                if let Err(e) = realtime::join_cluster(&self.database_url).await {
+                    eprintln!("warning: realtime stays on this instance: {e}");
+                }
+                return;
+            }
+            // SQLite apps are nearly always one process: share through the table only when asked.
+            if orm::db().dialect == orm::Dialect::Mysql || std::env::var("RANGOLI_CLUSTER").is_ok_and(|v| v == "1") {
+                realtime::join_polled();
             }
         }
     }
@@ -321,6 +332,7 @@ impl App {
                 auth::LoginFailure::meta(),
                 auth::PasswordReset::meta(),
                 auth::Group::meta(),
+                events::Event::meta(),
                 approvals::PendingChange::meta(),
                 webhooks::Webhook::meta(),
                 oauth::OAuthClient::meta(),

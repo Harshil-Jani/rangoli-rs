@@ -1,0 +1,14 @@
+{
+  "operations": [
+    {
+      "op": "create_table",
+      "table": "rangoli_event",
+      "columns": [
+        { "name": "channel", "type": { "varchar": 200 } },
+        { "name": "message", "type": "text" },
+        { "name": "origin", "type": { "varchar": 32 } },
+        { "name": "at", "type": "int" }
+      ]
+    }
+  ]
+}
