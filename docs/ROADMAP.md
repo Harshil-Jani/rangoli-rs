@@ -38,14 +38,29 @@ Rangoli is built by reading what Django developers keep asking for and shipping 
 | Vector search, and semantic search for agents | NF#145 | recall@10 0.98 at 8 ms on pgvector; agents never see others' rows |
 | `unique(a, b)` (unique_together) | Django staple | refused pair, accepted parts, on 3 databases |
 | Embeddings kept current automatically | follows `App::embed` | text edits re-embed, other writes cost no call (counted) |
+| Filter lookups in the API and MCP (`__gte`, `__in`, `__isnull`...) | django-filter#1134 (19👍) | e2e on 3 databases, every lookup typed by its field; private fields refused |
+| Email and password reset | Django staple | Mailpit in CI; header injection refused |
+| Admin permissions and groups, fieldsets, `list_editable`, Save as new, bulk "Edit selected" | Django admin parity | `tests/{admin_perms,list_editable,bulk_edit}.rs`: every row checked, all saved or none |
+| Durable change hooks (`App::on_change`) | NF#62 signals that survive a crash | runs after commit, retried as a task |
+| Realtime and cache across instances on MySQL and SQLite | Channels without Redis | `rangoli_event` table, no broker |
+| Translations, read replicas, `?expand=`, row rules (`App::validate`) | Trac#4182 i18n habits, NF#56, DRF `depth`, `Model.clean()` | one test file each |
+| Dry runs for every write (`?dry_run=1`, MCP `dry_run`) | agents need a "what would happen" | nothing saved, nothing queued (counted) |
+| Agent guardrails: daily write budget, approval diff preview, "Pause all agents" | AI agents on production data | 12 racing writes → exactly 5 with a budget of 5; pause stops API and MCP writes, reads go on |
+| MCP prompts, row resources and your own tools (`App::mcp_tool`) | MCP spec; custom actions beyond CRUD | custom tools hidden from read-only, approval and other-table tokens |
+| Totals for agents and the API (`/aggregate`, `<table>_aggregate`) | "how many / how much" without paging | decimals exact; filters and row permissions apply |
+| Ask your data in the admin (`App::llm`) | plain-English reporting | the model sees the schema, never rows; read-only, hidden fields refused |
+| AI-filled fields (`App::ai_field`) and one-line providers (`rangoli::ai`) | classification, summaries | refreshed only when sources change; answers outside the choices never stored |
+| Custom commands (`App::command`) | `manage.py` commands | `helpdesk close_stale` |
 | Query inspector: N+1s for staff and their agents | silk#80, debug-toolbar#2048 | an N+1 route flagged, a select_related one not |
 | Webhooks, 2FA, inlines, QUERY, encrypted fields, undo, cursor paging, upsert, aggregates, approvals, scoped tokens, CORS, rate limits | NF#8 (73), NF#185 (41), Trac#9025, NF#12, Trac#8408, Trac#28919-adjacent, NF#204 | see README, each with its numbers |
 
 ## Next, in order
 
-| # | Build | Why (demand) | Proof |
-|---|---|---|---|
-| 1 | **Filter lookups in the API and MCP:** `__gte`, `__lt`, `__in`, `__contains`, `__isnull` | django-filter#1134 (19👍), DRF habits | every lookup typed by its field, on 3 databases; private fields still refused |
+| # | Build | Why |
+|---|---|---|
+| 1 | Rerun the Django and django-bolt benchmarks on a quiet machine, Django with the same `created_at` index | the last Django rerun ran under load 20–43 and was thrown away |
+| 2 | Admin `date_hierarchy` | Django admin parity; the date filters cover most of it today |
+| 3 | AI-filled fields: remember refused answers per row in the database, not per process | today a restart retries them once |
 
 ## Decided against, with reasons
 

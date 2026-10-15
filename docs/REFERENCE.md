@@ -192,6 +192,8 @@ Fields can depend on other fields without writing any JavaScript (Wagtail's most
 
 `.no_add()` removes "Add" for rows made elsewhere (Django's `has_add_permission` returning `False`): the links disappear and the add URLs answer 403. API tokens use it: they appear in the admin under **API tokens** by name and prefix, where you can rename one, set an expiry or delete it to revoke it, but not create one, since the token itself is shown only once by `createtoken`.
 
+`.list_editable([&Post::PUBLISHED, &Post::RATING])` turns those columns into inputs in the changelist with one **Save changes** button: each changed row is checked like a normal edit, and either all of them save or none do. `.save_as()` adds **Save as new** to the change page, which copies the row (with your edits) through the add page's checks.
+
 Settings that can't work (searching a non-text column, filtering on an unsupported type) stop the app at startup, like Django's admin checks.
 
 ## Your own pages
@@ -352,7 +354,40 @@ Guardrails, all enforced by the server on every request, not just hidden from th
 
 **The Supabase attack, replayed.** In 2025 a support ticket told an AI agent with full database access to copy integration tokens into the ticket thread, and it could ([write-up](https://generalanalysis.com/blog/supabase-mcp-blog)). The e2e test files the same kind of ticket and then plays a fully obedient support bot: it reads the ticket, then tries to read the secret, probe it through filters, open other tables, write the secret out, and reach the admin. Every step fails, because the bot's token is scoped to tickets and read-only and the secret is a private field. Prompt injection still fools models; on Rangoli it can't make one leak.
 
+More guardrails, set per agent on **Connect an AI agent**:
+
+- **A daily limit.** "At most N changes a day": the next write gets a 429 until midnight UTC. One conditional UPDATE counts it, so 12 racing writes against a limit of 5 save exactly 5.
+- **Dry runs.** `?dry_run=1` on any API write, or `dry_run: true` on an MCP write tool, runs every check and reports the row it would save, then rolls back.
+- **Pause all agents.** A superuser's button on the agents page stops every token's changes at once, on every server, until resumed. Reading still works.
+
+Beyond the five tools per model:
+
+- **Totals.** `<table>_aggregate` (and `GET /api/<table>/aggregate?sum=total&group_by=status&paid=true`) counts, sums, averages and finds min/max over exactly the rows the list would return, so "how much did we sell" is one call.
+- **Your own tools.** `App::mcp_tool(mcp::Tool::new("refund_order", "Refund an order", schema, |user, args| async move { ... }).tables(["shop_order"]))`. A tool that changes things is hidden from read-only and ask-first tokens, and spends the daily limit; `.read_only()` and `.staff_only()` narrow it further.
+- **Prompts.** `App::mcp_prompt("triage", "Rank open tickets", "Rank tickets with status {status}...")` shows up as a slash command in Claude and Cursor; `{slots}` become its arguments.
+- **Rows as resources.** `rangoli://<table>/<id>` lets a person attach a row to a chat, read with the same rules as `get`.
+- **History.** Staff agents get `recent_changes` (who changed what, via which door) and, with the query inspector on, `inspect_requests`.
+
 Checked by: an e2e test that speaks raw MCP on all three databases (tool lists per user, writes and History, `owned_by` holding for agents, validation errors returned to the agent), 3,000 rounds of random JSON-RPC and tool calls in the fuzzer, and a live run of the official MCP Python SDK (2.3.0) against the example blog.
+
+## AI in your app
+
+Pick a model once; the rest of the app uses it:
+
+```rust
+App::new()
+    .llm(ai::anthropic("claude-haiku-5-5"))                    // ANTHROPIC_API_KEY
+    .embed(ai::openai_embeddings("text-embedding-3-small"))    // OPENAI_API_KEY
+// any OpenAI-compatible server works: ai::openai_compatible("http://localhost:11434/v1", "llama3.2", None)
+```
+
+- **Ask your data** (`/admin/ask/`): a staff member types a question; the model turns it into one read-only query (filters, ordering, totals), which runs with that person's permissions and is shown next to the answer. The model gets table and field names, types and choices, never a row, so nothing stored can leak to it or steer it. Hidden and private fields are refused.
+- **AI-filled fields:** `.ai_field(&Ticket::TEAM, [&Ticket::SUBJECT, &Ticket::BODY], "Which team should handle this ticket?")`. When a source changes, the same UPDATE clears the field, and a background job asks the model again; other edits cost no call. With `choices`, an answer has to be one of them or it isn't stored. The row's text goes to the model marked as data.
+- **Semantic search:** `#[field(vector = N)]` plus `.embed_fields(...)` keeps embeddings current; agents get a `<table>_similar` tool.
+
+## Your own commands
+
+`App::command("close_stale", "close tickets idle for N days", |args| async move { ... })` runs as `cargo run -- close_stale 14`, with the database connected, and is listed by `help` (Django's management commands).
 
 ## Databases
 

@@ -435,6 +435,8 @@ impl App {
                             &auth::ApiToken::USER_ID,
                             &auth::ApiToken::LAST_USED_AT,
                         ])
+                        // The daily budget's counters: the server's, not something to edit.
+                        .exclude([&auth::ApiToken::WRITES_DAY, &auth::ApiToken::WRITES_COUNT])
                         .no_add()
                         .opts,
                 ),

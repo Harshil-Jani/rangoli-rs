@@ -181,6 +181,8 @@ async fn reset(db: &orm::Db) {
         "blog_post",
         "e2e_note",
         "e2e_doc",
+        "rangoli_setting",
+        "rangoli_event",
         "rangoli_user_groups",
         "rangoli_group",
         "rangoli_password_reset",
@@ -1545,7 +1547,8 @@ async fn scenario() {
     );
     assert_eq!(send(bearer("GET", "/api/e2e_note/", &narrow, "")).await.0, StatusCode::OK);
     let (_, _, body) = send(bearer("POST", "/mcp", &narrow, &rpc("tools/list", serde_json::json!({})))).await;
-    assert!(names(&body).iter().all(|t| t.starts_with("e2e_note_")), "only its tables' tools: {:?}", names(&body));
+    // recent_changes is filtered to the token's tables too.
+    assert!(names(&body).iter().all(|t| t.starts_with("e2e_note_") || t == "recent_changes"), "only its tables' tools: {:?}", names(&body));
     let (status, _, body) = send(bearer("GET", "/admin/", &token, "")).await;
     assert_eq!(
         (status, json(&body)["detail"].as_str()),

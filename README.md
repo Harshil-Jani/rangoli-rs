@@ -28,6 +28,14 @@ Nothing in your Django database changes.
 - **Secrets stay put.** Private columns never leave the server.
 - **Only their rows.** One rule decides what each user and agent can see.
 - **Everything is logged.** Every change shows in History as "via MCP".
+- **Limits and an off switch.** Cap each agent's changes per day, or pause every agent at once.
+
+## AI built in
+
+- **Ask your data.** Type a question in the admin and get the rows or totals. The model sees your field names, never your rows.
+- **AI-filled fields.** A ticket's team, a summary or a language, kept up to date when the text changes.
+- **Your own agent tools.** `refund_order` next to the generated ones, under the same rules.
+- **Any model in one line.** `ai::anthropic(...)`, `ai::openai(...)`, or a local Ollama.
 
 ## Faster, lighter
 

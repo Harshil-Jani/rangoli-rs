@@ -55,6 +55,8 @@ async fn django_database_to_admin_api_and_mcp() {
         "shop_order",
         "shop_customer",
         "django_session",
+        "rangoli_setting",
+        "rangoli_event",
         "rangoli_user_groups",
         "rangoli_group",
         "rangoli_password_reset",

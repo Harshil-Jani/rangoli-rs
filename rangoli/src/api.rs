@@ -574,9 +574,9 @@ pub(crate) fn add_filters(meta: &'static ModelMeta, q: &mut Query, p: &HashMap<S
         }
         q.filter.push(lookup(meta, k, raw)?);
     }
-    if let Some(term) = param(&p, "search").filter(|s| !s.is_empty() && !meta.search.is_empty()) {
+    if let Some(term) = param(p, "search").filter(|s| !s.is_empty() && !meta.search.is_empty()) {
         q.filter.push(orm::search_node(meta, term)); // the model's full-text index
-    } else if let Some(term) = param(&p, "search").filter(|s| !s.is_empty()) {
+    } else if let Some(term) = param(p, "search").filter(|s| !s.is_empty()) {
         let pat = format!("%{}%", like_escape(term));
         let text: Vec<Node> = meta
             .fields
