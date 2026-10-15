@@ -37,7 +37,7 @@ pub async fn database(app: &crate::App) -> crate::Result<()> {
     // earlier test migrations, so a reused test database behaves like a new one.
     let d = db.dialect;
     let mut tables: Vec<&str> = app.models().iter().filter(|m| !m.table.starts_with("rangoli_")).map(|m| m.table).collect();
-    tables.extend(app.models().iter().flat_map(|m| m.m2m.iter().map(|r| r.through)));
+    tables.extend(app.models().iter().filter(|m| !m.table.starts_with("rangoli_")).flat_map(|m| m.m2m.iter().map(|r| r.through)));
     if d == crate::orm::Dialect::Mysql {
         sqlx::query("SET FOREIGN_KEY_CHECKS = 0").execute(&db.pool).await.ok();
     }

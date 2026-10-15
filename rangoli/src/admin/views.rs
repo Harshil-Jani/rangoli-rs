@@ -84,6 +84,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         .route("/admin/{table}/{id}/delete", get(delete_page).post(delete_submit))
         .route("/admin/{table}/{id}/history", get(history))
         .route("/admin/{table}/{id}/undo/{entry}", post(undo))
+        .layer(axum::middleware::from_fn(load_permissions))
         .with_state(Arc::new(Site { admin, options, models, env, version }))
 }
 
@@ -311,7 +312,40 @@ fn staff<'a>(user: &'a CurrentUser, uri: &Uri) -> Result<&'a User, Response> {
 }
 
 fn model(site: &Site, table: &str) -> Result<&'static ModelMeta, Response> {
-    site.admin.iter().copied().find(|m| m.table == table).ok_or_else(|| StatusCode::NOT_FOUND.into_response())
+    let meta = site.admin.iter().copied().find(|m| m.table == table).ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
+    allowed(meta.table, "view")?;
+    Ok(meta)
+}
+
+tokio::task_local! {
+    /// The signed-in staff member's permissions, loaded once per admin request.
+    static PERMS: auth::Permissions;
+}
+
+/// Load the staff member's permissions for this request (one query, only when enforced).
+async fn load_permissions(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let user = req.extensions().get::<CurrentUser>().and_then(|u| u.0.clone());
+    match user.filter(|u| u.is_staff) {
+        Some(u) => match auth::permissions(&u).await {
+            Ok(p) => PERMS.scope(p, next.run(req)).await,
+            Err(e) => fail(e),
+        },
+        None => next.run(req).await,
+    }
+}
+
+/// May the current staff member do `action` (view, add, change, delete) on `table`?
+fn can(table: &str, action: &str) -> bool {
+    PERMS.try_with(|p| p.allows(table, action)).unwrap_or(true)
+}
+
+fn allowed(table: &str, action: &str) -> Result<(), Response> {
+    if can(table, action) {
+        Ok(())
+    } else {
+        Err((StatusCode::FORBIDDEN, Html("<h1>403 Forbidden</h1><p>Your groups don't allow this. Ask an administrator.</p>"))
+            .into_response())
+    }
 }
 
 /// A model whose admin allows adding; `no_add()` models answer 403 like Django.
@@ -320,6 +354,7 @@ fn addable(site: &Site, table: &str) -> Result<&'static ModelMeta, Response> {
     if options(site, meta).no_add {
         return Err(StatusCode::FORBIDDEN.into_response());
     }
+    allowed(meta.table, "add")?;
     Ok(meta)
 }
 
@@ -384,10 +419,11 @@ fn app_of(table: &str) -> String {
 /// Apps and their models, in registration order, for the index and the sidebar.
 fn apps(site: &Site, current: Option<&str>) -> Vec<minijinja::Value> {
     let mut groups: Vec<(String, Vec<minijinja::Value>)> = vec![];
-    for m in &site.admin {
+    for m in site.admin.iter().filter(|m| can(m.table, "view")) {
         let app = app_of(m.table);
         let entry = context! {
-            table => m.table, plural => title_plural(m.name), current => current == Some(m.table), can_add => !options(site, m).no_add,
+            table => m.table, plural => title_plural(m.name), current => current == Some(m.table),
+            can_add => !options(site, m).no_add && can(m.table, "add"),
         };
         match groups.iter_mut().find(|(a, _)| *a == app) {
             Some((_, models)) => models.push(entry),
@@ -407,7 +443,7 @@ fn chrome(site: &Site, u: &User, current: Option<&'static ModelMeta>) -> minijin
         table => current.map(|m| m.table),
         name => current.map(|m| verbose(m.name)),
         plural => current.map(|m| title_plural(m.name)),
-        can_add => current.is_some_and(|m| !options(site, m).no_add),
+        can_add => current.is_some_and(|m| !options(site, m).no_add && can(m.table, "add")),
     }
 }
 
@@ -1151,6 +1187,10 @@ async fn import_submit(State(site): S, user: CurrentUser, uri: Uri, Path(table):
     };
     let count = |a: &str| plan.iter().filter(|p| p.action == a).count();
     let (adds, changes, same, errors) = (count("Add"), count("Change"), count("Unchanged"), count("Error"));
+    if changes > 0 && !can(meta.table, "change") {
+        let error = "These rows change existing records, and your groups don't allow changing them.";
+        return render(&site, "import.html", context! { title, error, csv => text, ..chrome(&site, u, Some(meta)) });
+    }
     if param(&f, "confirm") == Some("1") && errors == 0 {
         let applied = crate::atomic(async {
             for p in plan.iter().filter(|p| p.action == "Add" || p.action == "Change") {
@@ -1238,6 +1278,7 @@ async fn bulk(State(site): S, user: CurrentUser, uri: Uri, Path(table): Path<Str
     let rows = q.rows().await.map_err(fail)?;
     let ids: Vec<i64> = rows.iter().map(|(id, _)| *id).collect(); // only rows this staff member may touch
     let chosen = param(&f, "action").unwrap_or("");
+    allowed(meta.table, if chosen == "delete_selected" { "delete" } else { "change" })?;
     if chosen != "delete_selected" {
         let Some(action) = options(&site, meta).actions.iter().find(|a| a.name == chosen).cloned() else {
             return Ok(Redirect::to(&format!("/admin/{table}/?warn=noaction")).into_response());
@@ -1656,6 +1697,7 @@ async fn change_submit(
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
     visible(&site, meta, u, id).await?;
+    allowed(meta.table, "change")?;
     let form: HashMap<String, String> = pairs.iter().cloned().collect();
     let links = submitted_links(meta, &pairs);
     let old = fetch_row(meta, id).await?;
@@ -1868,6 +1910,7 @@ async fn delete_page(State(site): S, user: CurrentUser, uri: Uri, Path((table, i
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
     visible(&site, meta, u, id).await?;
+    allowed(meta.table, "delete")?;
     let obj = repr(meta, id, &fetch_row(meta, id).await?);
     let related = related(&site, meta, &[id]).await?;
     let status = if related.protected.is_empty() { StatusCode::OK } else { StatusCode::CONFLICT };
@@ -1887,6 +1930,7 @@ async fn delete_submit(State(site): S, user: CurrentUser, uri: Uri, Path((table,
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
     visible(&site, meta, u, id).await?;
+    allowed(meta.table, "delete")?;
     let obj = repr(meta, id, &fetch_row(meta, id).await?);
     let mut q = Query::new(meta);
     q.filter.push(by_id(id));
@@ -1947,6 +1991,7 @@ async fn undo(State(site): S, user: CurrentUser, uri: Uri, Path((table, id, entr
     let u = staff(&user, &uri)?;
     let meta = model(&site, &table)?;
     visible(&site, meta, u, id).await?;
+    allowed(meta.table, "change")?;
     let e = LogEntry::get(entry).await.map_err(fail)?;
     let newest = LogEntry::objects()
         .filter(LogEntry::TABLE_NAME.eq(table.as_str()) & LogEntry::OBJECT_ID.eq(id))

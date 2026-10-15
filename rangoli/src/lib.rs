@@ -319,6 +319,7 @@ impl App {
                 auth::ApiToken::meta(),
                 auth::LoginFailure::meta(),
                 auth::PasswordReset::meta(),
+                auth::Group::meta(),
                 approvals::PendingChange::meta(),
                 webhooks::Webhook::meta(),
                 oauth::OAuthClient::meta(),
@@ -331,6 +332,11 @@ impl App {
                 (
                     auth::User::meta(),
                     admin::ModelAdmin::<auth::User>::new().exclude([&auth::User::TOTP_SECRET, &auth::User::TOTP_LAST_STEP]).opts,
+                ),
+                (
+                    auth::Group::meta(),
+                    // Staff permissions (with App::admin_permissions): one per line, e.g. blog_post.change.
+                    admin::ModelAdmin::<auth::Group>::new().list_display([&auth::Group::NAME]).search_fields([&auth::Group::NAME]).opts,
                 ),
                 (
                     webhooks::Webhook::meta(),
@@ -571,6 +577,14 @@ impl App {
     /// **Requests** in the admin, and staff AI agents get an `inspect_requests` tool.
     pub fn inspect_queries(self) -> Self {
         inspect::enable();
+        self
+    }
+
+    /// Staff other than superusers can only do what their groups allow (Django's model
+    /// permissions): add groups under **Groups** with lines like `blog_post.change` or `*.view`,
+    /// and put staff in them. Off by default, so existing staff keep full access.
+    pub fn admin_permissions(self) -> Self {
+        auth::ENFORCE_PERMISSIONS.store(true, std::sync::atomic::Ordering::Relaxed);
         self
     }
 

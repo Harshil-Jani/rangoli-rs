@@ -181,6 +181,8 @@ async fn reset(db: &orm::Db) {
         "blog_post",
         "e2e_note",
         "e2e_doc",
+        "rangoli_user_groups",
+        "rangoli_group",
         "rangoli_password_reset",
         "rangoli_oauth_code",
         "rangoli_oauth_client",

@@ -13,8 +13,21 @@ use axum::middleware::Next;
 use axum::response::Response;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Staff permissions, granted to the users in a group when `App::admin_permissions()` is on.
 #[derive(rangoli_macros::Model, Clone, Debug)]
-#[model(table = "rangoli_user", display = "username")]
+#[model(table = "rangoli_group", display = "name")]
+pub struct Group {
+    pub id: Option<i64>,
+    #[field(max_length = 150, unique)]
+    pub name: String,
+    /// One per line: `blog_post.view`, `blog_post.add`, `blog_post.change`, `blog_post.delete`,
+    /// `blog_post.*` for all four, or `*.view` to see every model.
+    #[field(text)]
+    pub permissions: String,
+}
+
+#[derive(rangoli_macros::Model, Clone, Debug)]
+#[model(table = "rangoli_user", display = "username", m2m(groups = Group))]
 pub struct User {
     pub id: Option<i64>,
     #[field(max_length = 150, unique)]
@@ -514,6 +527,49 @@ pub async fn session_middleware(mut req: Request, next: Next) -> Response {
     }
     req.extensions_mut().insert(CurrentUser(user));
     next.run(req).await
+}
+
+// ---------------------------------------------------------------- staff permissions
+
+pub(crate) static ENFORCE_PERMISSIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What a staff member may do in the admin: everything (superusers, or when
+/// `App::admin_permissions()` is off), or what their groups grant.
+#[derive(Clone, Debug, Default)]
+pub struct Permissions {
+    all: bool,
+    granted: std::collections::HashSet<String>,
+}
+
+impl Permissions {
+    pub fn everything() -> Self {
+        Permissions { all: true, granted: Default::default() }
+    }
+
+    /// `action` is `view`, `add`, `change` or `delete`. Being allowed to change implies view.
+    pub fn allows(&self, table: &str, action: &str) -> bool {
+        if self.all {
+            return true;
+        }
+        let has = |a: &str| {
+            [format!("{table}.{a}"), format!("{table}.*"), format!("*.{a}"), "*.*".to_string()].iter().any(|p| self.granted.contains(p))
+        };
+        has(action) || (action == "view" && has("change"))
+    }
+}
+
+/// The permissions of `user`, from their groups (one query).
+pub async fn permissions(user: &User) -> Result<Permissions> {
+    if user.is_superuser || !ENFORCE_PERMISSIONS.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(Permissions::everything());
+    }
+    let groups = User::GROUPS.prefetch(std::slice::from_ref(user)).await?;
+    let granted = groups
+        .into_values()
+        .flatten()
+        .flat_map(|g| g.permissions.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect::<Vec<_>>())
+        .collect();
+    Ok(Permissions { all: false, granted })
 }
 
 // ---------------------------------------------------------------- password reset

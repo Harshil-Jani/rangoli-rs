@@ -1,0 +1,51 @@
+{
+  "operations": [
+    {
+      "op": "create_table",
+      "table": "rangoli_group",
+      "columns": [
+        {
+          "name": "name",
+          "type": {
+            "varchar": 150
+          },
+          "unique": true
+        },
+        {
+          "name": "permissions",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "op": "create_table",
+      "table": "rangoli_user_groups",
+      "columns": [
+        {
+          "name": "source_id",
+          "type": "int",
+          "fk": "rangoli_user",
+          "cascade": true
+        },
+        {
+          "name": "target_id",
+          "type": "int",
+          "fk": "rangoli_group",
+          "cascade": true
+        }
+      ]
+    },
+    {
+      "op": "add_index",
+      "table": "rangoli_user_groups",
+      "index": {
+        "name": "rangoli_user_groups_source_id_target_id_uniq",
+        "columns": [
+          "source_id",
+          "target_id"
+        ],
+        "unique": true
+      }
+    }
+  ]
+}
