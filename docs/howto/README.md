@@ -14,3 +14,4 @@ Short, task-first guides. Every API they use is exercised by the test suite on P
 - [A multi-tenant SaaS: every customer sees only their own data](multi-tenant.md)
 - [Find out why a page is slow (or ask Claude to)](slow-pages.md)
 - [Testing your app](testing.md)
+- [Sending email, and "Forgot your password?"](email.md)

@@ -181,6 +181,7 @@ async fn reset(db: &orm::Db) {
         "blog_post",
         "e2e_note",
         "e2e_doc",
+        "rangoli_password_reset",
         "rangoli_oauth_code",
         "rangoli_oauth_client",
         "rangoli_webhook",
@@ -2187,6 +2188,42 @@ async fn scenario() {
     assert_eq!(send(get("/admin/", &cookie)).await.0, StatusCode::SEE_OTHER, "session is gone after logout");
     let (status, _, _) = send(form("/admin/login", "", "username=root&password=n3w-pass-123")).await;
     assert_eq!(status, StatusCode::SEE_OTHER, "new password works");
+
+    // ---- forgot your password? (the email is read back from the mail queue)
+    let mut forgetful = auth::create_user("forgetful", "old-password-1", true).await.unwrap();
+    forgetful.email = Some("Forgetful@Example.com".into());
+    forgetful.save().await.unwrap();
+    let their_session = auth::login(&forgetful).await.unwrap().split(';').next().unwrap().to_string();
+    let mails =
+        || async { TaskRecord::objects().filter(TaskRecord::NAME.eq("rangoli.mail")).order_by(TaskRecord::ID.asc()).all().await.unwrap() };
+    let before = mails().await.len();
+    let (_, _, page) = send(form("/admin/password_reset/", "", "email=nobody%40example.com")).await;
+    let (_, _, page2) = send(form("/admin/password_reset/", "", "email=forgetful%40example.com")).await;
+    assert!(page.contains("If an account uses that address") && page == page2, "the same answer either way: no account enumeration");
+    let queued = mails().await;
+    assert_eq!(queued.len(), before + 1, "one email, for the real account (matched case-insensitively)");
+    let payload: serde_json::Value = serde_json::from_str(&queued.last().unwrap().payload).unwrap();
+    assert_eq!(payload["to"][0], "forgetful@example.com");
+    let text = payload["text"].as_str().unwrap();
+    let token = text.split("/admin/reset/").nth(1).unwrap().split_whitespace().next().unwrap().to_string();
+    send(form("/admin/password_reset/", "", "email=forgetful%40example.com")).await;
+    assert_eq!(mails().await.len(), before + 1, "asking again right away doesn't send another (no inbox flooding)");
+    let (_, _, page) = send(get(&format!("/admin/reset/{token}"), "")).await;
+    assert!(page.contains("new_password1"), "the link opens the form");
+    let (_, _, page) = send(get(&format!("/admin/reset/{}", "0".repeat(64)), "")).await;
+    assert!(page.contains("expired or was already used"), "a made-up token");
+    let (status, _, _) = send(form(&format!("/admin/reset/{token}"), "", "new_password1=short&new_password2=short")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "too short");
+    let (status, headers, _) =
+        send(form(&format!("/admin/reset/{token}"), "", "new_password1=brand-new-pass&new_password2=brand-new-pass")).await;
+    assert_eq!((status, headers[header::LOCATION].to_str().unwrap()), (StatusCode::SEE_OTHER, "/admin/login?reset=1"));
+    assert_eq!(send(get("/admin/", &their_session)).await.0, StatusCode::SEE_OTHER, "every old session is signed out");
+    let (_, _, page) = send(form(&format!("/admin/reset/{token}"), "", "new_password1=another-pass&new_password2=another-pass")).await;
+    assert!(page.contains("expired or was already used"), "a link works once");
+    let (status, _, _) = send(form("/admin/login", "", "username=forgetful&password=brand-new-pass")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "the new password works");
+    let (status, _, _) = send(form("/admin/login", "", "username=forgetful&password=old-password-1")).await;
+    assert_ne!(status, StatusCode::SEE_OTHER, "and the old one doesn't");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

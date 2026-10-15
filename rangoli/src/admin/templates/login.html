@@ -4,6 +4,7 @@
 {% block head %}<h1>Log in</h1>{% endblock %}
 {% block content %}
 {% if error %}<p class="message error" role="alert">{{ error }}</p>{% endif %}
+{% if reset %}<p class="message success" role="status">Your password was changed. Log in with the new one.</p>{% endif %}
 <form method="post" action="/admin/login" class="stack" hx-boost="false">
   <label for="id_username">Username</label>
   <input type="text" name="username" id="id_username" value="{{ username or "" }}" autocomplete="username" maxlength="150" required autofocus>
@@ -14,4 +15,5 @@
   <input type="hidden" name="next" value="{{ next }}">
   <button type="submit" class="btn primary">Log in</button>
 </form>
+<p class="help"><a href="/admin/password_reset/">Forgot your password?</a></p>
 {% endblock %}

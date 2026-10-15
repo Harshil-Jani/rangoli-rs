@@ -1027,6 +1027,10 @@ impl<M> Col<M, String> {
     pub fn starts_with(self, s: &str) -> Expr<M> {
         Expr::new(Node::Like(self.name, format!("{}%", like_escape(s))))
     }
+    /// Case-insensitive equality (Django's `iexact`): `User::EMAIL.iexact("Bob@Example.com")`.
+    pub fn iexact(self, s: &str) -> Expr<M> {
+        Expr::new(Node::Like(self.name, like_escape(s)))
+    }
 }
 
 // ---------------------------------------------------------------- untyped query

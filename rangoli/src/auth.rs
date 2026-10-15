@@ -29,6 +29,22 @@ pub struct User {
     pub totp_secret: Option<String>,
     /// The newest code step used, so a code works only once.
     pub totp_last_step: i64,
+    /// Where password reset links go.
+    #[field(max_length = 254)]
+    pub email: Option<String>,
+}
+
+/// A password reset link, stored as a hash: valid for an hour, used once.
+#[derive(rangoli_macros::Model, Clone, Debug)]
+#[model(table = "rangoli_password_reset")]
+pub struct PasswordReset {
+    pub id: Option<i64>,
+    #[field(max_length = 64, unique)]
+    pub token_hash: String,
+    #[field(fk = User, cascade)]
+    pub user_id: i64,
+    pub created_at: DateTime,
+    pub expires_at: DateTime,
 }
 
 #[derive(rangoli_macros::Model, Clone, Debug)]
@@ -292,6 +308,7 @@ async fn mirror(ext: ExternalUser) -> Result<User> {
             is_superuser: false,
             totp_secret: None,
             totp_last_step: 0,
+            email: None,
         },
     };
     (u.is_active, u.is_staff, u.is_superuser) = (ext.is_active, ext.is_staff, ext.is_superuser);
@@ -374,6 +391,7 @@ pub async fn create_user(username: &str, password: &str, staff: bool) -> Result<
         is_superuser: staff,
         totp_secret: None,
         totp_last_step: 0,
+        email: None,
     };
     u.save().await?;
     Ok(u)
@@ -496,6 +514,84 @@ pub async fn session_middleware(mut req: Request, next: Next) -> Response {
     }
     req.extensions_mut().insert(CurrentUser(user));
     next.run(req).await
+}
+
+// ---------------------------------------------------------------- password reset
+
+const RESET_SECS: i64 = 3600;
+/// At most one reset email per account in this window, so the form can't flood an inbox.
+const RESET_COOLDOWN_SECS: i64 = 120;
+
+/// Email a reset link to the active user(s) with this address. Says nothing about whether one
+/// exists (callers show the same message either way). `link` turns a token into the URL to send,
+/// e.g. `|t| format!("https://app.example.com/reset/{t}")`.
+pub async fn request_password_reset(email: &str, link: impl Fn(&str) -> String) -> Result<()> {
+    let email = email.trim();
+    if email.is_empty() || !email.contains('@') || email.len() > 254 {
+        return Ok(());
+    }
+    let now = DateTime::now();
+    let users = User::objects().filter(User::EMAIL.iexact(email) & User::IS_ACTIVE.eq(true)).all().await?;
+    for u in users {
+        let uid = u.id.ok_or(Error::NotFound)?;
+        let since = DateTime::from_unix(now.unix() - RESET_COOLDOWN_SECS);
+        if PasswordReset::objects().filter(PasswordReset::USER_ID.eq(uid) & PasswordReset::CREATED_AT.gt(since)).exists().await? {
+            continue;
+        }
+        let token = random_hex(32)?;
+        PasswordReset {
+            id: None,
+            token_hash: token_digest(&token),
+            user_id: uid,
+            created_at: now,
+            expires_at: DateTime::from_unix(now.unix() + RESET_SECS),
+        }
+        .save()
+        .await?;
+        let body = format!(
+            "Someone asked to reset the password for {} .\n\nTo choose a new password, open this link within an hour:\n{}\n\nIf it wasn't you, ignore this email; your password stays the same.",
+            u.username,
+            link(&token)
+        );
+        crate::mail::send(crate::mail::Mail::new(email, "Reset your password", &body)).await?;
+    }
+    Ok(())
+}
+
+/// The user a reset token belongs to, if it's known and fresh.
+pub async fn password_reset_user(token: &str) -> Result<Option<User>> {
+    if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
+    let found = PasswordReset::objects()
+        .filter(PasswordReset::TOKEN_HASH.eq(token_digest(token)) & PasswordReset::EXPIRES_AT.gt(DateTime::now()))
+        .first()
+        .await?;
+    match found {
+        Some(r) => Ok(User::objects().filter(User::ID.eq(r.user_id) & User::IS_ACTIVE.eq(true)).first().await?),
+        None => Ok(None),
+    }
+}
+
+/// Set a new password with a reset token: the token (and any other open reset) is spent,
+/// every session of the account is signed out, and its failed-login count is cleared.
+pub async fn reset_password(token: &str, new_password: &str) -> Result<bool> {
+    let Some(mut user) = password_reset_user(token).await? else { return Ok(false) };
+    let uid = user.id.ok_or(Error::NotFound)?;
+    user.password = hash_password(new_password).await?;
+    let spent = crate::atomic(async {
+        // Spend this token first: of two racing resets, only one deletes it.
+        if PasswordReset::objects().filter(PasswordReset::TOKEN_HASH.eq(token_digest(token))).delete().await? != 1 {
+            return Ok(false);
+        }
+        user.save().await?;
+        PasswordReset::objects().filter(PasswordReset::USER_ID.eq(uid)).delete().await?;
+        Session::objects().filter(Session::USER_ID.eq(uid)).delete().await?;
+        LoginFailure::objects().filter(LoginFailure::USERNAME.eq(failure_key(&user.username))).delete().await?;
+        Ok(true)
+    })
+    .await?;
+    Ok(spent)
 }
 
 #[cfg(test)]

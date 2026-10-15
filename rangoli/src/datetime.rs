@@ -46,6 +46,15 @@ impl DateTime {
         Self::from_parts(y, u32::try_from(m).ok()?, u32::try_from(day).ok()?, hh, mm, ss)
     }
 
+    /// `Fri, 15 Jan 2027 08:00:00 +0000`: the date format email headers use (RFC 2822).
+    pub fn rfc2822(self) -> String {
+        const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        let (y, mo, d, h, mi, s) = self.parts();
+        let weekday = (self.0.div_euclid(86_400) + 4).rem_euclid(7) as usize; // 1970-01-01 was a Thursday
+        format!("{}, {d:02} {} {y} {h:02}:{mi:02}:{s:02} +0000", DAYS[weekday], MONTHS[(mo - 1) as usize])
+    }
+
     pub fn start_of_day(self) -> Self {
         DateTime(self.0 - self.0.rem_euclid(86_400))
     }

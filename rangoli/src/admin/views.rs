@@ -57,6 +57,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         ("oauth.html", include_str!("templates/oauth.html")),
         ("import.html", include_str!("templates/import.html")),
         ("requests.html", include_str!("templates/requests.html")),
+        ("password_reset.html", include_str!("templates/password_reset.html")),
     ] {
         env.add_template(name, src).expect("admin template");
     }
@@ -72,6 +73,8 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         .route("/admin/2fa/", get(two_factor_page).post(two_factor_submit))
         .route("/admin/oauth/authorize", get(oauth_page).post(oauth_submit))
         .route("/admin/requests/", get(requests_page))
+        .route("/admin/password_reset/", get(reset_request_page).post(reset_request_submit))
+        .route("/admin/reset/{token}", get(reset_page).post(reset_submit))
         .route("/admin/static/{file}", get(static_file))
         .route("/admin/{table}/", get(list).post(bulk))
         .route("/admin/{table}/export.csv", get(export_csv))
@@ -509,7 +512,8 @@ async fn login_page(State(site): S, user: CurrentUser, UrlQuery(p): UrlQuery<Pai
     if user.0.is_some_and(|u| u.is_staff) {
         return Redirect::to(next).into_response();
     }
-    render(&site, "login.html", context! { title => "Log in", next }).unwrap_or_else(|e| e)
+    let reset = param(&p, "reset").is_some();
+    render(&site, "login.html", context! { title => "Log in", next, reset }).unwrap_or_else(|e| e)
 }
 
 /// Only redirect back into the admin, never to another site.
@@ -951,6 +955,43 @@ async fn export_csv(State(site): S, user: CurrentUser, uri: Uri, Path(table): Pa
         axum::body::Body::from_stream(body),
     )
         .into_response())
+}
+
+// ---------------------------------------------------------------- password reset
+
+async fn reset_request_page(State(site): S) -> Page {
+    render(&site, "password_reset.html", context! { title => "Forgot your password?" })
+}
+
+async fn reset_request_submit(State(site): S, headers: HeaderMap, Form(f): Form<Pairs>) -> Page {
+    let origin = crate::oauth::origin(&headers);
+    auth::request_password_reset(param(&f, "email").unwrap_or(""), |t| format!("{origin}/admin/reset/{t}")).await.map_err(fail)?;
+    // The same answer whether or not the address has an account.
+    render(&site, "password_reset.html", context! { title => "Check your email", sent => true })
+}
+
+async fn reset_page(State(site): S, Path(token): Path<String>) -> Page {
+    let valid = auth::password_reset_user(&token).await.map_err(fail)?.is_some();
+    render(&site, "password_reset.html", context! { title => "Choose a new password", token => valid.then_some(token), invalid => !valid })
+}
+
+async fn reset_submit(State(site): S, Path(token): Path<String>, Form(f): Form<Pairs>) -> Page {
+    let (p1, p2) = (param(&f, "new_password1").unwrap_or(""), param(&f, "new_password2").unwrap_or(""));
+    let error = if p1.chars().count() < 8 {
+        Some("This password is too short. It must contain at least 8 characters.")
+    } else if p1 != p2 {
+        Some("The two password fields didn’t match.")
+    } else {
+        None
+    };
+    if let Some(error) = error {
+        let page = render(&site, "password_reset.html", context! { title => "Choose a new password", token, error })?;
+        return Ok((StatusCode::UNPROCESSABLE_ENTITY, page).into_response());
+    }
+    if !auth::reset_password(&token, p1).await.map_err(fail)? {
+        return render(&site, "password_reset.html", context! { title => "Choose a new password", invalid => true });
+    }
+    Ok(Redirect::to("/admin/login?reset=1").into_response())
 }
 
 // ---------------------------------------------------------------- what requests did to the database

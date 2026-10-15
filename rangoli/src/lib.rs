@@ -28,6 +28,7 @@ mod health;
 pub mod inspect;
 pub mod jwt;
 pub mod limit;
+pub mod mail;
 pub mod mcp;
 pub mod migrate;
 pub mod oauth;
@@ -310,12 +311,14 @@ impl App {
     pub fn new() -> Self {
         use orm::Model;
         tasks::register::<webhooks::Delivery>();
+        tasks::register::<mail::Mail>();
         App {
             models: vec![
                 auth::User::meta(),
                 auth::Session::meta(),
                 auth::ApiToken::meta(),
                 auth::LoginFailure::meta(),
+                auth::PasswordReset::meta(),
                 approvals::PendingChange::meta(),
                 webhooks::Webhook::meta(),
                 oauth::OAuthClient::meta(),

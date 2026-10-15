@@ -211,6 +211,7 @@ async fn the_framework_never_takes_the_server_down() {
         "fz_post",
         "fz_tag",
         "fz_author",
+        "rangoli_password_reset",
         "rangoli_oauth_code",
         "rangoli_oauth_client",
         "rangoli_webhook",

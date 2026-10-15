@@ -97,6 +97,24 @@ jobs:
           RANGOLI_TEST_S3_KEY: cikey
           RANGOLI_TEST_S3_SECRET: cisecret123
 
+  mail:
+    name: email over SMTP (Mailpit)
+    runs-on: ubuntu-latest
+    services:
+      mailpit:
+        image: axllent/mailpit
+        env:
+          MP_SMTP_AUTH_ACCEPT_ANY: "1"
+          MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+        ports: ["1025:1025", "8025:8025"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p rangoli --test mail
+        env:
+          RANGOLI_TEST_MAILPIT: 127.0.0.1:1025,127.0.0.1:8025
+
   outage:
     name: database outage (postgres)
     runs-on: ubuntu-latest
