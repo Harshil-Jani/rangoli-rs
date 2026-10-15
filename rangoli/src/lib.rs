@@ -337,6 +337,7 @@ impl App {
                 auth::LoginFailure::meta(),
                 auth::PasswordReset::meta(),
                 auth::Group::meta(),
+                auth::Setting::meta(),
                 events::Event::meta(),
                 approvals::PendingChange::meta(),
                 webhooks::Webhook::meta(),

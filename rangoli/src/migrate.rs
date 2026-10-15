@@ -317,6 +317,7 @@ pub fn builtin() -> Vec<Migration> {
         ("00000000000014_rangoli_groups", include_str!("migrations/00000000000014_rangoli_groups.json")),
         ("00000000000015_rangoli_event", include_str!("migrations/00000000000015_rangoli_event.json")),
         ("00000000000016_rangoli_token_budget", include_str!("migrations/00000000000016_rangoli_token_budget.json")),
+        ("00000000000017_rangoli_setting", include_str!("migrations/00000000000017_rangoli_setting.json")),
     ]
     .into_iter()
     .map(|(name, json)| Migration { name: name.into(), ..serde_json::from_str(json).expect("built-in migration") })

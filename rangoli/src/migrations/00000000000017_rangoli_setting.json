@@ -1,0 +1,12 @@
+{
+  "operations": [
+    {
+      "op": "create_table",
+      "table": "rangoli_setting",
+      "columns": [
+        { "name": "name", "type": { "varchar": 100 } },
+        { "name": "value", "type": "text" }
+      ]
+    }
+  ]
+}

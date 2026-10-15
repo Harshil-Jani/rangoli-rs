@@ -120,6 +120,31 @@ pub struct TokenScope {
     pub max_writes_per_day: Option<i64>,
 }
 
+/// A site-wide switch kept in the database, so every instance sees it at once.
+#[derive(rangoli_macros::Model, Clone, Debug)]
+#[model(table = "rangoli_setting")]
+pub struct Setting {
+    pub id: Option<i64>,
+    #[field(max_length = 100)]
+    pub name: String,
+    #[field(text)]
+    pub value: String,
+}
+
+const AGENTS_PAUSED: &str = "agents_paused";
+
+/// Is the admin's "Pause all agents" on? While it is, no token (API or MCP) can change anything.
+pub async fn agents_paused() -> Result<bool> {
+    use crate::orm::Model;
+    Ok(Setting::objects().filter(Setting::NAME.eq(AGENTS_PAUSED)).filter(Setting::VALUE.eq("1")).count().await? > 0)
+}
+
+pub async fn pause_agents(paused: bool) -> Result<()> {
+    use crate::orm::Model;
+    Setting::objects().filter(Setting::NAME.eq(AGENTS_PAUSED)).delete().await?;
+    Setting { id: None, name: AGENTS_PAUSED.into(), value: if paused { "1" } else { "0" }.into() }.save().await
+}
+
 /// Count one write against the token's daily budget; false when it's used up. One conditional
 /// UPDATE, so concurrent requests can't overshoot it, and a new UTC day starts from zero.
 pub(crate) async fn spend_write_budget(scope: &TokenScope) -> Result<bool> {

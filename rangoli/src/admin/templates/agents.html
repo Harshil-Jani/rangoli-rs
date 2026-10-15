@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block crumbs %}<span aria-hidden="true">›</span>AI agents{% endblock %}
 {% block content %}
+{% if paused %}<form method="post" action="/admin/agents/pause" class="message error" role="alert">Changes by AI agents and API tokens are paused. They can still read.{% if superuser %} <input type="hidden" name="paused" value="0"><button type="submit" class="btn">Resume</button>{% endif %}</form>
+{% elif superuser and tokens %}<form method="post" action="/admin/agents/pause"><input type="hidden" name="paused" value="1"><button type="submit" class="btn danger">Pause all agents</button> <span class="help">Stops every token's changes at once, on every server, until you resume.</span></form>{% endif %}
 <p class="intro">Let Claude, Cursor or any assistant that speaks MCP read and update your data. It works as you, with your permissions, and every change it makes shows up in History as “via MCP”.</p>
 {% if token %}
 <p class="message success" role="status">Token “{{ name }}” created. Copy it now: it won't be shown again. {{ can }}</p>

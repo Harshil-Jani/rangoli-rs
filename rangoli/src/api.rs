@@ -794,6 +794,9 @@ async fn detail(
 /// A token with a daily write budget spends one per write; when it's gone, 429 until midnight UTC.
 async fn spend(scope: &ScopeExt, dry: bool) -> Result<(), Response> {
     let Some(axum::Extension(scope)) = scope else { return Ok(()) };
+    if !dry && crate::auth::agents_paused().await.map_err(fail)? {
+        return Err(problem(StatusCode::SERVICE_UNAVAILABLE, PAUSED));
+    }
     if dry || crate::auth::spend_write_budget(scope).await.map_err(fail)? {
         return Ok(());
     }
@@ -803,6 +806,8 @@ async fn spend(scope: &ScopeExt, dry: bool) -> Result<(), Response> {
     );
     Err((StatusCode::TOO_MANY_REQUESTS, [(axum::http::header::RETRY_AFTER, until.to_string())], body).into_response())
 }
+
+pub(crate) const PAUSED: &str = "An admin has paused changes by AI agents and API tokens. Reading still works.";
 
 /// `?dry_run=1`: do the write in a transaction, report it, roll it back.
 fn dry_run(uri: &axum::http::Uri) -> bool {

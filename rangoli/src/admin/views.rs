@@ -71,6 +71,7 @@ pub fn router(admin: Vec<(&'static ModelMeta, Options)>, models: Vec<&'static Mo
         .route("/admin/logout", post(logout))
         .route("/admin/password_change/", get(password_page).post(password_submit))
         .route("/admin/agents/", get(agents_page).post(agents_submit))
+        .route("/admin/agents/pause", post(agents_pause))
         .route("/admin/2fa/", get(two_factor_page).post(two_factor_submit))
         .route("/admin/oauth/authorize", get(oauth_page).post(oauth_submit))
         .route("/admin/requests/", get(requests_page))
@@ -195,7 +196,18 @@ async fn agents_page(State(site): S, user: CurrentUser, uri: Uri) -> Page {
     let u = staff(&user, &uri)?;
     let tokens = agent_rows(u).await?;
     let choices = table_choices(&site);
-    render(&site, "agents.html", context! { title => "Connect an AI agent", tokens, choices, ..chrome(&site, u, None) })
+    let (paused, superuser) = (auth::agents_paused().await.map_err(fail)?, u.is_superuser);
+    render(&site, "agents.html", context! { title => "Connect an AI agent", tokens, choices, paused, superuser, ..chrome(&site, u, None) })
+}
+
+/// The kill switch: superusers stop (or restart) every agent's changes at once.
+async fn agents_pause(user: CurrentUser, uri: Uri, Form(f): Form<Pairs>) -> Page {
+    let u = staff(&user, &uri)?;
+    if !u.is_superuser {
+        return Err(StatusCode::FORBIDDEN.into_response());
+    }
+    auth::pause_agents(param(&f, "paused") == Some("1")).await.map_err(fail)?;
+    Ok(Redirect::to("/admin/agents/").into_response())
 }
 
 /// Create a token for the signed-in user and show it once, with setup for common clients.

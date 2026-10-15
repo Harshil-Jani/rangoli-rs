@@ -248,6 +248,9 @@ async fn call_custom(user: &CurrentUser, scope: Option<&TokenScope>, name: &str,
         return Some(error(format!("Missing argument: {missing}")));
     }
     if let (Some(s), false) = (scope, tool.read_only) {
+        if crate::auth::agents_paused().await.unwrap_or(true) {
+            return Some(error(crate::api::PAUSED.into()));
+        }
         match crate::auth::spend_write_budget(s).await {
             Ok(true) => {}
             Ok(false) => {
