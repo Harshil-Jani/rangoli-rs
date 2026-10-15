@@ -694,6 +694,17 @@ async fn detail(
     Ok(Json(row).into_response())
 }
 
+/// A token with a daily write budget spends one per write; when it's gone, 429 until midnight UTC.
+async fn spend(scope: &ScopeExt, dry: bool) -> Result<(), Response> {
+    let Some(axum::Extension(scope)) = scope else { return Ok(()) };
+    if dry || crate::auth::spend_write_budget(scope).await.map_err(fail)? {
+        return Ok(());
+    }
+    let until = 86_400 - crate::auth::now().rem_euclid(86_400);
+    let body = Json(json!({ "detail": format!("This token's daily limit of {} changes is used up; it resets at midnight UTC.", scope.max_writes_per_day.unwrap_or(0)) }));
+    Err((StatusCode::TOO_MANY_REQUESTS, [(axum::http::header::RETRY_AFTER, until.to_string())], body).into_response())
+}
+
 /// `?dry_run=1`: do the write in a transaction, report it, roll it back.
 fn dry_run(uri: &axum::http::Uri) -> bool {
     uri.query().is_some_and(|q| q.split('&').any(|kv| kv == "dry_run=1" || kv == "dry_run=true"))
@@ -857,6 +868,7 @@ async fn create(
         // An owned row needs an owner; with `write(Access::Public)` the body could otherwise name anyone.
         return Err(problem(StatusCode::UNAUTHORIZED, "Authentication credentials were not provided."));
     }
+    spend(&scope, dry).await?;
     let body = claim(opts, &user, &body, true);
     let cols = columns(meta, &body, true, false).await?;
     row_rules(meta, None, &cols).await?;
@@ -895,6 +907,7 @@ async fn update(
 ) -> Reply {
     let (meta, opts) = endpoint(site, table, user, scope, true)?;
     fetch(meta, id, restrict(opts, user)).await?; // 404 before validation, like DRF (and for others' rows)
+    spend(scope, dry).await?;
     let body = &claim(opts, user, body, false);
     let cols = columns(meta, body, false, partial).await?;
     row_rules(meta, Some(id), &cols).await?;
@@ -961,6 +974,7 @@ async fn remove(
     let (meta, opts) = endpoint(&site, &table, &user, &scope, true)?;
     let via = via.map(|v| v.0);
     let dry = dry_run(&uri);
+    spend(&scope, dry).await?;
     if scope.as_ref().is_some_and(|s| s.needs_approval) {
         fetch(meta, id, restrict(opts, &user)).await?; // only queue a delete of a row the caller can see
     }

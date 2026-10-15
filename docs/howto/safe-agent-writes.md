@@ -44,7 +44,11 @@ Every change or delete made through the API or MCP stores the row as it was. Ope
 - An undone change is put back.
 - An undone delete returns with the same id.
 
-## 5. Dry runs
+## 5. A daily budget
+
+Give a token a cap: "At most N changes a day" when connecting an agent, or `createtoken ... --max-writes 200`. Each create, update or delete counts, including the ones waiting for approval. Past the cap the agent gets a 429 that says why, until midnight UTC. Rate limits stop a runaway loop; the budget stops a confident agent from rewriting the whole table overnight. One conditional `UPDATE` does the counting, so parallel requests can't overshoot it.
+
+## 6. Dry runs
 
 An agent (or any API client) can check a change before making it: `"dry_run": true` in a tool call, or `?dry_run=1` on the API. The write runs for real inside a transaction, with every permission, validation and row rule applied. The response says what the row *would be*, and then the transaction is rolled back, so no History entry, hook or webhook is left behind.
 

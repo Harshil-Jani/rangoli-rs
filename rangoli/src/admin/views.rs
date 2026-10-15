@@ -218,6 +218,7 @@ async fn agents_submit(State(site): S, user: CurrentUser, uri: Uri, headers: axu
         read_only: !writes,
         tables: (!picked.is_empty()).then_some(picked),
         needs_approval: writes && param(&f, "ask_first") == Some("on"),
+        max_writes_per_day: param(&f, "max_writes").and_then(|n| n.trim().parse::<i64>().ok()).filter(|n| *n > 0),
         ..Default::default()
     };
     let (_, token) = auth::create_scoped_token(u, &name, ttl, &scope).await.map_err(fail)?;

@@ -26,6 +26,7 @@
         <label class="check"><input type="checkbox" name="allow_writes"> Allow changes (add, edit and delete)</label>
         <label class="check"><input type="checkbox" name="ask_first" checked> Ask me before each change</label>
         <p class="help">Off by default: the agent can look things up but not change anything. With changes allowed and "ask me" on, each change waits for you under Pending changes.</p>
+        <label class="check">At most <input type="number" name="max_writes" min="1" class="narrow" placeholder="no limit"> changes a day</label>
       </div>
     </div>
     {% if choices %}

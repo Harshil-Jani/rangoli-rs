@@ -98,6 +98,11 @@ pub struct ApiToken {
     pub tables: Option<String>,
     /// Writes wait in the admin's Pending changes until a person approves them.
     pub needs_approval: bool,
+    /// At most this many creates, updates and deletes per UTC day; then 429 until midnight.
+    pub max_writes_per_day: Option<i64>,
+    /// The UTC day (days since 1970) `writes_count` belongs to.
+    pub writes_day: i64,
+    pub writes_count: i64,
 }
 
 /// What a token may do beyond its user's own rights. Set on bearer requests only; sessions
@@ -110,6 +115,32 @@ pub struct TokenScope {
     pub needs_approval: bool,
     /// The token's name, shown to reviewers ("Claude on my laptop").
     pub token: String,
+    /// The token's row, and its daily write budget if it has one.
+    pub token_id: Option<i64>,
+    pub max_writes_per_day: Option<i64>,
+}
+
+/// Count one write against the token's daily budget; false when it's used up. One conditional
+/// UPDATE, so concurrent requests can't overshoot it, and a new UTC day starts from zero.
+pub(crate) async fn spend_write_budget(scope: &TokenScope) -> Result<bool> {
+    let (Some(id), Some(max)) = (scope.token_id, scope.max_writes_per_day) else { return Ok(true) };
+    let d = crate::orm::db().dialect;
+    let today = now().div_euclid(86_400);
+    let (t, day, count) = (d.quote("rangoli_api_token"), d.quote("writes_day"), d.quote("writes_count"));
+    // MySQL assigns left to right, so the count (which reads the old day) is set first.
+    let sql = format!(
+        "UPDATE {t} SET {count} = CASE WHEN {day} = {p1} THEN {count} + 1 ELSE 1 END, {day} = {p2} WHERE {id} = {p3} AND ({day} <> {p4} OR {count} < {p5})",
+        id = d.quote("id"),
+        p1 = d.ph(1),
+        p2 = d.ph(2),
+        p3 = d.ph(3),
+        p4 = d.ph(4),
+        p5 = d.ph(5)
+    );
+    use crate::orm::{FieldType, Value};
+    let int = |v: i64| (Value::Int(v), FieldType::Int);
+    let params = vec![int(today), int(today), int(id), int(today), int(max)];
+    Ok(crate::orm::execute(&sql, &params).await?.rows_affected() == 1)
 }
 
 impl TokenScope {
@@ -119,7 +150,14 @@ impl TokenScope {
             .as_deref()
             .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect::<Vec<_>>())
             .filter(|v| !v.is_empty());
-        TokenScope { read_only: t.read_only, tables, needs_approval: t.needs_approval, token: t.name.clone() }
+        TokenScope {
+            read_only: t.read_only,
+            tables,
+            needs_approval: t.needs_approval,
+            token: t.name.clone(),
+            token_id: t.id,
+            max_writes_per_day: t.max_writes_per_day,
+        }
     }
 
     /// May this token see `table` at all?
@@ -164,6 +202,9 @@ pub async fn create_scoped_token(
         read_only: scope.read_only,
         tables: scope.tables.as_ref().map(|t| t.join(",")),
         needs_approval: scope.needs_approval,
+        max_writes_per_day: scope.max_writes_per_day,
+        writes_day: 0,
+        writes_count: 0,
     };
     row.save().await?;
     Ok((row, token))

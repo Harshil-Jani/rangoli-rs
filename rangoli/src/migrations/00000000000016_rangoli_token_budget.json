@@ -1,0 +1,7 @@
+{
+  "operations": [
+    { "op": "add_column", "table": "rangoli_api_token", "column": { "name": "max_writes_per_day", "type": "int", "null": true } },
+    { "op": "add_column", "table": "rangoli_api_token", "column": { "name": "writes_day", "type": "int" }, "default": 0 },
+    { "op": "add_column", "table": "rangoli_api_token", "column": { "name": "writes_count", "type": "int" }, "default": 0 }
+  ]
+}

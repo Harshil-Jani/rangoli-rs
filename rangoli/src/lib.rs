@@ -730,7 +730,7 @@ impl App {
         }
         if matches!(cmd, "help" | "--help" | "-h") {
             println!(
-                "commands:\n  runserver [addr]            serve the app (default {})\n  migrate [--check]           apply pending migrations\n  makemigrations [name] [--check]\n  createsuperuser [username]  password from RANGOLI_PASSWORD or a prompt\n  createtoken <username> [name] [--days N] [--read-only] [--needs-approval] [--tables a,b]  print a new API token (shown once)\n  worker                      run background tasks (RANGOLI_WORKERS loops)",
+                "commands:\n  runserver [addr]            serve the app (default {})\n  migrate [--check]           apply pending migrations\n  makemigrations [name] [--check]\n  createsuperuser [username]  password from RANGOLI_PASSWORD or a prompt\n  createtoken <username> [name] [--days N] [--read-only] [--needs-approval] [--tables a,b] [--max-writes N]  print a new API token (shown once)\n  worker                      run background tasks (RANGOLI_WORKERS loops)",
                 s.bind
             );
             return Ok(());
@@ -779,7 +779,7 @@ impl App {
             }
             "createtoken" => {
                 let username = positional.ok_or_else(|| {
-                    Error::Config("usage: createtoken <username> [name] [--days N] [--read-only] [--needs-approval] [--tables a,b]".into())
+                    Error::Config("usage: createtoken <username> [name] [--days N] [--read-only] [--needs-approval] [--tables a,b] [--max-writes N]".into())
                 })?;
                 let user = auth::User::objects().filter(auth::User::USERNAME.eq(username)).get().await?;
                 let args: Vec<String> = std::env::args().collect();
@@ -794,6 +794,9 @@ impl App {
                     read_only: flag("--read-only"),
                     tables: tables.filter(|t| !t.is_empty()),
                     needs_approval: flag("--needs-approval"),
+                    max_writes_per_day: after("--max-writes")
+                        .map(|n| n.parse::<i64>().map_err(|_| Error::Config("--max-writes takes a number".into())))
+                        .transpose()?,
                     ..Default::default()
                 };
                 let ttl = days.map(|d| std::time::Duration::from_secs(d * 86_400));
