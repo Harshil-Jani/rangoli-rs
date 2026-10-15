@@ -96,7 +96,8 @@ impl crate::tasks::Task for Delivery {
             return Ok(()); // turned off since it was queued
         }
         let sig = signature(&hook.secret, &self.body);
-        let status = post(&hook.url, &self.body, &[("x-rangoli-event", &self.event), ("x-rangoli-signature", &sig)]).await?;
+        let headers = [("x-rangoli-event", self.event.as_str()), ("x-rangoli-signature", sig.as_str())];
+        let (status, _) = post(&hook.url, &self.body, &headers, 10).await?;
         if (200..300).contains(&status) {
             Ok(())
         } else {
@@ -105,13 +106,13 @@ impl crate::tasks::Task for Delivery {
     }
 }
 
-/// POST a JSON body and return the status. A minimal HTTP/1.1 client (http and https) over the
-/// hyper and rustls already in the tree, with a 10 second limit.
+/// POST a JSON body; the status and the response body (up to 8 MB). A minimal HTTP/1.1 client
+/// (http and https) over the hyper and rustls already in the tree, with a time limit.
 #[cfg(feature = "webhooks")]
-async fn post(url: &str, body: &str, headers: &[(&str, &str)]) -> Result<u16> {
+pub(crate) async fn post(url: &str, body: &str, headers: &[(&str, &str)], timeout_secs: u64) -> Result<(u16, String)> {
     use http_body_util::Full;
     use hyper_util::rt::TokioIo;
-    let bad = |m: &str| Error::Task(format!("webhook url {url}: {m}"));
+    let bad = |m: &str| Error::Task(format!("{url}: {m}"));
     let (tls, rest) = match url.split_once("://") {
         Some(("https", r)) => (true, r),
         Some(("http", r)) => (false, r),
@@ -148,14 +149,13 @@ async fn post(url: &str, body: &str, headers: &[(&str, &str)]) -> Result<u16> {
         } else {
             exchange(TokioIo::new(tcp), req).await?
         };
-        Ok::<u16, Error>(status)
+        Ok::<_, Error>(status)
     };
-    let status = tokio::time::timeout(std::time::Duration::from_secs(10), send).await.map_err(|_| bad("timed out"))??;
-    Ok(status)
+    tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), send).await.map_err(|_| bad("timed out"))?
 }
 
 #[cfg(feature = "webhooks")]
-async fn exchange<T>(io: T, req: hyper::Request<http_body_util::Full<bytes::Bytes>>) -> Result<u16>
+async fn exchange<T>(io: T, req: hyper::Request<http_body_util::Full<bytes::Bytes>>) -> Result<(u16, String)>
 where
     T: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
@@ -163,13 +163,17 @@ where
     tokio::spawn(async move {
         let _ = conn.await;
     });
+    use http_body_util::BodyExt;
     let res = sender.send_request(req).await.map_err(|e| Error::Task(e.to_string()))?;
-    Ok(res.status().as_u16())
+    let status = res.status().as_u16();
+    let body =
+        http_body_util::Limited::new(res.into_body(), 8 * 1024 * 1024).collect().await.map_err(|e| Error::Task(e.to_string()))?.to_bytes();
+    Ok((status, String::from_utf8_lossy(&body).into_owned()))
 }
 
 #[cfg(not(feature = "webhooks"))]
-async fn post(_: &str, _: &str, _: &[(&str, &str)]) -> Result<u16> {
-    Err(Error::Task("webhooks need the `webhooks` feature".into()))
+pub(crate) async fn post(_: &str, _: &str, _: &[(&str, &str)], _: u64) -> Result<(u16, String)> {
+    Err(Error::Task("outgoing HTTP needs the `webhooks` feature".into()))
 }
 
 #[cfg(test)]

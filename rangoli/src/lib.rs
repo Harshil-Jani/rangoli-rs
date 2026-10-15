@@ -13,6 +13,7 @@
 extern crate self as rangoli;
 
 pub mod admin;
+pub mod ai;
 pub mod api;
 pub mod approvals;
 pub mod auth;
